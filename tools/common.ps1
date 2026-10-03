@@ -23,10 +23,15 @@ function Write-Step($text) {
     Write-Host "==> $text" -ForegroundColor Cyan
 }
 
+# Runs a native command and stops the build if it fails. Deliberately a plain
+# function (no param block) so PowerShell passes flags like -S / -B / -G
+# straight through instead of trying to bind them as parameters.
 function Invoke-Checked {
-    param([string]$Exe, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-    & $Exe @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
+    $exe = $args[0]
+    $rest = @($args | Select-Object -Skip 1)
+    & $exe @rest
+    if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
+}
 }
 
 # Puts cl.exe, lib.exe, msbuild and the Windows SDK on PATH (x64).
