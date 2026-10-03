@@ -1,0 +1,48 @@
+{
+  "id": "matcha",
+  "name": "Matcha",
+  "author": "ONYX 3DS",
+  "description": "Calm green paper tones with soft daylight.",
+  "colors": {
+    "background_top": "#F3F6EC",
+    "background_bottom": "#CFDDBF",
+    "accent": "#5C9E4F",
+    "accent_text": "#FFFFFF",
+    "text": "#3F4A38",
+    "text_muted": "#7D8A72",
+    "tile_face": "#FBFCF7",
+    "tile_edge": "#AEBF9E",
+    "tile_glow": "#86C46F",
+    "bar": "#E6EDDB",
+    "bar_text": "#4F5C46",
+    "panel": "#FBFCF7EE"
+  },
+  "textures": {
+    "background": "background.jpg",
+    "background_far": "background_far.png",
+    "background_near": "background_near.png",
+    "tile_frame": "tile_frame.png",
+    "tile_gloss": "tile_gloss.png",
+    "tile_empty": "tile_empty.png",
+    "bar": "bar.png",
+    "button": "button.png",
+    "cursor": "cursor.png"
+  },
+  "audio": {
+    "music": "../../Audio/aero-channel.m4a",
+    "move": "../../Audio/move.wav",
+    "select": "../../Audio/select.wav",
+    "back": "../../Audio/back.wav",
+    "launch": "../../Audio/launch.wav"
+  },
+  "style": {
+    "tile_corner_radius": 20,
+    "tile_depth": 10,
+    "tile_tilt": 4,
+    "parallax": 0.8,
+    "hover_scale": 1.06,
+    "empty_slots": 12,
+    "show_clock": true,
+    "font": "Segoe UI Variable Display"
+  }
+}

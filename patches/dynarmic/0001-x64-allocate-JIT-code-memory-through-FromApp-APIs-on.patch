@@ -1,0 +1,38 @@
+From 73491dfeddbbff913fdf46e4c940d8f87b7d1588 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sat, 3 Oct 2026 15:10:15 -0400
+Subject: [PATCH] x64: allocate JIT code memory through *FromApp APIs on UWP
+
+Xbox Dev Mode apps can only obtain executable memory with VirtualAllocFromApp
+and VirtualProtectFromApp (with the codeGeneration capability), and pages may
+not be writable and executable at once, so UWP builds require W^X mode.
+---
+ src/dynarmic/backend/x64/block_of_code.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/dynarmic/backend/x64/block_of_code.cpp b/src/dynarmic/backend/x64/block_of_code.cpp
+index 22d9868..df38548 100644
+--- a/src/dynarmic/backend/x64/block_of_code.cpp
++++ b/src/dynarmic/backend/x64/block_of_code.cpp
+@@ -8,6 +8,18 @@
+ #ifdef _WIN32
+ #    define WIN32_LEAN_AND_MEAN
+ #    include <windows.h>
++#    include <winapifamily.h>
++#    if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) && !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++// UWP (Xbox Dev Mode): JIT memory must come from the *FromApp allocators and the
++// package must declare the codeGeneration capability. Executable pages may not
++// also be writable there, so UWP builds need DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT.
++#        include <memoryapi.h>
++#        ifndef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
++#            error "UWP builds must set DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=ON (W^X)"
++#        endif
++#        define VirtualAlloc(addr, size, type, prot) VirtualAllocFromApp(addr, size, type, prot)
++#        define VirtualProtect(addr, size, prot, old) VirtualProtectFromApp(addr, size, prot, old)
++#    endif
+ #else
+ #    include <sys/mman.h>
+ #endif
+-- 
+2.43.0
+

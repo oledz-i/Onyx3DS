@@ -1,0 +1,78 @@
+From 59896d9d5b2186ae8366dbfce217cdd91b61c2fb Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sat, 3 Oct 2026 15:21:56 -0400
+Subject: [PATCH 4/4] libretro: implement retro_cheat_reset/retro_cheat_set
+
+Back the libretro cheat interface with Azahar's cheat engine so frontends can
+toggle Gateway/Action Replay cheats while a game runs.
+---
+ externals/dynarmic                    |  2 +-
+ src/citra_libretro/citra_libretro.cpp | 33 +++++++++++++++++++++++++--
+ 2 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/externals/dynarmic b/externals/dynarmic
+index e77b1ba..73491df 160000
+--- a/externals/dynarmic
++++ b/externals/dynarmic
+@@ -1 +1 @@
+-Subproject commit e77b1ba0b7da7cbe93021b01a663acfe7c4dd516
++Subproject commit 73491dfeddbbff913fdf46e4c940d8f87b7d1588
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index 8a65f9d..34133d0 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <algorithm>
+ #include <list>
+ #include <numeric>
+ #include <vector>
+@@ -42,6 +43,9 @@
+ #include "common/settings.h"
+ #include "common/string_util.h"
+ #include "core/core.h"
++#include <fmt/format.h>
++#include "core/cheats/cheats.h"
++#include "core/cheats/gateway_cheat.h"
+ #include "core/frontend/applets/default_applets.h"
+ #include "core/frontend/image_interface.h"
+ #include "core/hle/kernel/kernel.h"
+@@ -747,6 +751,31 @@ size_t retro_get_memory_size(unsigned id) {
+     return 0;
+ }
+ 
+-void retro_cheat_reset() {}
++/**
++ * libretro cheat interface, backed by Azahar's cheat engine so a frontend can
++ * switch Gateway/Action Replay cheats on and off while a game is running.
++ * retro_cheat_reset() clears every active cheat (including ones Azahar loaded
++ * from the cheats folder at boot); the frontend then re-adds the full set.
++ * `code` holds the cheat's lines separated by '\n' or '+'.
++ */
++void retro_cheat_reset() {
++    if (!emu_instance || !emu_instance->game_loaded) {
++        return;
++    }
++    auto& engine = Core::System::GetInstance().CheatEngine();
++    while (!engine.GetCheats().empty()) {
++        engine.RemoveCheat(engine.GetCheats().size() - 1);
++    }
++}
+ 
+-void retro_cheat_set(unsigned index, bool enabled, const char* code) {}
++void retro_cheat_set(unsigned index, bool enabled, const char* code) {
++    if (!emu_instance || !emu_instance->game_loaded || code == nullptr) {
++        return;
++    }
++    std::string text(code);
++    std::replace(text.begin(), text.end(), '+', '\n');
++    auto cheat = std::make_shared<Cheats::GatewayCheat>(fmt::format("libretro cheat {}", index),
++                                                        std::move(text), std::string{});
++    cheat->SetEnabled(enabled);
++    Core::System::GetInstance().CheatEngine().AddCheat(std::move(cheat));
++}
+-- 
+2.43.0
+

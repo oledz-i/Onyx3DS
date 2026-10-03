@@ -1,0 +1,77 @@
+From f208839c75bb2ae6b1af9ff952da52a570e4da90 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sat, 3 Oct 2026 15:09:51 -0400
+Subject: [PATCH 3/4] libretro: optional static core, MSVC-safe link flags,
+ timeline semaphores on request
+
+LIBRETRO_STATIC_CORE builds azahar_libretro as a static library so a host
+application can link the core directly. When the frontend lists
+VK_KHR_timeline_semaphore among its required device extensions, enable the
+matching feature so it can share a fence with another graphics API.
+---
+ src/citra_libretro/CMakeLists.txt  | 13 +++++++++++--
+ src/citra_libretro/libretro_vk.cpp | 17 +++++++++++++++++
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/src/citra_libretro/CMakeLists.txt b/src/citra_libretro/CMakeLists.txt
+index e28f994..0bcfe9f 100644
+--- a/src/citra_libretro/CMakeLists.txt
++++ b/src/citra_libretro/CMakeLists.txt
+@@ -24,7 +24,16 @@ if(ENABLE_VULKAN)
+     target_link_libraries(citra_libretro_common PRIVATE sirit vulkan-headers vma)
+ endif()
+ 
+-add_library(citra_libretro SHARED
++# A frontend that links the core directly (the Xbox/UWP host cannot load
++# arbitrary DLLs) builds it as a static library instead.
++option(LIBRETRO_STATIC_CORE "Build the libretro core as a static library" OFF)
++if(LIBRETRO_STATIC_CORE)
++    set(_LIBRETRO_LIB_TYPE STATIC)
++else()
++    set(_LIBRETRO_LIB_TYPE SHARED)
++endif()
++
++add_library(citra_libretro ${_LIBRETRO_LIB_TYPE}
+         citra_libretro.cpp
+         citra_libretro.h
+         $<TARGET_OBJECTS:citra_libretro_common>)
+@@ -94,7 +103,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
+     CMAKE_SYSTEM_NAME STREQUAL "iOS" OR
+     CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+   target_link_libraries(citra_libretro PRIVATE "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/libretro.osx.def")
+-else()
++elseif(NOT MSVC)
+   target_link_libraries(citra_libretro PRIVATE "-Wl,-Bsymbolic")
+ endif()
+ 
+diff --git a/src/citra_libretro/libretro_vk.cpp b/src/citra_libretro/libretro_vk.cpp
+index 8a1ac0a..1589c90 100644
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -180,6 +180,23 @@ bool CreateVulkanDevice(struct retro_vulkan_context* context, VkInstance instanc
+         enabled_features.pNext = &custom_border_color_features;
+     }
+ 
++    // Frontends that share images and fences with another API (e.g. a D3D12
++    // presenter on Xbox) synchronise through timeline semaphores. Enable the
++    // feature when the frontend asked for the extension and the GPU has it.
++    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR timeline_features{
++        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR};
++    bool frontend_wants_timeline = false;
++    for (const char* ext : enabled_exts) {
++        if (ext && !strcmp(ext, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) {
++            frontend_wants_timeline = true;
++        }
++    }
++    if (frontend_wants_timeline) {
++        timeline_features.timelineSemaphore = VK_TRUE;
++        timeline_features.pNext = enabled_features.pNext;
++        enabled_features.pNext = &timeline_features;
++    }
++
+     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+     device_info.queueCreateInfoCount = 1;
+     device_info.pQueueCreateInfos = &queue_info;
+-- 
+2.43.0
+

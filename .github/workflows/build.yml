@@ -1,0 +1,53 @@
+# Builds ONYX 3DS on every push: unit tests on Linux, the full Xbox package
+# on Windows. The .msix and its signing certificate are uploaded as an
+# artifact you can install from the Xbox Device Portal.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S shell -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ./build/onyx_shell_tests
+
+  xbox-package:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build tools for Mesa
+        run: |
+          pip install meson ninja mako pyyaml packaging
+          choco install winflexbison3 -y --no-progress
+      - name: Cache sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/azahar
+            deps/mesa
+            deps/bin/dxil.dll
+          key: deps-${{ hashFiles('patches/**') }}
+      - name: Build everything
+        shell: pwsh
+        run: ./tools/build-all.ps1 -Configuration Release
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ONYX3DS-xbox
+          path: |
+            out/AppPackages/**
+            out/ONYX3DS.cer
+          if-no-files-found: error

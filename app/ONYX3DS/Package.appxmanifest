@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <!-- Publisher must match the signing certificate (tools/build-app.ps1 makes
+       a self-signed "CN=ONYX3DS" one). -->
+  <Identity Name="ONYX3DS" Publisher="CN=ONYX3DS" Version="0.1.0.0" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>ONYX 3DS</DisplayName>
+    <PublisherDisplayName>ONYX 3DS</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="ONYX3DS.App">
+      <uap:VisualElements
+        DisplayName="ONYX 3DS"
+        Description="Nintendo 3DS emulator for Xbox, powered by Azahar"
+        BackgroundColor="#101218"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" ShortName="ONYX 3DS">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#101218" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- Declaring the 3DS file types lets the app enumerate them on USB
+             drives through the removableStorage capability. -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="n3ds">
+            <uap:DisplayName>Nintendo 3DS software</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.3ds</uap:FileType>
+              <uap:FileType>.cci</uap:FileType>
+              <uap:FileType>.cxi</uap:FileType>
+              <uap:FileType>.cia</uap:FileType>
+              <uap:FileType>.3dsx</uap:FileType>
+              <uap:FileType>.zcci</uap:FileType>
+              <uap:FileType>.zcxi</uap:FileType>
+              <uap:FileType>.z3dsx</uap:FileType>
+              <uap:FileType>.zcia</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <!-- JIT: dynarmic generates ARM->x64 code at runtime -->
+    <Capability Name="codeGeneration" />
+    <uap:Capability Name="removableStorage" />
+    <uap:Capability Name="musicLibrary" />
+    <!-- Read games, texture packs and mods anywhere on USB drives through the
+         *FromApp file APIs -->
+    <rescap:Capability Name="broadFileSystemAccess" />
+    <!-- Full Game-mode resources on Xbox (memory, GPU, exclusive CPU cores) -->
+    <rescap:Capability Name="expandedResources" />
+  </Capabilities>
+</Package>

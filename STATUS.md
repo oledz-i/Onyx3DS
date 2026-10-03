@@ -1,0 +1,29 @@
+# ONYX 3DS — status (Oct 3, 2026 checkpoint)
+
+## What works and is verified
+- `shell/` (game library, 3DS header/icon parsing, settings, per-game overrides,
+  folder remapping, cheat database client, SteamGridDB, RetroAchievements via
+  rcheevos, themes): builds and passes 33 unit tests (188 assertions) under ASan/UBSan.
+- Azahar patches (`patches/azahar`, `patches/dynarmic`): UWP file access through
+  *FromApp APIs, USB folder remapping hook, static libretro core, timeline-semaphore
+  opt-in, working libretro cheat toggling, W^X JIT for Xbox. Syntax-checked for
+  Linux, Windows desktop and UWP.
+- Mesa/Dozen patch (`patches/mesa`): builds Dozen without LoadLibrary for UWP.
+  Syntax-checked for desktop and UWP.
+- App non-page code (Vulkan->D3D12 bridge, presenter, audio, input, emulator
+  session, services, UI kit): compiles against real C++/WinRT headers (MinGW check).
+- Themes (5), menu music (3 original tracks), UI sounds, logos: generated, included.
+
+## Not yet verified
+- XAML pages: last check pass found member-vs-type name clashes (FontFamily, Style,
+  CornerRadius). A fix was applied but not re-checked; SettingsPage/EmulationPage/
+  FolderPage/App results were still pending when the session stopped.
+- Nothing has been built with MSVC or run on an Xbox yet. The biggest unknowns:
+  1. Dozen building and loading inside a UWP app on Xbox (patches/mesa + build-dozen.ps1)
+  2. Azahar compiling as WindowsStore (expect a few more UWP API fixes)
+  3. Real 30-60 FPS on Series S — measured only once it runs.
+
+## Next steps
+1. Re-run the page syntax checks; fix what remains.
+2. Push to GitHub and let `.github/workflows/build.yml` build on Windows; fix MSVC errors.
+3. Install the .msix via Device Portal, set App type to Game, open Settings > System check.

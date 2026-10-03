@@ -1,0 +1,48 @@
+{
+  "id": "aero-channel",
+  "name": "Aero Channel",
+  "author": "ONYX 3DS",
+  "description": "Bright, airy and glassy, with soft light and floating bubbles. The default.",
+  "colors": {
+    "background_top": "#F8FBFD",
+    "background_bottom": "#D5E3EE",
+    "accent": "#2FB4E9",
+    "accent_text": "#FFFFFF",
+    "text": "#4B5866",
+    "text_muted": "#8C99A6",
+    "tile_face": "#FFFFFF",
+    "tile_edge": "#AFC2D1",
+    "tile_glow": "#5CCBF5",
+    "bar": "#E8EEF3",
+    "bar_text": "#5B6875",
+    "panel": "#FFFFFFEE"
+  },
+  "textures": {
+    "background": "background.jpg",
+    "background_far": "background_far.png",
+    "background_near": "background_near.png",
+    "tile_frame": "tile_frame.png",
+    "tile_gloss": "tile_gloss.png",
+    "tile_empty": "tile_empty.png",
+    "bar": "bar.png",
+    "button": "button.png",
+    "cursor": "cursor.png"
+  },
+  "audio": {
+    "music": "../../Audio/aero-channel.m4a",
+    "move": "../../Audio/move.wav",
+    "select": "../../Audio/select.wav",
+    "back": "../../Audio/back.wav",
+    "launch": "../../Audio/launch.wav"
+  },
+  "style": {
+    "tile_corner_radius": 18,
+    "tile_depth": 12,
+    "tile_tilt": 6,
+    "parallax": 1.0,
+    "hover_scale": 1.08,
+    "empty_slots": 12,
+    "show_clock": true,
+    "font": "Segoe UI Variable Display"
+  }
+}

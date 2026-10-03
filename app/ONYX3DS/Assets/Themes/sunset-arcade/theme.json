@@ -1,0 +1,48 @@
+{
+  "id": "sunset-arcade",
+  "name": "Sunset Arcade",
+  "author": "ONYX 3DS",
+  "description": "Warm dusk gradient, neon haze and a retro horizon.",
+  "colors": {
+    "background_top": "#2A1748",
+    "background_bottom": "#FF7E5F",
+    "accent": "#FF4F9A",
+    "accent_text": "#FFFFFF",
+    "text": "#FFF3EA",
+    "text_muted": "#F2C1B4",
+    "tile_face": "#2B1838",
+    "tile_edge": "#FF9F7A",
+    "tile_glow": "#FF5FA8",
+    "bar": "#24122F",
+    "bar_text": "#FFD8C9",
+    "panel": "#2A1636EE"
+  },
+  "textures": {
+    "background": "background.jpg",
+    "background_far": "background_far.png",
+    "background_near": "background_near.png",
+    "tile_frame": "tile_frame.png",
+    "tile_gloss": "tile_gloss.png",
+    "tile_empty": "tile_empty.png",
+    "bar": "bar.png",
+    "button": "button.png",
+    "cursor": "cursor.png"
+  },
+  "audio": {
+    "music": "../../Audio/sunset-arcade.m4a",
+    "move": "../../Audio/move.wav",
+    "select": "../../Audio/select.wav",
+    "back": "../../Audio/back.wav",
+    "launch": "../../Audio/launch.wav"
+  },
+  "style": {
+    "tile_corner_radius": 14,
+    "tile_depth": 16,
+    "tile_tilt": 8,
+    "parallax": 1.2,
+    "hover_scale": 1.09,
+    "empty_slots": 8,
+    "show_clock": true,
+    "font": "Bahnschrift"
+  }
+}

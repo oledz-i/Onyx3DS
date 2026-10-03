@@ -1,0 +1,396 @@
+From 1aefe46950d3ad31bd2d7641e5861c265a895fe2 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sat, 3 Oct 2026 15:09:24 -0400
+Subject: [PATCH 1/4] common: UWP file access through *FromApp APIs and a
+ frontend path translator
+
+Xbox Dev Mode apps run in an app container, so the desktop Win32 file APIs
+cannot reach removable storage. Route Azahar's Win32 file calls through the
+*FromApp variants when building for UWP, and add FileUtil::SetPathTranslator
+so a frontend can point texture packs, mods and cheats at user-chosen folders.
+Console logging and LoadLibraryA are replaced with UWP-safe equivalents.
+---
+ .../dynamic_library/dynamic_library.cpp       |   7 +
+ src/common/file_util.cpp                      | 122 +++++++++++++++---
+ src/common/file_util.h                        |  10 ++
+ src/common/logging/text_formatter.cpp         |   7 +
+ src/common/uwp_compat.h                       |  18 +++
+ 5 files changed, 145 insertions(+), 19 deletions(-)
+ create mode 100644 src/common/uwp_compat.h
+
+diff --git a/src/common/dynamic_library/dynamic_library.cpp b/src/common/dynamic_library/dynamic_library.cpp
+index ba9d327..7453587 100644
+--- a/src/common/dynamic_library/dynamic_library.cpp
++++ b/src/common/dynamic_library/dynamic_library.cpp
+@@ -3,6 +3,8 @@
+ // Refer to the license.txt file included.
+ 
+ #include <fmt/format.h>
++#include "common/uwp_compat.h"
++#include "common/string_util.h"
+ #if defined(_WIN32)
+ #include <windows.h>
+ #else
+@@ -34,7 +36,12 @@ DynamicLibrary::~DynamicLibrary() {
+ 
+ bool DynamicLibrary::Load(std::string_view filename) {
+ #if defined(_WIN32)
++#ifdef CITRA_UWP
++    handle = reinterpret_cast<void*>(
++        LoadPackagedLibrary(Common::UTF8ToUTF16W(std::string(filename)).c_str(), 0));
++#else
+     handle = reinterpret_cast<void*>(LoadLibraryA(filename.data()));
++#endif
+     if (!handle) {
+         DWORD error_message_id = GetLastError();
+         LPSTR message_buffer = nullptr;
+diff --git a/src/common/file_util.cpp b/src/common/file_util.cpp
+index 3168a26..84c59e8 100644
+--- a/src/common/file_util.cpp
++++ b/src/common/file_util.cpp
+@@ -7,6 +7,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <array>
++#include <atomic>
+ #include <fstream>
+ #include <limits>
+ #include <memory>
+@@ -27,8 +28,13 @@
+ #include "common/scope_exit.h"
+ #include "common/string_util.h"
+ 
++#include "common/uwp_compat.h"
++
+ #ifdef _WIN32
+ #include <windows.h>
++#ifdef CITRA_UWP
++#include <fileapifromapp.h>
++#endif
+ // windows.h needs to be included before other windows headers
+ #include <direct.h> // getcwd
+ #include <io.h>
+@@ -90,6 +96,53 @@ typedef struct stat file_stat_t;
+ #include <algorithm>
+ #include <sys/stat.h>
+ 
++#ifdef CITRA_UWP
++// UWP: route the Win32 file calls below through the *FromApp variants so that
++// folders the user granted (USB drives, broadFileSystemAccess) are reachable.
++namespace {
++int UwpWStat64(const wchar_t* path, struct _stat64* out) {
++    WIN32_FILE_ATTRIBUTE_DATA data{};
++    if (!GetFileAttributesExFromAppW(path, GetFileExInfoStandard, &data)) {
++        return -1;
++    }
++    *out = {};
++    const bool is_dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
++    out->st_mode = static_cast<unsigned short>(is_dir ? _S_IFDIR : _S_IFREG);
++    out->st_size = (static_cast<__int64>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
++    return 0;
++}
++
++HANDLE UwpCreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES, DWORD creation,
++                      DWORD attributes, HANDLE) {
++    CREATEFILE2_EXTENDED_PARAMETERS params{};
++    params.dwSize = sizeof(params);
++    params.dwFileAttributes = attributes;
++    return CreateFile2FromAppW(name, access, share, creation, &params);
++}
++
++BOOL UwpMoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
++    if ((flags & MOVEFILE_REPLACE_EXISTING) != 0) {
++        DeleteFileFromAppW(to); // MoveFileFromAppW never overwrites
++    }
++    return MoveFileFromAppW(from, to);
++}
++
++HANDLE UwpFindFirstFileW(LPCWSTR pattern, LPWIN32_FIND_DATAW data) {
++    return FindFirstFileExFromAppW(pattern, FindExInfoBasic, data, FindExSearchNameMatch, nullptr,
++                                   0);
++}
++} // namespace
++
++#define _wstat64 UwpWStat64
++#define CreateFileW UwpCreateFileW
++#define MoveFileExW UwpMoveFileExW
++#define FindFirstFileW UwpFindFirstFileW
++#define CreateDirectoryW CreateDirectoryFromAppW
++#define RemoveDirectoryW RemoveDirectoryFromAppW
++#define DeleteFileW DeleteFileFromAppW
++#define CopyFileW CopyFileFromAppW
++#endif // CITRA_UWP
++
+ #ifndef S_ISDIR
+ #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+ #endif
+@@ -155,7 +208,21 @@ static void StripTailDirSlashes(std::string& fname) {
+     fname.resize(i);
+ }
+ 
+-bool Exists(const std::string& filename) {
++namespace {
++std::atomic<PathTranslator> g_path_translator{nullptr};
++} // anonymous namespace
++
++void SetPathTranslator(PathTranslator translator) {
++    g_path_translator.store(translator);
++}
++
++std::string TranslatePath(const std::string& path) {
++    const PathTranslator translator = g_path_translator.load();
++    return translator ? translator(path) : path;
++}
++
++bool Exists(const std::string& filename_in) {
++    const std::string filename = TranslatePath(filename_in);
+     std::string copy(filename);
+     StripTailDirSlashes(copy);
+ 
+@@ -182,7 +249,8 @@ bool Exists(const std::string& filename) {
+     return (result == 0);
+ }
+ 
+-bool IsDirectory(const std::string& filename) {
++bool IsDirectory(const std::string& filename_in) {
++    const std::string filename = TranslatePath(filename_in);
+ 
+     std::string copy(filename);
+     StripTailDirSlashes(copy);
+@@ -215,7 +283,8 @@ bool IsDirectory(const std::string& filename) {
+     return S_ISDIR(file_info.st_mode);
+ }
+ 
+-bool Delete(const std::string& filepath) {
++bool Delete(const std::string& filepath_in) {
++    const std::string filepath = TranslatePath(filepath_in);
+     LOG_TRACE(Common_Filesystem, "file {}", filepath);
+ 
+     // Return true because we care about the file no
+@@ -281,7 +350,8 @@ bool Delete(const std::string& filepath) {
+     return true;
+ }
+ 
+-bool CreateDir(const std::string& path) {
++bool CreateDir(const std::string& path_in) {
++    const std::string path = TranslatePath(path_in);
+     LOG_TRACE(Common_Filesystem, "directory {}", path);
+ #ifdef _WIN32
+     if (::CreateDirectoryW(Common::UTF8ToUTF16W(path).c_str(), nullptr))
+@@ -384,7 +454,8 @@ bool CreateFullPath(const std::string& fullPath) {
+     }
+ }
+ 
+-bool DeleteDir(const std::string& filename) {
++bool DeleteDir(const std::string& filename_in) {
++    const std::string filename = TranslatePath(filename_in);
+     LOG_TRACE(Common_Filesystem, "directory {}", filename);
+ 
+     // check if a directory
+@@ -413,7 +484,9 @@ bool DeleteDir(const std::string& filename) {
+     return false;
+ }
+ 
+-bool Rename(const std::string& srcFullPath, const std::string& destFullPath) {
++bool Rename(const std::string& srcFullPath_in, const std::string& destFullPath_in) {
++    const std::string srcFullPath = TranslatePath(srcFullPath_in);
++    const std::string destFullPath = TranslatePath(destFullPath_in);
+     LOG_TRACE(Common_Filesystem, "{} --> {}", srcFullPath, destFullPath);
+ #ifdef _WIN32
+     if (MoveFileExW(Common::UTF8ToUTF16W(srcFullPath).c_str(),
+@@ -440,7 +513,9 @@ bool Rename(const std::string& srcFullPath, const std::string& destFullPath) {
+     return false;
+ }
+ 
+-bool Copy(const std::string& srcFilename, const std::string& destFilename) {
++bool Copy(const std::string& srcFilename_in, const std::string& destFilename_in) {
++    const std::string srcFilename = TranslatePath(srcFilename_in);
++    const std::string destFilename = TranslatePath(destFilename_in);
+     LOG_TRACE(Common_Filesystem, "{} --> {}", srcFilename, destFilename);
+ #ifdef _WIN32
+     if (CopyFileW(Common::UTF8ToUTF16W(srcFilename).c_str(),
+@@ -509,7 +584,8 @@ bool Copy(const std::string& srcFilename, const std::string& destFilename) {
+ #endif
+ }
+ 
+-u64 GetSize(const std::string& filename) {
++u64 GetSize(const std::string& filename_in) {
++    const std::string filename = TranslatePath(filename_in);
+     if (!Exists(filename)) {
+         LOG_ERROR(Common_Filesystem, "failed {}: No such file", filename);
+         return 0;
+@@ -651,7 +727,7 @@ bool ForeachDirectoryEntry(u64* num_entries_out, const std::string& directory,
+                            DirectoryEntryCallable callback) {
+     LOG_TRACE(Common_Filesystem, "directory {}", directory);
+ 
+-    const auto entries = ListDirectoryEntries(directory);
++    const auto entries = ListDirectoryEntries(TranslatePath(directory));
+     if (!entries.has_value()) {
+         return false;
+     }
+@@ -864,6 +940,11 @@ const std::string& GetExeDirectory() {
+ }
+ 
+ std::string AppDataRoamingDirectory() {
++#ifdef CITRA_UWP
++    // Placeholder only: UWP frontends call SetUserPath() with the app's
++    // LocalState folder before any user path is used.
++    return GetExeDirectory();
++#else
+     PWSTR path = nullptr;
+ 
+     const HRESULT hr =
+@@ -874,6 +955,7 @@ std::string AppDataRoamingDirectory() {
+     std::string result = Common::UTF16ToUTF8(path);
+     CoTaskMemFree(path);
+     return result;
++#endif
+ }
+ #else
+ /**
+@@ -1277,14 +1359,16 @@ void IOFile::Swap(IOFile& other) noexcept {
+ 
+ bool IOFile::Open() {
+     Close();
++    // Resolve frontend path remapping once; `filename` stays as requested.
++    const std::string open_path = TranslatePath(filename);
+ 
+     // Any filename with the format fd://<file_descriptor> represents a file that
+     // must be opened by duplicating the provided file_descriptor. This is used
+     // on Android vanilla builds when the ROM absolute path is not known.
+-    if (filename.starts_with("fd://")) {
++    if (open_path.starts_with("fd://")) {
+ 
+ #if !defined(HAVE_LIBRETRO_VFS)
+-        const std::string fd_str = filename.substr(5);
++        const std::string fd_str = open_path.substr(5);
+ 
+         // Check that fd_str is not empty and contains only digits
+         if (fd_str.empty() || !std::all_of(fd_str.begin(), fd_str.end(), ::isdigit)) {
+@@ -1321,7 +1405,7 @@ bool IOFile::Open() {
+     // flags. This mimics linux behaviour as much as possible, which
+     // the 3DS also does.
+ 
+-    const std::wstring wfilename = Common::UTF8ToUTF16W(filename);
++    const std::wstring wfilename = Common::UTF8ToUTF16W(open_path);
+ 
+     DWORD access = 0;
+     DWORD creation = OPEN_EXISTING;
+@@ -1361,7 +1445,7 @@ bool IOFile::Open() {
+ 
+ #elif defined(ANDROID) && !defined(HAVE_LIBRETRO_VFS)
+     if (AndroidUtils::CanUseRawFS()) {
+-        m_file = FOPEN(AndroidUtils::TranslateFilePath(filename).c_str(), openmode.c_str());
++        m_file = FOPEN(AndroidUtils::TranslateFilePath(open_path).c_str(), openmode.c_str());
+     } else {
+         // Check whether filepath is startsWith content
+         AndroidUtils::AndroidOpenMode android_open_mode = AndroidUtils::ParseOpenmode(openmode);
+@@ -1371,29 +1455,29 @@ bool IOFile::Open() {
+             android_open_mode == AndroidUtils::AndroidOpenMode::WRITE_TRUNCATE ||
+             android_open_mode == AndroidUtils::AndroidOpenMode::READ_WRITE_TRUNCATE ||
+             android_open_mode == AndroidUtils::AndroidOpenMode::READ_WRITE_APPEND) {
+-            if (!FileUtil::Exists(filename)) {
+-                std::string directory(GetParentPath(filename));
+-                std::string display_name(GetFilename(filename));
++            if (!FileUtil::Exists(open_path)) {
++                std::string directory(GetParentPath(open_path));
++                std::string display_name(GetFilename(open_path));
+                 if (!AndroidUtils::CreateFile(directory, display_name)) {
+                     m_good = m_file != nullptr;
+                     return m_good;
+                 }
+             }
+         }
+-        m_fd = AndroidUtils::OpenContentUri(filename, android_open_mode);
++        m_fd = AndroidUtils::OpenContentUri(open_path, android_open_mode);
+         if (m_fd != -1) {
+             int error_num = 0;
+             m_file = fdopen(m_fd, openmode.c_str());
+             error_num = errno;
+             if (error_num != 0 && m_file == nullptr) {
+-                LOG_ERROR(Common_Filesystem, "Error on file: {}, error: {}", filename,
++                LOG_ERROR(Common_Filesystem, "Error on file: {}, error: {}", open_path,
+                           strerror(error_num));
+             }
+         }
+     }
+     m_good = m_file != nullptr;
+ #else
+-    m_file = FOPEN(filename.c_str(), openmode.c_str());
++    m_file = FOPEN(open_path.c_str(), openmode.c_str());
+     m_good = m_file != nullptr;
+ #endif
+ 
+diff --git a/src/common/file_util.h b/src/common/file_util.h
+index 3eed0a1..4848c49 100644
+--- a/src/common/file_util.h
++++ b/src/common/file_util.h
+@@ -212,6 +212,16 @@ void CopyDir(const std::string& source_path, const std::string& dest_path);
+ // Set the current directory to given directory
+ bool SetCurrentDir(const std::string& directory);
+ 
++/**
++ * Optional hook that rewrites every path before it reaches the OS. Frontends
++ * use it to point fixed parts of the user directory (texture packs, mods,
++ * cheats) at folders elsewhere, e.g. on removable storage. Passing nullptr
++ * restores the identity mapping. The translator must be thread-safe.
++ */
++using PathTranslator = std::string (*)(const std::string& path);
++void SetPathTranslator(PathTranslator translator);
++[[nodiscard]] std::string TranslatePath(const std::string& path);
++
+ void SetUserPath(const std::string& path = "");
+ 
+ void SetCurrentRomPath(const std::string& path);
+diff --git a/src/common/logging/text_formatter.cpp b/src/common/logging/text_formatter.cpp
+index 753e500..54e8d5f 100644
+--- a/src/common/logging/text_formatter.cpp
++++ b/src/common/logging/text_formatter.cpp
+@@ -5,6 +5,7 @@
+ #include <array>
+ #include <cstdio>
+ 
++#include "common/uwp_compat.h"
+ #ifdef _WIN32
+ #include <windows.h>
+ #elif defined(ANDROID)
+@@ -37,6 +38,12 @@ void PrintMessage(const Entry& entry) {
+ }
+ 
+ void PrintColoredMessage(const Entry& entry) {
++#ifdef CITRA_UWP
++    // No console in an app container: log uncoloured (OutputDebugString is
++    // handled by the debugger backend).
++    PrintMessage(entry);
++    return;
++#endif
+ #ifdef _WIN32
+     HANDLE console_handle = GetStdHandle(STD_ERROR_HANDLE);
+     if (console_handle == INVALID_HANDLE_VALUE) {
+diff --git a/src/common/uwp_compat.h b/src/common/uwp_compat.h
+new file mode 100644
+index 0000000..b13fd70
+--- /dev/null
++++ b/src/common/uwp_compat.h
+@@ -0,0 +1,18 @@
++// Copyright 2026 ONYX 3DS contributors
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++//
++// Detects Universal Windows Platform builds (Xbox Dev Mode). UWP apps run in
++// an app container: desktop-only Win32 calls are missing at link time, and
++// files outside the package (for example a USB drive) can only be reached
++// through the *FromApp variants of the file APIs.
++
++#pragma once
++
++#if defined(_WIN32)
++#include <winapifamily.h>
++#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) &&                                              \
++    !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++#define CITRA_UWP 1
++#endif
++#endif
+-- 
+2.43.0
+

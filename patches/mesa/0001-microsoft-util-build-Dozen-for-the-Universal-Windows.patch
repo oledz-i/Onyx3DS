@@ -1,0 +1,296 @@
+From 3fa8a80e5295ca4981fa86febf91302dba21dbd6 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sat, 3 Oct 2026 15:11:31 -0400
+Subject: [PATCH] microsoft,util: build Dozen for the Universal Windows
+ Platform
+
+Universal Windows Platform apps (Xbox Dev Mode) cannot call LoadLibrary or
+desktop-only Win32 APIs. When MESA_UWP is defined:
+- hand out the few D3D12/DXGI entry points Dozen looks up from the import
+  libraries, and load package-local DLLs (DXIL.dll) with LoadPackagedLibrary;
+- skip D3D12Core.dll side-loading and the profile-folder stdio redirects;
+- use CreateFileMappingFromApp, and skip console and dbghelp lookups.
+---
+ src/microsoft/compiler/dxil_validator.cpp | 19 ++++++
+ src/microsoft/vulkan/dzn_device.c         |  8 +++
+ src/microsoft/vulkan/dzn_dxgi.c           |  6 +-
+ src/util/anon_file.c                      |  5 ++
+ src/util/os_misc.c                        |  2 +-
+ src/util/u_debug_symbol.c                 |  4 +-
+ src/util/u_dl.c                           | 75 ++++++++++++++++++++++-
+ 7 files changed, 111 insertions(+), 8 deletions(-)
+
+diff --git a/src/microsoft/compiler/dxil_validator.cpp b/src/microsoft/compiler/dxil_validator.cpp
+index fab8c85..3d9eb6b 100644
+--- a/src/microsoft/compiler/dxil_validator.cpp
++++ b/src/microsoft/compiler/dxil_validator.cpp
+@@ -27,6 +27,20 @@ extern "C" {
+ extern IMAGE_DOS_HEADER __ImageBase;
+ }
+ 
++#if defined(MESA_UWP)
++/* UWP: only DLLs inside the app package can be loaded. */
++static HMODULE
++dxil_load_library(const char *name)
++{
++   wchar_t wide[MAX_PATH];
++   if (!MultiByteToWideChar(CP_UTF8, 0, name, -1, wide, MAX_PATH))
++      return NULL;
++   return LoadPackagedLibrary(wide, 0);
++}
++#define LoadLibraryA dxil_load_library
++#define DXIL_UWP 1
++#endif
++
+ static HMODULE
+ load_dxil_mod()
+ {
+@@ -41,6 +55,10 @@ load_dxil_mod()
+    if (mod)
+       return mod;
+ 
++#ifdef DXIL_UWP
++   /* LoadPackagedLibrary already searched the package. */
++   return NULL;
++#else
+    /* If that fails, try to load it next to the current module, so we can
+     * ship DXIL.dll next to the GLon12 DLL.
+     */
+@@ -66,6 +84,7 @@ load_dxil_mod()
+    }
+ 
+    return LoadLibraryA(self_path);
++#endif
+ }
+ 
+ static IDxcValidator *
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index ac1ca26..9232be0 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -257,6 +257,12 @@ extern IMAGE_DOS_HEADER __ImageBase;
+ static const char *
+ try_find_d3d12core_next_to_self(char *path, size_t path_arr_size)
+ {
++#ifdef MESA_UWP
++   /* The Agility SDK cannot be side-loaded from an app package on Xbox. */
++   (void)path;
++   (void)path_arr_size;
++   return NULL;
++#endif
+    uint32_t path_size = GetModuleFileNameA((HINSTANCE)&__ImageBase,
+                                            path, path_arr_size);
+    if (!path_arr_size || path_size == path_arr_size) {
+@@ -1823,6 +1829,7 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
+       }
+    }
+ 
++#ifndef MESA_UWP
+    if (instance->debug_flags & DZN_DEBUG_REDIRECTS) {
+       char home[MAX_PATH], path[MAX_PATH];
+       if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PROFILE, NULL, 0, home))) {
+@@ -1832,6 +1839,7 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
+          freopen(path, "w", stdout);
+       }
+    }
++#endif /* MESA_UWP */
+ #endif
+ 
+    bool missing_validator = false;
+diff --git a/src/microsoft/vulkan/dzn_dxgi.c b/src/microsoft/vulkan/dzn_dxgi.c
+index 7dbcfa6..7869fbe 100644
+--- a/src/microsoft/vulkan/dzn_dxgi.c
++++ b/src/microsoft/vulkan/dzn_dxgi.c
+@@ -24,6 +24,7 @@
+ #define COBJMACROS
+ #include "dzn_physical_device_enum.h"
+ #include "dzn_dxgi.h"
++#include "util/u_dl.h"
+ 
+ #include "util/log.h"
+ 
+@@ -72,7 +73,7 @@ dxgi_get_factory(bool debug)
+       { 0xbf, 0x0c, 0x21, 0xca, 0x39, 0xe5, 0x16, 0x8a }
+    };
+ 
+-   HMODULE dxgi_mod = LoadLibraryA("DXGI.DLL");
++   struct util_dl_library *dxgi_mod = util_dl_open("dxgi.dll");
+    if (!dxgi_mod) {
+       mesa_loge("failed to load DXGI.DLL\n");
+       return NULL;
+@@ -81,7 +82,8 @@ dxgi_get_factory(bool debug)
+    typedef HRESULT(WINAPI *PFN_CREATE_DXGI_FACTORY2)(UINT flags, REFIID riid, void **ppFactory);
+    PFN_CREATE_DXGI_FACTORY2 CreateDXGIFactory2;
+ 
+-   CreateDXGIFactory2 = (PFN_CREATE_DXGI_FACTORY2)GetProcAddress(dxgi_mod, "CreateDXGIFactory2");
++   CreateDXGIFactory2 =
++      (PFN_CREATE_DXGI_FACTORY2)util_dl_get_proc_address(dxgi_mod, "CreateDXGIFactory2");
+    if (!CreateDXGIFactory2) {
+       mesa_loge("failed to load CreateDXGIFactory2 from DXGI.DLL\n");
+       return NULL;
+diff --git a/src/util/anon_file.c b/src/util/anon_file.c
+index 0cb6cfa..c9ca6cc 100644
+--- a/src/util/anon_file.c
++++ b/src/util/anon_file.c
+@@ -257,8 +257,13 @@ int
+ os_create_anonymous_file(int64_t size, const char *debug_name)
+ {
+    (void)debug_name;
++#ifdef MESA_UWP
++   HANDLE h = CreateFileMappingFromApp(INVALID_HANDLE_VALUE, NULL,
++      PAGE_READWRITE, (ULONG64)size, NULL);
++#else
+    HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
+       PAGE_READWRITE, (size >> 32), size & 0xFFFFFFFF, NULL);
++#endif
+    return _open_osfhandle((intptr_t)h, 0);
+ }
+ #endif
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index ea73839..1aeb7bb 100644
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -120,7 +120,7 @@ os_log_message(const char *message)
+ 
+ #if DETECT_OS_WINDOWS
+    OutputDebugStringA(message);
+-#if !defined(_GAMING_XBOX)
++#if !defined(_GAMING_XBOX) && !defined(MESA_UWP)
+    if(GetConsoleWindow() && !IsDebuggerPresent()) {
+       fflush(stdout);
+       fputs(message, fout);
+diff --git a/src/util/u_debug_symbol.c b/src/util/u_debug_symbol.c
+index 5f8da42..2d755b7 100644
+--- a/src/util/u_debug_symbol.c
++++ b/src/util/u_debug_symbol.c
+@@ -42,7 +42,7 @@
+ #include "util/hash_table.h"
+ 
+ 
+-#if DETECT_OS_WINDOWS
++#if DETECT_OS_WINDOWS && !defined(MESA_UWP)
+ 
+ #include <windows.h>
+ #include <stddef.h>
+@@ -238,7 +238,7 @@ debug_symbol_name_dbghelp(const void *addr, char* buf, unsigned size)
+ void
+ debug_symbol_name(const void *addr, char* buf, unsigned size)
+ {
+-#if DETECT_OS_WINDOWS
++#if DETECT_OS_WINDOWS && !defined(MESA_UWP)
+    if (debug_symbol_name_dbghelp(addr, buf, size)) {
+       return;
+    }
+diff --git a/src/util/u_dl.c b/src/util/u_dl.c
+index 6d8b2b8..444b08b 100644
+--- a/src/util/u_dl.c
++++ b/src/util/u_dl.c
+@@ -41,10 +41,60 @@
+ #include "u_string.h"
+ 
+ 
++#if DETECT_OS_WINDOWS && defined(MESA_UWP)
++/* Universal Windows Platform (Xbox Dev Mode).
++ *
++ * UWP apps cannot LoadLibrary system DLLs. The few D3D12/DXGI entry points
++ * Dozen looks up are linked through the import libraries instead and handed
++ * out from this table; anything else must ship inside the app package and is
++ * loaded with LoadPackagedLibrary.
++ */
++#define UTIL_DL_UWP 1
++#include <stdbool.h>
++#include <string.h>
++#include <d3d12.h>
++#include <dxgi1_4.h>
++
++static char util_dl_uwp_d3d12_tag, util_dl_uwp_dxgi_tag;
++
++struct util_dl_uwp_export {
++   const void *tag;
++   const char *name;
++   util_dl_proc proc;
++};
++
++static const struct util_dl_uwp_export util_dl_uwp_exports[] = {
++   { &util_dl_uwp_d3d12_tag, "D3D12CreateDevice", (util_dl_proc)D3D12CreateDevice },
++   { &util_dl_uwp_d3d12_tag, "D3D12GetDebugInterface", (util_dl_proc)D3D12GetDebugInterface },
++   { &util_dl_uwp_d3d12_tag, "D3D12SerializeRootSignature", (util_dl_proc)D3D12SerializeRootSignature },
++   { &util_dl_uwp_d3d12_tag, "D3D12SerializeVersionedRootSignature", (util_dl_proc)D3D12SerializeVersionedRootSignature },
++   /* D3D12GetInterface / D3D12EnableExperimentalFeatures / DXCore are not
++    * looked up: Dozen falls back to D3D12CreateDevice and DXGI enumeration. */
++   { &util_dl_uwp_dxgi_tag, "CreateDXGIFactory2", (util_dl_proc)CreateDXGIFactory2 },
++};
++
++static bool
++util_dl_uwp_is_tag(const void *lib)
++{
++   return lib == &util_dl_uwp_d3d12_tag || lib == &util_dl_uwp_dxgi_tag;
++}
++#endif
++
+ struct util_dl_library *
+ util_dl_open(const char *filename)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if defined(UTIL_DL_UWP)
++   if (!filename)
++      return NULL;
++   if (!_stricmp(filename, "d3d12.dll"))
++      return (struct util_dl_library *)&util_dl_uwp_d3d12_tag;
++   if (!_stricmp(filename, "dxgi.dll"))
++      return (struct util_dl_library *)&util_dl_uwp_dxgi_tag;
++   wchar_t wide[MAX_PATH];
++   if (!MultiByteToWideChar(CP_UTF8, 0, filename, -1, wide, MAX_PATH))
++      return NULL;
++   return (struct util_dl_library *)LoadPackagedLibrary(wide, 0);
++#elif DETECT_OS_POSIX_LITE
+    return (struct util_dl_library *)dlopen(filename, RTLD_LAZY | RTLD_LOCAL);
+ #elif DETECT_OS_WINDOWS
+    return (struct util_dl_library *)LoadLibraryA(filename);
+@@ -58,7 +108,19 @@ util_dl_proc
+ util_dl_get_proc_address(struct util_dl_library *library,
+                          const char *procname)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if defined(UTIL_DL_UWP)
++   if (!library)
++      return NULL;
++   if (util_dl_uwp_is_tag(library)) {
++      for (unsigned i = 0; i < ARRAY_SIZE(util_dl_uwp_exports); i++) {
++         if (util_dl_uwp_exports[i].tag == (const void *)library &&
++             !strcmp(util_dl_uwp_exports[i].name, procname))
++            return util_dl_uwp_exports[i].proc;
++      }
++      return NULL;
++   }
++   return (util_dl_proc)GetProcAddress((HMODULE)library, procname);
++#elif DETECT_OS_POSIX_LITE
+    return (util_dl_proc) pointer_to_func(dlsym((void *)library, procname));
+ #elif DETECT_OS_WINDOWS
+    return (util_dl_proc)GetProcAddress((HMODULE)library, procname);
+@@ -77,6 +139,10 @@ util_dl_get_path_from_proc(const void *func_proc)
+    }
+ 
+    return realpath(info.dli_fname, NULL);
++#elif defined(UTIL_DL_UWP)
++   /* GetModuleHandleExW is desktop-only; callers handle NULL. */
++   (void)func_proc;
++   return NULL;
+ #elif DETECT_OS_WINDOWS
+    HMODULE mod = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+@@ -104,7 +170,10 @@ util_dl_get_path_from_proc(const void *func_proc)
+ void
+ util_dl_close(struct util_dl_library *library)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if defined(UTIL_DL_UWP)
++   if (library && !util_dl_uwp_is_tag(library))
++      FreeLibrary((HMODULE)library);
++#elif DETECT_OS_POSIX_LITE
+    dlclose((void *)library);
+ #elif DETECT_OS_WINDOWS
+    FreeLibrary((HMODULE)library);
+-- 
+2.43.0
+

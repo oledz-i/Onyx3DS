@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Runtime classes for the XAML pages. Pages build most of their UI in code;
+// see Ui/UiKit.h.
+namespace ONYX3DS
+{
+    [default_interface]
+    runtimeclass MainPage : Windows.UI.Xaml.Controls.Page
+    {
+        MainPage();
+    }
+
+    [default_interface]
+    runtimeclass GamePage : Windows.UI.Xaml.Controls.Page
+    {
+        GamePage();
+    }
+
+    [default_interface]
+    runtimeclass EmulationPage : Windows.UI.Xaml.Controls.Page
+    {
+        EmulationPage();
+    }
+
+    [default_interface]
+    runtimeclass SettingsPage : Windows.UI.Xaml.Controls.Page
+    {
+        SettingsPage();
+    }
+
+    [default_interface]
+    runtimeclass FolderPage : Windows.UI.Xaml.Controls.Page
+    {
+        FolderPage();
+    }
+}

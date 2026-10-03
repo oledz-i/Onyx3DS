@@ -1,0 +1,40 @@
+From e48aab49dbc655b5830b23afcc70755c0e70ace3 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sat, 3 Oct 2026 15:09:39 -0400
+Subject: [PATCH 2/4] common: UWP-safe error text for dynamic library load
+ failures
+
+---
+ src/common/dynamic_library/dynamic_library.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/common/dynamic_library/dynamic_library.cpp b/src/common/dynamic_library/dynamic_library.cpp
+index 7453587..6fc63db 100644
+--- a/src/common/dynamic_library/dynamic_library.cpp
++++ b/src/common/dynamic_library/dynamic_library.cpp
+@@ -44,6 +44,14 @@ bool DynamicLibrary::Load(std::string_view filename) {
+ #endif
+     if (!handle) {
+         DWORD error_message_id = GetLastError();
++#ifdef CITRA_UWP
++        // FORMAT_MESSAGE_ALLOCATE_BUFFER / LocalFree are desktop-only.
++        char text[512] = {};
++        const DWORD len = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
++                                         nullptr, error_message_id, 0, text, sizeof(text), nullptr);
++        load_error = len ? std::string(text, len) : fmt::format("error {}", error_message_id);
++        return false;
++#else
+         LPSTR message_buffer = nullptr;
+         std::size_t size =
+             FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+@@ -53,6 +61,7 @@ bool DynamicLibrary::Load(std::string_view filename) {
+         std::string message(message_buffer, size);
+         load_error = message;
+         return false;
++#endif
+     }
+ #else
+     handle = dlopen(filename.data(), RTLD_LAZY);
+-- 
+2.43.0
+
