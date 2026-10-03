@@ -32,7 +32,6 @@ function Invoke-Checked {
     & $exe @rest
     if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
 }
-}
 
 # Puts cl.exe, lib.exe, msbuild and the Windows SDK on PATH (x64).
 function Use-VsDevShell {
