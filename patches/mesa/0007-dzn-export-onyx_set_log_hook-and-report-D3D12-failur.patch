@@ -1,0 +1,858 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 15:03:57 -0400
+Subject: [PATCH 7/7] dzn: export onyx_set_log_hook and report D3D12 failures
+
+Release builds of Dozen fail silently: most D3D12 HRESULTs are dropped and
+turned into VK_ERROR_OUT_OF_HOST_MEMORY. For the UWP (Xbox Dev Mode) port:
+
+- export onyx_set_log_hook() so the application can receive Mesa's log
+  (sets g_mesa_log_hook, see the util patch) via GetProcAddress;
+- log every failed D3D12 object creation, OpenSharedHandle, queue
+  Signal/Wait and command list Close with its HRESULT, plus the device
+  removed reason when the device is gone (DZN_HR wrapper);
+- log root signature serialization errors with the error blob;
+- give nir_to_dxil a logger (its default one hits UNREACHABLE, undefined
+  behaviour in release builds) and always log DXIL validation failures,
+  even without diagnostics from dxcompiler.dll;
+- refuse to execute command buffers whose recording failed, which would
+  remove the D3D12 device shared with the rest of the process, and check
+  the device removed reason after every ExecuteCommandLists;
+- log a line when the instance and the device are created.
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c     |  16 +--
+ src/microsoft/vulkan/dzn_descriptor_set.c |   8 +-
+ src/microsoft/vulkan/dzn_device.c         | 133 ++++++++++++++++------
+ src/microsoft/vulkan/dzn_image.c          |   8 +-
+ src/microsoft/vulkan/dzn_meta.c           |   4 +-
+ src/microsoft/vulkan/dzn_pipeline.c       |  54 +++++++--
+ src/microsoft/vulkan/dzn_private.h        |  17 +++
+ src/microsoft/vulkan/dzn_query.c          |   8 +-
+ src/microsoft/vulkan/dzn_sync.c           |  26 ++---
+ src/microsoft/vulkan/dzn_util.c           |  47 ++++++++
+ 10 files changed, 239 insertions(+), 82 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index fd85f88..8cf1d50 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -653,17 +653,17 @@ dzn_cmd_buffer_create(const VkCommandBufferAllocateInfo *info,
+    }
+ 
+    if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
+-      if (FAILED(ID3D12Device1_CreateCommandAllocator(device->dev, type,
++      if (FAILED(DZN_HR(device->dev, "CreateCommandAllocator", ID3D12Device1_CreateCommandAllocator(device->dev, type,
+                                                       &IID_ID3D12CommandAllocator,
+-                                                      (void **)&cmdbuf->cmdalloc))) {
++                                                      (void **)&cmdbuf->cmdalloc)))) {
+          result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+          goto out;
+       }
+ 
+-      if (FAILED(ID3D12Device4_CreateCommandList1(device->dev, 0, type,
++      if (FAILED(DZN_HR(device->dev, "CreateCommandList1", ID3D12Device4_CreateCommandList1(device->dev, 0, type,
+                                                   D3D12_COMMAND_LIST_FLAG_NONE,
+                                                   &IID_ID3D12GraphicsCommandList1,
+-                                                  (void **)&cmdbuf->cmdlist))) {
++                                                  (void **)&cmdbuf->cmdlist)))) {
+          result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+          goto out;
+       }
+@@ -1077,7 +1077,9 @@ dzn_EndCommandBuffer(VkCommandBuffer commandBuffer)
+    if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
+       dzn_cmd_buffer_gather_events(cmdbuf);
+       dzn_cmd_buffer_gather_queries(cmdbuf);
+-      HRESULT hres = ID3D12GraphicsCommandList1_Close(cmdbuf->cmdlist);
++      struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
++      HRESULT hres = DZN_HR(device->dev, "ID3D12GraphicsCommandList::Close",
++                            ID3D12GraphicsCommandList1_Close(cmdbuf->cmdlist));
+       if (FAILED(hres))
+          vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+    }
+@@ -1808,11 +1810,11 @@ dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
+    };
+ 
+    HRESULT hres =
+-      ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
++      DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
+                                             D3D12_HEAP_FLAG_NONE, &rdesc,
+                                             init_state, NULL,
+                                             &IID_ID3D12Resource,
+-                                            (void **)&res);
++                                            (void **)&res));
+    if (FAILED(hres)) {
+       return vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index c8821c9..36770f6 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -938,9 +938,9 @@ dzn_descriptor_heap_init(struct dzn_descriptor_heap *heap,
+                D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+    };
+ 
+-   if (FAILED(ID3D12Device1_CreateDescriptorHeap(device->dev, &desc,
++   if (FAILED(DZN_HR(device->dev, "CreateDescriptorHeap", ID3D12Device1_CreateDescriptorHeap(device->dev, &desc,
+                                                  &IID_ID3D12DescriptorHeap,
+-                                                 (void **)&heap->heap))) {
++                                                 (void **)&heap->heap)))) {
+       return vk_error(device,
+                       shader_visible ?
+                       VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_OUT_OF_HOST_MEMORY);
+@@ -1816,8 +1816,8 @@ dzn_descriptor_pool_create(struct dzn_device *device,
+             .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR
+          };
+          D3D12_HEAP_PROPERTIES heap_props = { .Type = D3D12_HEAP_TYPE_UPLOAD };
+-         if (FAILED(ID3D12Device_CreateCommittedResource(device->dev, &heap_props, 0, &buf_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+-                                                         NULL, &IID_ID3D12Resource, (void **)&pool->bindless.buf))) {
++         if (FAILED(DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device_CreateCommittedResource(device->dev, &heap_props, 0, &buf_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
++                                                         NULL, &IID_ID3D12Resource, (void **)&pool->bindless.buf)))) {
+             dzn_descriptor_pool_destroy(pool, pAllocator);
+             return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          }
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index 9232be0..d209e1d 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -38,6 +38,8 @@
+ #include "util/macros.h"
+ #include "util/mesa-blake3.h"
+ #include "util/u_dl.h"
++#include "util/u_atomic.h"
++#include "vk_enum_to_str.h"
+ 
+ #include "dzn_drirc.h"
+ 
+@@ -505,9 +507,9 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
+    };
+ 
+    ID3D12CommandQueue *cmdqueue;
+-   ID3D12Device1_CreateCommandQueue(pdev->dev, &queue_desc,
++   DZN_HR(pdev->dev, "CreateCommandQueue", ID3D12Device1_CreateCommandQueue(pdev->dev, &queue_desc,
+                                     &IID_ID3D12CommandQueue,
+-                                    (void **)&cmdqueue);
++                                    (void **)&cmdqueue));
+ 
+    uint64_t ts_freq;
+    ID3D12CommandQueue_GetTimestampFrequency(cmdqueue, &ts_freq);
+@@ -1793,6 +1795,8 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkInstance *out)
+ {
++   mesa_logi("dzn: logging active, creating instance (Mesa " PACKAGE_VERSION MESA_GIT_SHA1 ")");
++
+    struct dzn_instance *instance =
+       vk_zalloc2(vk_default_allocator(), pAllocator, sizeof(*instance), 8,
+                  VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+@@ -1919,6 +1923,26 @@ vk_icdGetInstanceProcAddr(VkInstance instance,
+    return dzn_GetInstanceProcAddr(instance, pName);
+ }
+ 
++/* Lets an application that cannot see stderr or the debugger output (UWP)
++ * receive every Mesa log message. Looked up with GetProcAddress, so it is
++ * exported by name in addition to the .def file's ICD entry points. */
++#ifdef _WIN32
++#define DZN_APP_EXPORT __declspec(dllexport)
++#else
++#define DZN_APP_EXPORT PUBLIC
++#endif
++
++DZN_APP_EXPORT void
++onyx_set_log_hook(void (*hook)(int level, const char *msg));
++
++DZN_APP_EXPORT void
++onyx_set_log_hook(void (*hook)(int level, const char *msg))
++{
++   g_mesa_log_hook = hook;
++   if (hook)
++      mesa_logi("dzn: log hook installed (Mesa " PACKAGE_VERSION MESA_GIT_SHA1 ")");
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ dzn_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
+                                             uint32_t *pQueueFamilyPropertyCount,
+@@ -2010,7 +2034,7 @@ dzn_queue_sync_wait(struct dzn_queue *queue, const struct vk_sync_wait *wait)
+ 
+    assert(sync->fence != NULL);
+ 
+-   if (value > 0 && FAILED(ID3D12CommandQueue_Wait(queue->cmdqueue, sync->fence, value)))
++   if (value > 0 && FAILED(DZN_HR(device->dev, "ID3D12CommandQueue::Wait", ID3D12CommandQueue_Wait(queue->cmdqueue, sync->fence, value))))
+       return vk_error(device, VK_ERROR_UNKNOWN);
+ 
+    return VK_SUCCESS;
+@@ -2031,7 +2055,7 @@ dzn_queue_sync_signal(struct dzn_queue *queue, const struct vk_sync_signal *sign
+ 
+    assert(sync->fence != NULL);
+ 
+-   if (FAILED(ID3D12CommandQueue_Signal(queue->cmdqueue, sync->fence, value)))
++   if (FAILED(DZN_HR(device->dev, "ID3D12CommandQueue::Signal", ID3D12CommandQueue_Signal(queue->cmdqueue, sync->fence, value))))
+       return vk_error(device, VK_ERROR_UNKNOWN);
+ 
+    return VK_SUCCESS;
+@@ -2053,6 +2077,22 @@ dzn_queue_submit(struct vk_queue *q,
+ 
+    ID3D12CommandList **cmdlists = alloca(info->command_buffer_count * sizeof(ID3D12CommandList*));
+ 
++   /* Executing a D3D12 command list whose recording failed (Close() returned
++    * an error) is an invalid call that removes the whole D3D12 device, which
++    * is shared with the rest of the process. Refuse such submissions; the
++    * Vulkan queue is marked lost instead and the D3D12 device survives.
++    */
++   for (uint32_t i = 0; i < info->command_buffer_count; i++) {
++      struct dzn_cmd_buffer *cmd_buffer =
++         container_of(info->command_buffers[i], struct dzn_cmd_buffer, vk);
++      if (cmd_buffer->vk.record_result != VK_SUCCESS) {
++         mesa_loge("dzn: refusing to submit command buffer %u/%u in error state (%s)",
++                   i + 1, info->command_buffer_count,
++                   vk_Result_to_str(cmd_buffer->vk.record_result));
++         return vk_error(device, VK_ERROR_DEVICE_LOST);
++      }
++   }
++
+    for (uint32_t i = 0; i < info->command_buffer_count; i++) {
+       struct dzn_cmd_buffer *cmd_buffer =
+          container_of(info->command_buffers[i], struct dzn_cmd_buffer, vk);
+@@ -2075,12 +2115,20 @@ dzn_queue_submit(struct vk_queue *q,
+ 
+    ID3D12CommandQueue_ExecuteCommandLists(queue->cmdqueue, info->command_buffer_count, cmdlists);
+ 
++   static uint32_t submission_count;
++   uint32_t submission = p_atomic_inc_return(&submission_count);
++   if (FAILED(dzn_check_device_removed(device->dev, "ExecuteCommandLists submission", submission))) {
++      mesa_loge("dzn: submission #%u had %u command list(s), %u wait(s), %u signal(s)",
++                submission, info->command_buffer_count, info->wait_count, info->signal_count);
++      return vk_device_set_lost(&device->vk, "D3D12 device removed after submission #%u", submission);
++   }
++
+    for (uint32_t i = 0; i < info->command_buffer_count; i++) {
+       struct dzn_cmd_buffer* cmd_buffer =
+          container_of(info->command_buffers[i], struct dzn_cmd_buffer, vk);
+ 
+       util_dynarray_foreach(&cmd_buffer->events.signal, struct dzn_cmd_event_signal, evt) {
+-         if (FAILED(ID3D12CommandQueue_Signal(queue->cmdqueue, evt->event->fence, evt->value ? 1 : 0)))
++         if (FAILED(DZN_HR(device->dev, "ID3D12CommandQueue::Signal", ID3D12CommandQueue_Signal(queue->cmdqueue, evt->event->fence, evt->value ? 1 : 0))))
+             return vk_error(device, VK_ERROR_UNKNOWN);
+       }
+ 
+@@ -2102,7 +2150,7 @@ dzn_queue_submit(struct vk_queue *q,
+          return vk_error(device, VK_ERROR_UNKNOWN);
+    }
+ 
+-   if (FAILED(ID3D12CommandQueue_Signal(queue->cmdqueue, queue->fence, ++queue->fence_point)))
++   if (FAILED(DZN_HR(device->dev, "ID3D12CommandQueue::Signal", ID3D12CommandQueue_Signal(queue->cmdqueue, queue->fence, ++queue->fence_point))))
+       return vk_error(device, VK_ERROR_UNKNOWN);
+ 
+    return VK_SUCCESS;
+@@ -2144,16 +2192,16 @@ dzn_queue_init(struct dzn_queue *queue,
+       priority_in > 0.5f ? D3D12_COMMAND_QUEUE_PRIORITY_HIGH : D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+    queue_desc.NodeMask = 0;
+ 
+-   if (FAILED(ID3D12Device1_CreateCommandQueue(device->dev, &queue_desc,
++   if (FAILED(DZN_HR(device->dev, "CreateCommandQueue", ID3D12Device1_CreateCommandQueue(device->dev, &queue_desc,
+                                                &IID_ID3D12CommandQueue,
+-                                               (void **)&queue->cmdqueue))) {
++                                               (void **)&queue->cmdqueue)))) {
+       dzn_queue_finish(queue);
+       return vk_error(device->vk.physical->instance, VK_ERROR_INITIALIZATION_FAILED);
+    }
+ 
+-   if (FAILED(ID3D12Device1_CreateFence(device->dev, 0, D3D12_FENCE_FLAG_NONE,
++   if (FAILED(DZN_HR(device->dev, "CreateFence", ID3D12Device1_CreateFence(device->dev, 0, D3D12_FENCE_FLAG_NONE,
+                                         &IID_ID3D12Fence,
+-                                        (void **)&queue->fence))) {
++                                        (void **)&queue->fence)))) {
+       dzn_queue_finish(queue);
+       return vk_error(device->vk.physical->instance, VK_ERROR_INITIALIZATION_FAILED);
+    }
+@@ -2179,13 +2227,13 @@ dzn_device_query_init(struct dzn_device *device)
+       .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+ 
+-   if (FAILED(ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
++   if (FAILED(DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
+                                                    D3D12_HEAP_FLAG_NONE,
+                                                    &rdesc,
+                                                    D3D12_RESOURCE_STATE_COMMON,
+                                                    NULL,
+                                                    &IID_ID3D12Resource,
+-                                                   (void **)&device->queries.refs)))
++                                                   (void **)&device->queries.refs))))
+       return vk_error(device->vk.physical, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+ 
+    uint8_t *queries_ref;
+@@ -2257,7 +2305,7 @@ dzn_device_check_status(struct vk_device *dev)
+ {
+    struct dzn_device *device = container_of(dev, struct dzn_device, vk);
+ 
+-   if (FAILED(ID3D12Device_GetDeviceRemovedReason(device->dev)))
++   if (FAILED(dzn_check_device_removed(device->dev, "device status check", 0)))
+       return vk_device_set_lost(&device->vk, "D3D12 device removed");
+ 
+    return VK_SUCCESS;
+@@ -2456,6 +2504,16 @@ dzn_device_create(struct dzn_physical_device *pdev,
+    }
+ 
+    assert(queue_count == qindex);
++   mesa_logi("dzn: device created: shader model 0x%x, validator 0x%x, bindless %d, "
++             "enhanced barriers %d, %u queue(s)",
++             (unsigned)pdev->shader_model,
++#ifdef _WIN32
++             (unsigned)dxil_get_validator_version(instance->dxil_validator),
++#else
++             0u,
++#endif
++             (int)device->bindless, (int)pdev->options12.EnhancedBarriersSupported,
++             queue_count);
+    *out = dzn_device_to_handle(device);
+    return VK_SUCCESS;
+ }
+@@ -2473,7 +2531,10 @@ serialize_root_sig(struct dzn_device *device,
+          instance->d3d12.serialize_root_sig(desc, &sig, &error);
+ 
+    if (FAILED(hr)) {
+-      if (instance->debug_flags & DZN_DEBUG_SIG) {
++      mesa_loge("dzn: root signature serialization failed, HRESULT 0x%08lx: %s",
++                (unsigned long)hr,
++                error ? (const char *)ID3D10Blob_GetBufferPointer(error) : "(no error blob)");
++      if (error && (instance->debug_flags & DZN_DEBUG_SIG)) {
+          const char *error_msg = (const char *)ID3D10Blob_GetBufferPointer(error);
+          fprintf(stderr,
+                  "== SERIALIZE ROOT SIG ERROR =============================================\n"
+@@ -2498,11 +2559,11 @@ dzn_device_create_root_sig(struct dzn_device *device,
+       return NULL;
+ 
+    ID3D12RootSignature *root_sig = NULL;
+-   ID3D12Device1_CreateRootSignature(device->dev, 0,
++   DZN_HR(device->dev, "CreateRootSignature", ID3D12Device1_CreateRootSignature(device->dev, 0,
+                                      ID3D10Blob_GetBufferPointer(sig),
+                                      ID3D10Blob_GetBufferSize(sig),
+                                      &IID_ID3D12RootSignature,
+-                                     (void **)&root_sig);
++                                     (void **)&root_sig));
+    ID3D10Blob_Release(sig);
+    return root_sig;
+ }
+@@ -2754,7 +2815,7 @@ dzn_device_memory_create(struct dzn_device *device,
+ #ifdef _WIN32
+    HANDLE handle_from_name = NULL;
+    if (import_name) {
+-      if (FAILED(ID3D12Device_OpenSharedHandleByName(device->dev, import_name, GENERIC_ALL, &handle_from_name))) {
++      if (FAILED(DZN_HR(device->dev, "OpenSharedHandleByName", ID3D12Device_OpenSharedHandleByName(device->dev, import_name, GENERIC_ALL, &handle_from_name)))) {
+          error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+          goto cleanup;
+       }
+@@ -2789,7 +2850,7 @@ dzn_device_memory_create(struct dzn_device *device,
+    } else if (import_handle) {
+       error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+       if (image || buffer) {
+-         if (FAILED(ID3D12Device_OpenSharedHandle(device->dev, import_handle, &IID_ID3D12Resource, (void **)&mem->dedicated_res)))
++         if (FAILED(DZN_HR(device->dev, "OpenSharedHandle", ID3D12Device_OpenSharedHandle(device->dev, import_handle, &IID_ID3D12Resource, (void **)&mem->dedicated_res))))
+             goto cleanup;
+ 
+          /* Verify compatibility */
+@@ -2824,7 +2885,7 @@ dzn_device_memory_create(struct dzn_device *device,
+          else if ((heap_desc.Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+             goto cleanup;
+       } else {
+-         if (FAILED(ID3D12Device_OpenSharedHandle(device->dev, import_handle, &IID_ID3D12Heap, (void **)&mem->heap)))
++         if (FAILED(DZN_HR(device->dev, "OpenSharedHandle", ID3D12Device_OpenSharedHandle(device->dev, import_handle, &IID_ID3D12Heap, (void **)&mem->heap))))
+             goto cleanup;
+ 
+          D3D12_HEAP_DESC desc = dzn_ID3D12Heap_GetDesc(mem->heap);
+@@ -2852,34 +2913,34 @@ dzn_device_memory_create(struct dzn_device *device,
+             .Layout = image->desc.Layout,
+             .Flags = image->desc.Flags,
+          };
+-         if (FAILED(ID3D12Device10_CreateCommittedResource3(device->dev10, &heap_desc.Properties,
++         if (FAILED(DZN_HR(device->dev10, "CreateCommittedResource3", ID3D12Device10_CreateCommittedResource3(device->dev10, &heap_desc.Properties,
+                                                             heap_desc.Flags, &desc,
+                                                             D3D12_BARRIER_LAYOUT_COMMON,
+                                                             NULL, NULL,
+                                                             image->castable_format_count,
+                                                             image->castable_formats,
+                                                             &IID_ID3D12Resource,
+-                                                            (void **)&mem->dedicated_res)))
++                                                            (void **)&mem->dedicated_res))))
+             goto cleanup;
+-      } else if (FAILED(ID3D12Device1_CreateCommittedResource(device->dev, &heap_desc.Properties,
++      } else if (FAILED(DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &heap_desc.Properties,
+                                                               heap_desc.Flags, &image->desc,
+                                                               D3D12_RESOURCE_STATE_COMMON,
+                                                               NULL,
+                                                               &IID_ID3D12Resource,
+-                                                              (void **)&mem->dedicated_res)))
++                                                              (void **)&mem->dedicated_res))))
+          goto cleanup;
+    } else if (buffer) {
+-      if (FAILED(ID3D12Device1_CreateCommittedResource(device->dev, &heap_desc.Properties,
++      if (FAILED(DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &heap_desc.Properties,
+                                                        heap_desc.Flags, &buffer->desc,
+                                                        D3D12_RESOURCE_STATE_COMMON,
+                                                        NULL,
+                                                        &IID_ID3D12Resource,
+-                                                       (void **)&mem->dedicated_res)))
++                                                       (void **)&mem->dedicated_res))))
+          goto cleanup;
+    } else {
+-      if (FAILED(ID3D12Device1_CreateHeap(device->dev, &heap_desc,
++      if (FAILED(DZN_HR(device->dev, "CreateHeap", ID3D12Device1_CreateHeap(device->dev, &heap_desc,
+                                           &IID_ID3D12Heap,
+-                                          (void **)&mem->heap)))
++                                          (void **)&mem->heap))))
+          goto cleanup;
+    }
+ 
+@@ -2903,11 +2964,11 @@ dzn_device_memory_create(struct dzn_device *device,
+          res_desc.SampleDesc.Quality = 0;
+          res_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+          res_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-         HRESULT hr = ID3D12Device1_CreatePlacedResource(device->dev, mem->heap, 0, &res_desc,
++         HRESULT hr = DZN_HR(device->dev, "CreatePlacedResource", ID3D12Device1_CreatePlacedResource(device->dev, mem->heap, 0, &res_desc,
+                                                          D3D12_RESOURCE_STATE_COMMON,
+                                                          NULL,
+                                                          &IID_ID3D12Resource,
+-                                                         (void **)&mem->map_res);
++                                                         (void **)&mem->map_res));
+          if (FAILED(hr))
+             goto cleanup;
+       }
+@@ -2924,8 +2985,8 @@ dzn_device_memory_create(struct dzn_device *device,
+       const SECURITY_ATTRIBUTES *pAttributes = NULL;
+       const wchar_t *name = NULL;
+ #endif
+-      if (FAILED(ID3D12Device_CreateSharedHandle(device->dev, shareable, pAttributes,
+-                                                 dwAccess, name, &mem->export_handle)))
++      if (FAILED(DZN_HR(device->dev, "CreateSharedHandle", ID3D12Device_CreateSharedHandle(device->dev, shareable, pAttributes,
++                                                 dwAccess, name, &mem->export_handle))))
+          goto cleanup;
+    }
+ 
+@@ -3338,13 +3399,13 @@ dzn_BindBufferMemory2(VkDevice _device,
+       } else {
+          D3D12_RESOURCE_DESC desc = buffer->desc;
+          desc.Flags |= mem->res_flags;
+-         if (FAILED(ID3D12Device1_CreatePlacedResource(device->dev, mem->heap,
++         if (FAILED(DZN_HR(device->dev, "CreatePlacedResource", ID3D12Device1_CreatePlacedResource(device->dev, mem->heap,
+                                                        pBindInfos[i].memoryOffset,
+                                                        &buffer->desc,
+                                                        D3D12_RESOURCE_STATE_COMMON,
+                                                        NULL,
+                                                        &IID_ID3D12Resource,
+-                                                       (void **)&buffer->res)))
++                                                       (void **)&buffer->res))))
+             return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+       }
+ 
+@@ -3409,9 +3470,9 @@ dzn_event_create(struct dzn_device *device,
+ 
+    vk_object_base_init(&device->vk, &event->base, VK_OBJECT_TYPE_EVENT);
+ 
+-   if (FAILED(ID3D12Device1_CreateFence(device->dev, 0, D3D12_FENCE_FLAG_NONE,
++   if (FAILED(DZN_HR(device->dev, "CreateFence", ID3D12Device1_CreateFence(device->dev, 0, D3D12_FENCE_FLAG_NONE,
+                                         &IID_ID3D12Fence,
+-                                        (void **)&event->fence))) {
++                                        (void **)&event->fence)))) {
+       dzn_event_destroy(event, pAllocator);
+       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+    }
+@@ -3814,7 +3875,7 @@ dzn_GetMemoryFdPropertiesKHR(VkDevice _device,
+ #endif
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    IUnknown *opened_object;
+-   if (FAILED(ID3D12Device_OpenSharedHandle(device->dev, handle, &IID_IUnknown, (void **)&opened_object)))
++   if (FAILED(DZN_HR(device->dev, "OpenSharedHandle", ID3D12Device_OpenSharedHandle(device->dev, handle, &IID_IUnknown, (void **)&opened_object))))
+       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+ 
+    VkResult result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index f5d93c4..7e1d683 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -833,7 +833,7 @@ dzn_BindImageMemory2(VkDevice dev,
+             .Flags = image->desc.Flags | mem->res_flags,
+          };
+ 
+-         hres = ID3D12Device10_CreatePlacedResource2(device->dev10, mem->heap,
++         hres = DZN_HR(device->dev10, "CreatePlacedResource2", ID3D12Device10_CreatePlacedResource2(device->dev10, mem->heap,
+                                                      bind_info->memoryOffset,
+                                                      &desc,
+                                                      D3D12_BARRIER_LAYOUT_COMMON,
+@@ -841,17 +841,17 @@ dzn_BindImageMemory2(VkDevice dev,
+                                                      image->castable_format_count,
+                                                      image->castable_formats,
+                                                      &IID_ID3D12Resource,
+-                                                     (void **)&image->res);
++                                                     (void **)&image->res));
+       } else {
+          D3D12_RESOURCE_DESC desc = image->desc;
+          desc.Flags |= mem->res_flags;
+-         hres = ID3D12Device1_CreatePlacedResource(device->dev, mem->heap,
++         hres = DZN_HR(device->dev, "CreatePlacedResource", ID3D12Device1_CreatePlacedResource(device->dev, mem->heap,
+                                                    bind_info->memoryOffset,
+                                                    &desc,
+                                                    D3D12_RESOURCE_STATE_COMMON,
+                                                    NULL,
+                                                    &IID_ID3D12Resource,
+-                                                   (void **)&image->res);
++                                                   (void **)&image->res));
+       }
+       if (FAILED(hres))
+          return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+diff --git a/src/microsoft/vulkan/dzn_meta.c b/src/microsoft/vulkan/dzn_meta.c
+index 8c50b59..e3cc722 100644
+--- a/src/microsoft/vulkan/dzn_meta.c
++++ b/src/microsoft/vulkan/dzn_meta.c
+@@ -400,10 +400,10 @@ dzn_meta_triangle_fan_rewrite_index_init(struct dzn_device *device,
+       goto out;
+    }
+ 
+-   if (FAILED(ID3D12Device1_CreateCommandSignature(device->dev, &cmd_sig_desc,
++   if (FAILED(DZN_HR(device->dev, "CreateCommandSignature", ID3D12Device1_CreateCommandSignature(device->dev, &cmd_sig_desc,
+                                                    meta->root_sig,
+                                                    &IID_ID3D12CommandSignature,
+-                                                   (void **)&meta->cmd_sig)))
++                                                   (void **)&meta->cmd_sig))))
+       ret = vk_error(instance, VK_ERROR_INITIALIZATION_FAILED);
+ 
+ out:
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 65ccc0e..0759078 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -408,6 +408,15 @@ enum dxil_shader_model
+    return ((pdev->shader_model & 0xf0) << 12) | (pdev->shader_model & 0xf);
+ }
+ 
++/* nir_to_dxil's default logger hits UNREACHABLE(), which is undefined
++ * behaviour in release builds; report the problem and let it fail instead. */
++static void
++dzn_pipeline_log_dxil_msg(void *priv, const char *msg)
++{
++   (void)priv;
++   mesa_loge("dzn: nir_to_dxil: %s", msg ? msg : "(null)");
++}
++
+ static VkResult
+ dzn_pipeline_compile_shader(struct dzn_device *device,
+                             nir_shader *nir,
+@@ -439,10 +448,20 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
+    if (instance->debug_flags & DZN_DEBUG_NIR)
+       nir_print_shader(nir, stderr);
+ 
+-   if (nir_to_dxil(nir, &opts, NULL, &dxil_blob)) {
++   const struct dxil_logger dxil_logger = {
++      .priv = NULL,
++      .log = dzn_pipeline_log_dxil_msg,
++   };
++   if (nir_to_dxil(nir, &opts, &dxil_logger, &dxil_blob)) {
+       blob_finish_get_buffer(&dxil_blob, (void **)&slot->pShaderBytecode,
+                              (size_t *)&slot->BytecodeLength);
+    } else {
++      mesa_loge("dzn: nir_to_dxil failed for %s shader \"%s\" (shader model max 0x%x, "
++                "validator version max 0x%x)",
++                _mesa_shader_stage_to_abbrev(nir->info.stage),
++                nir->info.name ? nir->info.name : "",
++                (unsigned)opts.shader_model_max,
++                (unsigned)opts.validator_version_max);
+       result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+    }
+ 
+@@ -453,7 +472,7 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
+       return result;
+ 
+ #ifdef _WIN32
+-   char *err;
++   char *err = NULL;
+    bool res = dxil_validate_module(instance->dxil_validator,
+                                    (void *)slot->pShaderBytecode,
+                                    slot->BytecodeLength, &err);
+@@ -472,6 +491,17 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
+       }
+    }
+ 
++   if (!res) {
++      mesa_loge("dzn: DXIL validation failed for %s shader \"%s\" (%u bytes, validator %s, "
++                "version 0x%x)%s",
++                _mesa_shader_stage_to_abbrev(nir->info.stage),
++                nir->info.name ? nir->info.name : "",
++                (unsigned)slot->BytecodeLength,
++                instance->dxil_validator ? "loaded" : "MISSING",
++                (unsigned)opts.validator_version_max,
++                err ? "" : ", no diagnostics (dxcompiler.dll / IDxcLibrary unavailable?)");
++   }
++
+    if (!res && !(instance->debug_flags & DZN_DEBUG_EXPERIMENTAL)) {
+       if (err) {
+          mesa_loge(
+@@ -2057,9 +2087,9 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
+    }
+ 
+    if (!pipeline->variants) {
+-      hres = ID3D12Device4_CreatePipelineState(device->dev, stream_desc,
++      hres = DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, stream_desc,
+                                                &IID_ID3D12PipelineState,
+-                                               (void **)&pipeline->base.state);
++                                               (void **)&pipeline->base.state));
+       if (FAILED(hres)) {
+          ret = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+          goto out;
+@@ -2236,9 +2266,9 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+ 
+       update_stencil_state(pdev, pipeline, stream_buf, &masked_key);
+ 
+-      ASSERTED HRESULT hres = ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
++      ASSERTED HRESULT hres = DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
+                                                                 &IID_ID3D12PipelineState,
+-                                                                (void**)(&variant->state));
++                                                                (void**)(&variant->state)));
+       assert(!FAILED(hres));
+       he = _mesa_hash_table_insert(pipeline->variants, &variant->key, variant);
+       assert(he);
+@@ -2349,10 +2379,10 @@ dzn_graphics_pipeline_get_indirect_cmd_sig(struct dzn_graphics_pipeline *pipelin
+    ID3D12RootSignature *root_sig = key.draw_id || key.draw_params ?
+       pipeline->base.root.sig : NULL;
+    HRESULT hres =
+-      ID3D12Device1_CreateCommandSignature(device->dev, &cmd_sig_desc,
++      DZN_HR(device->dev, "CreateCommandSignature", ID3D12Device1_CreateCommandSignature(device->dev, &cmd_sig_desc,
+                                            root_sig,
+                                            &IID_ID3D12CommandSignature,
+-                                           (void **)&cmdsig);
++                                           (void **)&cmdsig));
+    if (FAILED(hres))
+       return NULL;
+ 
+@@ -2613,9 +2643,9 @@ dzn_compute_pipeline_create(struct dzn_device *device,
+    if (ret != VK_SUCCESS)
+       goto out;
+ 
+-   if (FAILED(ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
++   if (FAILED(DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
+                                                 &IID_ID3D12PipelineState,
+-                                                (void **)&pipeline->base.state)))
++                                                (void **)&pipeline->base.state))))
+       ret = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+ out:
+@@ -2658,10 +2688,10 @@ dzn_compute_pipeline_get_indirect_cmd_sig(struct dzn_compute_pipeline *pipeline)
+    };
+ 
+    HRESULT hres =
+-      ID3D12Device1_CreateCommandSignature(device->dev, &indirect_dispatch_desc,
++      DZN_HR(device->dev, "CreateCommandSignature", ID3D12Device1_CreateCommandSignature(device->dev, &indirect_dispatch_desc,
+                                            pipeline->base.root.sig,
+                                            &IID_ID3D12CommandSignature,
+-                                           (void **)&pipeline->indirect_cmd_sig);
++                                           (void **)&pipeline->indirect_cmd_sig));
+    if (FAILED(hres))
+       return NULL;
+ 
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index 9b1f5ab..9fa06c2 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -252,6 +252,23 @@ d3d12_enable_gpu_validation(struct util_dl_library *d3d12_mod, ID3D12DeviceFacto
+ ID3D12Device4 *
+ d3d12_create_device(struct util_dl_library *d3d12_mod, IUnknown *adapter, ID3D12DeviceFactory *factory, bool experimental_features);
+ 
++/* Logs a failed D3D12 call (and the device-removed reason, if the device has
++ * been removed) through mesa_loge(). Returns hr unchanged so it can wrap the
++ * call in place: if (FAILED(DZN_HR(dev, "CreateHeap", ID3D12Device1_CreateHeap(...))))
++ */
++HRESULT
++dzn_log_hresult(ID3D12Device4 *dev, HRESULT hr, const char *what,
++                const char *file, int line);
++
++#define DZN_HR(dev, what, call) \
++   dzn_log_hresult((ID3D12Device4 *)(dev), (call), (what), __FILE__, __LINE__)
++
++/* Checks whether the D3D12 device has been removed and, the first time it
++ * has, logs the reason together with the given context. Returns the
++ * removed reason (S_OK while the device is alive). */
++HRESULT
++dzn_check_device_removed(ID3D12Device4 *dev, const char *context, uint64_t index);
++
+ struct dzn_queue {
+    struct vk_queue vk;
+ 
+diff --git a/src/microsoft/vulkan/dzn_query.c b/src/microsoft/vulkan/dzn_query.c
+index da885c8..f51d809 100644
+--- a/src/microsoft/vulkan/dzn_query.c
++++ b/src/microsoft/vulkan/dzn_query.c
+@@ -147,13 +147,13 @@ dzn_query_pool_create(struct dzn_device *device,
+       .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+ 
+-   hres = ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
++   hres = DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
+                                                 D3D12_HEAP_FLAG_NONE,
+                                                 &rdesc,
+                                                 D3D12_RESOURCE_STATE_COMMON,
+                                                 NULL,
+                                                 &IID_ID3D12Resource,
+-                                                (void **)&qpool->resolve_buffer);
++                                                (void **)&qpool->resolve_buffer));
+    if (FAILED(hres)) {
+       dzn_query_pool_destroy(qpool, alloc);
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+@@ -162,13 +162,13 @@ dzn_query_pool_create(struct dzn_device *device,
+    hprops = dzn_ID3D12Device4_GetCustomHeapProperties(device->dev, 0,
+                                                       D3D12_HEAP_TYPE_READBACK);
+    rdesc.Width = info->queryCount * (qpool->query_size + sizeof(uint64_t));
+-   hres = ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
++   hres = DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
+                                                 D3D12_HEAP_FLAG_NONE,
+                                                 &rdesc,
+                                                 D3D12_RESOURCE_STATE_COMMON,
+                                                 NULL,
+                                                 &IID_ID3D12Resource,
+-                                                (void **)&qpool->collect_buffer);
++                                                (void **)&qpool->collect_buffer));
+    if (FAILED(hres)) {
+       dzn_query_pool_destroy(qpool, alloc);
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+diff --git a/src/microsoft/vulkan/dzn_sync.c b/src/microsoft/vulkan/dzn_sync.c
+index 48dff7b..31d2521 100644
+--- a/src/microsoft/vulkan/dzn_sync.c
++++ b/src/microsoft/vulkan/dzn_sync.c
+@@ -46,10 +46,10 @@ dzn_sync_init(struct vk_device *device,
+    D3D12_FENCE_FLAGS flags = (sync->flags & VK_SYNC_IS_SHAREABLE) ?
+       D3D12_FENCE_FLAG_SHARED : D3D12_FENCE_FLAG_NONE;
+ 
+-   if (FAILED(ID3D12Device1_CreateFence(ddev->dev, initial_value,
++   if (FAILED(DZN_HR(ddev->dev, "CreateFence", ID3D12Device1_CreateFence(ddev->dev, initial_value,
+                                         flags,
+                                         &IID_ID3D12Fence,
+-                                        (void **)&dsync->fence)))
++                                        (void **)&dsync->fence))))
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+ 
+    return VK_SUCCESS;
+@@ -118,10 +118,10 @@ dzn_sync_move(struct vk_device *device,
+    struct dzn_sync *dsrc = container_of(src, struct dzn_sync, vk);
+    ID3D12Fence *new_fence;
+ 
+-   if (FAILED(ID3D12Device1_CreateFence(ddev->dev, 0,
++   if (FAILED(DZN_HR(ddev->dev, "CreateFence", ID3D12Device1_CreateFence(ddev->dev, 0,
+                                         D3D12_FENCE_FLAG_NONE,
+                                         &IID_ID3D12Fence,
+-                                        (void **)&new_fence)))
++                                        (void **)&new_fence))))
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+ 
+    ID3D12Fence_Release(ddst->fence);
+@@ -233,12 +233,12 @@ dzn_sync_import_win32_handle(struct vk_device *device, struct vk_sync *sync,
+ 
+    HANDLE handle_to_close = NULL;
+    if (name) {
+-      if (FAILED(ID3D12Device_OpenSharedHandleByName(ddev->dev, name, GENERIC_ALL, &handle_to_close)))
++      if (FAILED(DZN_HR(ddev->dev, "OpenSharedHandleByName", ID3D12Device_OpenSharedHandleByName(ddev->dev, name, GENERIC_ALL, &handle_to_close))))
+          return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+       handle = handle_to_close;
+    }
+ 
+-   HRESULT hr = ID3D12Device_OpenSharedHandle(ddev->dev, handle, &IID_ID3D12Fence, (void **)&dsync->fence);
++   HRESULT hr = DZN_HR(ddev->dev, "OpenSharedHandle", ID3D12Device_OpenSharedHandle(ddev->dev, handle, &IID_ID3D12Fence, (void **)&dsync->fence));
+    if (handle_to_close)
+       CloseHandle(handle_to_close);
+    if (FAILED(hr))
+@@ -259,8 +259,8 @@ dzn_sync_export_win32_handle(struct vk_device *device, struct vk_sync *sync, HAN
+    }
+ 
+    struct dzn_device *ddev = container_of(device, struct dzn_device, vk);
+-   if (FAILED(ID3D12Device_CreateSharedHandle(ddev->dev, (ID3D12DeviceChild *)dsync->fence,
+-                                              NULL, GENERIC_ALL, NULL, handle)))
++   if (FAILED(DZN_HR(ddev->dev, "CreateSharedHandle", ID3D12Device_CreateSharedHandle(ddev->dev, (ID3D12DeviceChild *)dsync->fence,
++                                              NULL, GENERIC_ALL, NULL, handle))))
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    return VK_SUCCESS;
+ }
+@@ -272,9 +272,9 @@ dzn_sync_prep_win32_export(struct vk_device *device, struct vk_sync *sync,
+ {
+    struct dzn_sync *dsync = container_of(sync, struct dzn_sync, vk);
+    struct dzn_device *ddev = container_of(device, struct dzn_device, vk);
+-   if (FAILED(ID3D12Device_CreateSharedHandle(ddev->dev, (ID3D12DeviceChild *)dsync->fence,
++   if (FAILED(DZN_HR(ddev->dev, "CreateSharedHandle", ID3D12Device_CreateSharedHandle(ddev->dev, (ID3D12DeviceChild *)dsync->fence,
+                                               (const LPSECURITY_ATTRIBUTES)security_attributes,
+-                                              GENERIC_ALL, name, &dsync->export_handle)))
++                                              GENERIC_ALL, name, &dsync->export_handle))))
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    return VK_SUCCESS;
+ }
+@@ -289,7 +289,7 @@ dzn_sync_import_opaque_fd(struct vk_device *device, struct vk_sync *sync,
+    dzn_sync_finish(device, sync);
+ 
+    HANDLE handle = (HANDLE)(intptr_t)fd;
+-   if (FAILED(ID3D12Device_OpenSharedHandle(ddev->dev, handle, &IID_ID3D12Fence, (void **)&dsync->fence)))
++   if (FAILED(DZN_HR(ddev->dev, "OpenSharedHandle", ID3D12Device_OpenSharedHandle(ddev->dev, handle, &IID_ID3D12Fence, (void **)&dsync->fence))))
+       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    return VK_SUCCESS;
+ }
+@@ -300,8 +300,8 @@ dzn_sync_export_opaque_fd(struct vk_device *device, struct vk_sync *sync, int *f
+    struct dzn_sync *dsync = container_of(sync, struct dzn_sync, vk);
+    struct dzn_device *ddev = container_of(device, struct dzn_device, vk);
+    HANDLE handle;
+-   if (FAILED(ID3D12Device_CreateSharedHandle(ddev->dev, (ID3D12DeviceChild *)dsync->fence,
+-                                              NULL, GENERIC_ALL, NULL, &handle)))
++   if (FAILED(DZN_HR(ddev->dev, "CreateSharedHandle", ID3D12Device_CreateSharedHandle(ddev->dev, (ID3D12DeviceChild *)dsync->fence,
++                                              NULL, GENERIC_ALL, NULL, &handle))))
+       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    *fd = (int)(intptr_t)handle;
+    return VK_SUCCESS;
+diff --git a/src/microsoft/vulkan/dzn_util.c b/src/microsoft/vulkan/dzn_util.c
+index 0c4a39b..6c14d12 100644
+--- a/src/microsoft/vulkan/dzn_util.c
++++ b/src/microsoft/vulkan/dzn_util.c
+@@ -28,6 +28,53 @@
+ 
+ #include <util/u_dl.h>
+ 
++static const char *
++dzn_log_basename(const char *file)
++{
++   const char *base = file ? file : "?";
++   for (const char *p = base; *p; p++) {
++      if (*p == '/' || *p == '\\')
++         base = p + 1;
++   }
++   return base;
++}
++
++HRESULT
++dzn_check_device_removed(ID3D12Device4 *dev, const char *context, uint64_t index)
++{
++   static bool reported;
++
++   if (!dev)
++      return S_OK;
++
++   HRESULT reason = ID3D12Device4_GetDeviceRemovedReason(dev);
++   if (FAILED(reason) && !reported) {
++      reported = true;
++      if (index)
++         mesa_loge("dzn: D3D12 device removed, reason 0x%08lx, first noticed after %s #%llu",
++                   (unsigned long)reason, context ? context : "?",
++                   (unsigned long long)index);
++      else
++         mesa_loge("dzn: D3D12 device removed, reason 0x%08lx, first noticed after %s",
++                   (unsigned long)reason, context ? context : "?");
++   }
++   return reason;
++}
++
++HRESULT
++dzn_log_hresult(ID3D12Device4 *dev, HRESULT hr, const char *what,
++                const char *file, int line)
++{
++   if (SUCCEEDED(hr))
++      return hr;
++
++   mesa_loge("dzn: %s:%d: %s failed, HRESULT 0x%08lx",
++             dzn_log_basename(file), line, what ? what : "D3D12 call",
++             (unsigned long)hr);
++   dzn_check_device_removed(dev, what ? what : "D3D12 call", 0);
++   return hr;
++}
++
+ static const DXGI_FORMAT formats[PIPE_FORMAT_COUNT] = {
+ #define MAP_FORMAT_NORM(FMT) \
+    [PIPE_FORMAT_ ## FMT ## _UNORM] = DXGI_FORMAT_ ## FMT ## _UNORM, \

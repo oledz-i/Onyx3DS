@@ -510,6 +510,7 @@ void EmulationPage::ShowMenuQuickSettings() {
         panel.Children().Append(kit::SettingRow(label, "", combo));
     };
     pick(keys::kResolution, "Internal resolution");
+    pick(keys::kFrameSkip, "Frame skip");
     pick(keys::kLayout, "Screen layout");
     pick(keys::kLargeScreenProportion, "Big screen size");
     pick(keys::kTextureFilter, "Texture filter");

@@ -77,6 +77,9 @@ private:
     };
 
     bool LoadDeviceFunctions();
+    // Exercises Dozen on a temporary VkDevice (submit, fill, clears, compute, Azahar's
+    // compute pipelines) and logs each step; false when a step fails or loses the device.
+    bool RunSelfTest(std::string& error);
     bool ImportSlot(int slot, const D3D12Presenter::SharedSlot& shared);
     void ReleaseSlot(SlotImport& s);
     bool ImportSharedFence();

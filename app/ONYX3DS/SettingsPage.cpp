@@ -64,6 +64,11 @@ std::vector<Curated> CuratedOptions() {
          "How sharp 3D graphics are. Each step costs GPU time.",
          {{"1", "1x native 400x240"}, {"2", "2x 800x480"}, {"3", "3x 1200x720"}, {"4", "4x 1600x960"},
           {"5", "5x"}, {"6", "6x"}}},
+        {keys::kFrameSkip, "Frame skip",
+         "Software renderer: draw only some frames while the game runs at full speed. "
+         "Makes slow scenes playable; some games may flicker.",
+         {{"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
+          {"3", "Draw every 4th frame"}}},
         {keys::kAccurateMul, "Accurate shader multiplication",
          "Fixes rare graphics glitches (e.g. some Pokemon effects). Slower.",
          {{"enabled", "On"}, {"disabled", "Off"}}},

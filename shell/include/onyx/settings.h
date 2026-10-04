@@ -36,6 +36,7 @@ inline constexpr const char* kShaderJit = "citra_use_shader_jit";
 inline constexpr const char* kAccurateMul = "citra_shaders_accurate_mul";
 inline constexpr const char* kDiskShaderCache = "citra_use_disk_shader_cache";
 inline constexpr const char* kResolution = "citra_resolution_factor";
+inline constexpr const char* kFrameSkip = "citra_frame_skip";
 inline constexpr const char* kTextureFilter = "citra_texture_filter";
 inline constexpr const char* kTextureSampling = "citra_texture_sampling";
 inline constexpr const char* kCustomTextures = "citra_custom_textures";

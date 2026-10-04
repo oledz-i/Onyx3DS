@@ -1,0 +1,483 @@
+From 22072d21de8122e197e269149534f5fd4cac9da9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 15:22:03 -0400
+Subject: [PATCH] renderer_software: low-latency drawing pool sized to the
+ available cores; frame skip option
+
+---
+ src/citra_libretro/core_settings.cpp          |  24 ++++
+ src/common/thread.cpp                         |  39 ++++++
+ src/common/thread.h                           |   3 +
+ .../renderer_software/renderer_software.cpp   |  14 +-
+ .../renderer_software/renderer_software.h     |   1 +
+ .../renderer_software/sw_blitter.cpp          |   7 +
+ .../renderer_software/sw_frame_skip.h         |  20 +++
+ .../renderer_software/sw_rasterizer.cpp       | 122 ++++++++++++++----
+ .../renderer_software/sw_rasterizer.h         |  29 ++++-
+ 9 files changed, 232 insertions(+), 27 deletions(-)
+ create mode 100644 src/video_core/renderer_software/sw_frame_skip.h
+
+diff --git a/src/citra_libretro/core_settings.cpp b/src/citra_libretro/core_settings.cpp
+index 45d48aa..70c2f7e 100644
+--- a/src/citra_libretro/core_settings.cpp
++++ b/src/citra_libretro/core_settings.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include "common/file_util.h"
+ #include "common/settings.h"
++#include "video_core/renderer_software/sw_frame_skip.h"
+ #include "core/hle/service/cfg/cfg.h"
+ 
+ namespace BaseKeys = Settings::HKeys;
+@@ -376,6 +377,23 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+         },
+         config::enabled
+     },
++    {
++        "citra_frame_skip",
++        "Frame Skip (software renderer)",
++        "Frame Skip",
++        "Draw only every 2nd, 3rd or 4th frame while the game keeps running at full speed. "
++        "Makes slow scenes playable; some games may flicker.",
++        nullptr,
++        config::category::graphics,
++        {
++            { "0", "Off" },
++            { "1", "1 (draw every 2nd frame)" },
++            { "2", "2 (draw every 3rd frame)" },
++            { "3", "3 (draw every 4th frame)" },
++            { nullptr, nullptr }
++        },
++        "0"
++    },
+     {
+         config::graphics::resolution_factor,
+         "Internal Resolution",
+@@ -998,6 +1016,12 @@ static void ParseGraphicsOptions(void) {
+         LibRetro::FetchVariable(config::graphics::use_disk_shader_cache, config::enabled) ==
+         config::enabled;
+ 
++    {
++        const std::string skip = LibRetro::FetchVariable("citra_frame_skip", "0");
++        const u32 frames = skip.empty() ? 0u : static_cast<u32>(skip[0] - '0');
++        SwRenderer::FrameSkip::setting.store(frames <= 3 ? frames : 0u);
++    }
++
+     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
+     Settings::values.resolution_factor = std::stoi(resolution);
+ 
+diff --git a/src/common/thread.cpp b/src/common/thread.cpp
+index 01d3223..c03e26c 100644
+--- a/src/common/thread.cpp
++++ b/src/common/thread.cpp
+@@ -28,6 +28,10 @@
+ #define cpu_set_t cpuset_t
+ #endif
+ 
++#include <algorithm>
++#include <thread>
++#include <vector>
++
+ namespace Common {
+ 
+ #ifdef _WIN32
+@@ -125,4 +129,39 @@ void SetCurrentThreadName(const char*) {
+ 
+ #endif
+ 
++u32 GetAvailableCoreCount() {
++#ifdef _WIN32
++    // On Xbox an app gets a subset of the console's cores: count the CPU sets this
++    // process may run on.
++    ULONG length = 0;
++    GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
++    if (length > 0) {
++        std::vector<u8> buffer(length);
++        auto* info = reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data());
++        if (GetSystemCpuSetInformation(info, length, &length, GetCurrentProcess(), 0)) {
++            u32 count = 0;
++            u32 allocated = 0;
++            for (ULONG offset = 0; offset < length;) {
++                const auto* entry =
++                    reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
++                if (entry->Type == CpuSetInformation) {
++                    ++count;
++                    if (entry->CpuSet.AllocatedToTargetProcess) {
++                        ++allocated;
++                    }
++                }
++                offset += entry->Size;
++            }
++            if (allocated > 0) {
++                return allocated;
++            }
++            if (count > 0) {
++                return count;
++            }
++        }
++    }
++#endif
++    return std::max(std::thread::hardware_concurrency(), 2U);
++}
++
+ } // namespace Common
+diff --git a/src/common/thread.h b/src/common/thread.h
+index a504c81..4a46865 100644
+--- a/src/common/thread.h
++++ b/src/common/thread.h
+@@ -116,4 +116,7 @@ extern void (*g_thread_name_hook)(const char*);
+ 
+ void SetCurrentThreadName(const char* name);
+ 
++/// Number of CPU cores this process may run on (on Xbox, the ones given to the app).
++u32 GetAvailableCoreCount();
++
+ } // namespace Common
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index fe60abc..e9b8e48 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -9,6 +9,7 @@
+ #include "video_core/gpu.h"
+ #include "video_core/pica/pica_core.h"
+ #include "video_core/renderer_software/renderer_software.h"
++#include "video_core/renderer_software/sw_frame_skip.h"
+ 
+ namespace SwRenderer {
+ 
+@@ -21,7 +22,18 @@ RendererSoftware::~RendererSoftware() = default;
+ 
+ void RendererSoftware::SwapBuffers() {
+     system.perf_stats->StartSwap();
+-    PrepareRenderTarget();
++    // A skipped frame left the previous picture in memory: keep the converted one.
++    if (!FrameSkip::skipping.load(std::memory_order_relaxed)) {
++        PrepareRenderTarget();
++    }
++    const u32 skip = FrameSkip::setting.load(std::memory_order_relaxed);
++    if (skip == 0) {
++        FrameSkip::skipping.store(false, std::memory_order_relaxed);
++    } else if (FrameSkip::drew.exchange(false, std::memory_order_relaxed)) {
++        ++frames_with_drawing;
++        FrameSkip::skipping.store(frames_with_drawing % (skip + 1) != 0,
++                                  std::memory_order_relaxed);
++    }
+     system.perf_stats->EndSwap();
+     EndFrame();
+ }
+diff --git a/src/video_core/renderer_software/renderer_software.h b/src/video_core/renderer_software/renderer_software.h
+index 47008c3..8692de4 100644
+--- a/src/video_core/renderer_software/renderer_software.h
++++ b/src/video_core/renderer_software/renderer_software.h
+@@ -44,6 +44,7 @@ private:
+     Memory::MemorySystem& memory;
+     Pica::PicaCore& pica;
+     RasterizerSoftware rasterizer;
++    u64 frames_with_drawing = 0;
+     std::array<ScreenInfo, 3> screen_infos{};
+ };
+ 
+diff --git a/src/video_core/renderer_software/sw_blitter.cpp b/src/video_core/renderer_software/sw_blitter.cpp
+index f00756e..39656a1 100644
+--- a/src/video_core/renderer_software/sw_blitter.cpp
++++ b/src/video_core/renderer_software/sw_blitter.cpp
+@@ -10,6 +10,7 @@
+ #include "video_core/pica/regs_external.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/renderer_software/sw_blitter.h"
++#include "video_core/renderer_software/sw_frame_skip.h"
+ #include "video_core/utils.h"
+ 
+ namespace SwRenderer {
+@@ -119,6 +120,9 @@ void SwBlitter::TextureCopy(const Pica::DisplayTransferConfig& config) {
+ }
+ 
+ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
++    if (FrameSkip::skipping.load(std::memory_order_relaxed)) {
++        return;
++    }
+     const PAddr src_addr = config.GetPhysicalInputAddress();
+     PAddr dst_addr = config.GetPhysicalOutputAddress();
+ 
+@@ -313,6 +317,9 @@ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
+ }
+ 
+ void SwBlitter::MemoryFill(const Pica::MemoryFillConfig& config) {
++    if (FrameSkip::skipping.load(std::memory_order_relaxed)) {
++        return;
++    }
+     const PAddr start_addr = config.GetStartAddress();
+     const PAddr end_addr = config.GetEndAddress();
+ 
+diff --git a/src/video_core/renderer_software/sw_frame_skip.h b/src/video_core/renderer_software/sw_frame_skip.h
+new file mode 100644
+index 0000000..55a0379
+--- /dev/null
++++ b/src/video_core/renderer_software/sw_frame_skip.h
+@@ -0,0 +1,20 @@
++// Copyright Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++
++#pragma once
++
++#include <atomic>
++#include "common/common_types.h"
++
++/// Software renderer frame skip: on skipped frames triangles, memory fills and display
++/// transfers are dropped while the game keeps running, and the previous picture stays up.
++namespace SwRenderer::FrameSkip {
++/// Frames skipped after each drawn frame (0 = off).
++inline std::atomic<u32> setting{0};
++/// True while the current frame is being skipped.
++inline std::atomic<bool> skipping{false};
++/// The game asked for drawing since the last vblank (frames where it draws nothing,
++/// e.g. every other vblank of a 30 fps game, are not counted).
++inline std::atomic<bool> drew{false};
++} // namespace SwRenderer::FrameSkip
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index c567059..479f11a 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -3,17 +3,20 @@
+ // Refer to the license.txt file included.
+ 
+ #include <thread>
++#include <vector>
+ #include <boost/container/static_vector.hpp>
+ #if defined(_M_X64) || defined(__x86_64__)
+ #include <immintrin.h>
+ #endif
+ #include "common/logging/log.h"
++#include "common/thread.h"
+ #include "common/microprofile.h"
+ #include "common/quaternion.h"
+ #include "common/vector_math.h"
+ #include "core/memory.h"
+ #include "video_core/pica/output_vertex.h"
+ #include "video_core/pica/pica_core.h"
++#include "video_core/renderer_software/sw_frame_skip.h"
+ #include "video_core/renderer_software/sw_framebuffer.h"
+ #include "video_core/renderer_software/sw_lighting.h"
+ #include "video_core/renderer_software/sw_proctex.h"
+@@ -112,11 +115,93 @@ inline void YieldCpu() {
+ 
+ RasterizerSoftware::RasterizerSoftware(Memory::MemorySystem& memory_, Pica::PicaCore& pica_)
+     : memory{memory_}, pica{pica_}, regs{pica.regs.internal},
+-      num_sw_threads{std::max(std::thread::hardware_concurrency(), 2U)},
+-      sw_workers{num_sw_threads, "SwRenderer workers"}, fb{memory, regs.framebuffer} {}
++      fb{memory, regs.framebuffer} {
++    const u32 cores = Common::GetAvailableCoreCount();
++    // The emulation thread draws too, and the CPU emulation, audio and UI threads need
++    // cores of their own: more threads than cores only makes them wait on each other.
++    const u32 helpers = cores > 2 ? std::min<u32>(cores - 2, 7) : 1;
++    pool = std::make_unique<RasterPool>(helpers);
++    LOG_INFO(Render_Software, "Software renderer: {} cores available, {} drawing threads + emulation thread",
++             cores, helpers);
++}
++
++RasterizerSoftware::~RasterizerSoftware() = default;
++
++RasterizerSoftware::RasterPool::RasterPool(u32 count) {
++    threads.reserve(count);
++    for (u32 i = 0; i < count; ++i) {
++        threads.emplace_back([this] { WorkerLoop(); });
++    }
++}
++
++RasterizerSoftware::RasterPool::~RasterPool() {
++    stopping.store(true);
++    generation.fetch_add(1, std::memory_order_release);
++    generation.notify_all();
++    for (auto& t : threads) {
++        t.join();
++    }
++}
++
++void RasterizerSoftware::RasterPool::WorkerLoop() {
++    Common::SetCurrentThreadName("SwRenderer workers");
++    u64 seen = generation.load(std::memory_order_acquire);
++    for (;;) {
++        u64 now = generation.load(std::memory_order_acquire);
++        if (now == seen) {
++            // Draw calls arrive back to back: stay awake for a short while (~40 us).
++            for (u32 spin = 0; spin < 2048 && now == seen; ++spin) {
++                YieldCpu();
++                now = generation.load(std::memory_order_acquire);
++            }
++            if (now == seen) {
++                generation.wait(seen, std::memory_order_acquire);
++                continue;
++            }
++        }
++        seen = now;
++        if (stopping.load(std::memory_order_relaxed)) {
++            return;
++        }
++        std::shared_ptr<Batch> batch;
++        {
++            std::scoped_lock lock{current_mutex};
++            batch = current;
++        }
++        if (batch) {
++            batch->Run();
++        }
++    }
++}
++
++void RasterizerSoftware::RasterPool::Execute(const std::shared_ptr<Batch>& batch) {
++    {
++        std::scoped_lock lock{current_mutex};
++        current = batch;
++    }
++    generation.fetch_add(1, std::memory_order_release);
++    generation.notify_all();
++    batch->Run();
++    // Bands other threads are still drawing: short spin, then sleep until the last one ends.
++    u32 done = batch->done.load(std::memory_order_acquire);
++    for (u32 spin = 0; spin < 1024 && done < batch->num_bands; ++spin) {
++        YieldCpu();
++        done = batch->done.load(std::memory_order_acquire);
++    }
++    while (done < batch->num_bands) {
++        batch->done.wait(done, std::memory_order_acquire);
++        done = batch->done.load(std::memory_order_acquire);
++    }
++    std::scoped_lock lock{current_mutex};
++    current.reset();
++}
+ 
+ void RasterizerSoftware::AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
+                                      const Pica::OutputVertex& v2) {
++    FrameSkip::drew.store(true, std::memory_order_relaxed);
++    if (FrameSkip::skipping.load(std::memory_order_relaxed)) {
++        return;
++    }
+     /**
+      * Clipping a planar n-gon against a plane will remove at least 1 vertex and introduces 2 at
+      * the new edge (or less in degenerate cases). As such, we can say that each clipping plane
+@@ -562,8 +647,10 @@ void RasterizerSoftware::DrawTriangles() {
+         return;
+     }
+     fb.Bind();
+-    constexpr u64 kInlinePixels = 6 * 1024;
+-    if (num_sw_threads < 2 || pending_area < kInlinePixels) {
++    // Below this many covered pixels (bounding boxes), handing out the work costs more
++    // than drawing it here.
++    constexpr u64 kInlinePixels = 2 * 1024;
++    if (!pool || pool->NumThreads() == 0 || pending_area < kInlinePixels) {
+         for (const auto& job : pending) {
+             for (u32 r = 0; r < job.rows; ++r) {
+                 job.scanline(static_cast<u16>(((job.first_row + r) << 4) + 8));
+@@ -585,28 +672,13 @@ void RasterizerSoftware::DrawTriangles() {
+         hi = std::max(hi, job.first_row + job.rows);
+     }
+     const u32 range = hi - lo;
+-    const u32 want = static_cast<u32>(num_sw_threads) * 2;
++    // Small bands so threads that start late or draw cheap rows pick up more of them.
++    const u32 want = (pool->NumThreads() + 1) * 4;
+     batch->lo = lo;
+     batch->hi = hi;
+-    batch->band_rows = std::max<u32>(4, (range + want - 1) / want);
++    batch->band_rows = std::max<u32>(2, (range + want - 1) / want);
+     batch->num_bands = (range + batch->band_rows - 1) / batch->band_rows;
+-
+-    // Workers only touch this batch through the shared pointer, so a worker that wakes up
+-    // after the batch is finished finds nothing to do and never touches freed state.
+-    const u32 helpers = std::min<u32>(static_cast<u32>(num_sw_threads), batch->num_bands) - 1;
+-    for (u32 i = 0; i < helpers; ++i) {
+-        sw_workers.QueueWork([batch] { batch->Run(); });
+-    }
+-    batch->Run();
+-    // The main thread joins in above; this only waits for bands other threads still draw.
+-    u32 spins = 0;
+-    while (batch->done.load(std::memory_order_acquire) < batch->num_bands) {
+-        if (++spins < 4000) {
+-            YieldCpu();
+-        } else {
+-            std::this_thread::yield();
+-        }
+-    }
++    pool->Execute(batch);
+ }
+ 
+ void RasterizerSoftware::Batch::Run() {
+@@ -627,7 +699,9 @@ void RasterizerSoftware::Batch::Run() {
+                 job.scanline(static_cast<u16>(((job.first_row + r) << 4) + 8));
+             }
+         }
+-        done.fetch_add(1, std::memory_order_release);
++        if (done.fetch_add(1, std::memory_order_acq_rel) + 1 == num_bands) {
++            done.notify_all();
++        }
+     }
+ }
+ 
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index 21d143e..d016563 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -7,6 +7,8 @@
+ #include <atomic>
+ #include <functional>
+ #include <memory>
++#include <mutex>
++#include <thread>
+ #include <span>
+ #include <vector>
+ #include "common/thread_worker.h"
+@@ -27,6 +29,7 @@ struct Vertex;
+ class RasterizerSoftware : public VideoCore::RasterizerInterface {
+ public:
+     explicit RasterizerSoftware(Memory::MemorySystem& memory, Pica::PicaCore& pica);
++    ~RasterizerSoftware() override;
+ 
+     void AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
+                      const Pica::OutputVertex& v2) override;
+@@ -81,8 +84,6 @@ private:
+     Memory::MemorySystem& memory;
+     Pica::PicaCore& pica;
+     Pica::RegsInternal& regs;
+-    std::size_t num_sw_threads;
+-    Common::ThreadWorker sw_workers;
+     Framebuffer fb;
+ 
+     /// A triangle waiting for DrawTriangles(): draws one scanline of itself per call.
+@@ -100,10 +101,34 @@ private:
+         u32 num_bands = 0;
+         std::atomic<u32> next{0};
+         std::atomic<u32> done{0};
++        /// Draws bands until none are left. Returns once this thread has nothing to do.
+         void Run();
+     };
++    /// Threads that draw the bands of a batch together with the emulation thread.
++    /// They spin briefly between draws (draw calls come in quick succession) and sleep
++    /// on an address wait otherwise, so a draw call costs microseconds to hand out.
++    class RasterPool {
++    public:
++        explicit RasterPool(u32 threads);
++        ~RasterPool();
++        u32 NumThreads() const {
++            return static_cast<u32>(threads.size());
++        }
++        /// Runs the batch on the pool and the calling thread; returns when it is drawn.
++        void Execute(const std::shared_ptr<Batch>& batch);
++
++    private:
++        void WorkerLoop();
++        std::vector<std::thread> threads;
++        std::mutex current_mutex;
++        std::shared_ptr<Batch> current;
++        std::atomic<u64> generation{0};
++        std::atomic<bool> stopping{false};
++    };
++
+     std::vector<PendingTriangle> pending;
+     u64 pending_area = 0;
++    std::unique_ptr<RasterPool> pool;
+ };
+ 
+ } // namespace SwRenderer
+-- 
+2.43.0
+

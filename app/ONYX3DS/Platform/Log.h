@@ -28,6 +28,12 @@ void CaptureStderr(const std::wstring& path);
 // Copies new stderr output (since the last call) into onyx.log as [driver] lines.
 void DrainStderrToLog();
 
+// Routes Mesa's own log (every vk_error, failed D3D12 call, shader compile error)
+// into onyx.log as [driver] lines through vulkan_dzn.dll's onyx_set_log_hook export
+// (patches/mesa/0005-0007). Call right after loading the driver. Returns false and
+// logs a warning when the export is missing (an older vulkan_dzn.dll).
+bool InstallDriverLogHook(HMODULE dzn);
+
 #define ONYX_INFO(...) ::onyx::app::Log(::onyx::app::LogLevel::Info, __VA_ARGS__)
 #define ONYX_WARN(...) ::onyx::app::Log(::onyx::app::LogLevel::Warning, __VA_ARGS__)
 #define ONYX_ERROR(...) ::onyx::app::Log(::onyx::app::LogLevel::Error, __VA_ARGS__)

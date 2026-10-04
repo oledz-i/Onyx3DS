@@ -9,12 +9,6 @@
 #include <cstdarg>
 #include <cstdio>
 
-// Mesa/Dozen's logger calls this for every message (see patches/mesa/0005). If the driver
-// library is not part of this build the fallback below stands in for the missing symbol.
-extern "C" void (*g_mesa_log_hook)(int level, const char* msg);
-extern "C" void (*g_mesa_log_hook_unused)(int level, const char* msg) = nullptr;
-#pragma comment(linker, "/alternatename:g_mesa_log_hook=g_mesa_log_hook_unused")
-
 namespace onyx::app {
 namespace {
 void MesaLogHook(int level, const char* msg);
@@ -106,16 +100,44 @@ long long g_stderr_read = 0;
 } // namespace
 
 namespace {
+// Receives every Mesa log message (mesa_log_level: 0 error, 1 warning, 2 info, 3 debug)
+// from vulkan_dzn.dll; installed by InstallDriverLogHook. May run on any thread.
 void MesaLogHook(int level, const char* msg) {
-    std::string line(msg ? msg : "");
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-    if (line.empty()) return;
-    Log(level <= 0 ? LogLevel::Error : LogLevel::Warning, "[driver] %s", line.c_str());
+    std::string text(msg ? msg : "");
+    // Multi-line messages (e.g. DXIL validation errors) become one log line each.
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        std::size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(start, end - start);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (!line.empty()) {
+            const LogLevel lvl = level <= 0   ? LogLevel::Error
+                                 : level == 1 ? LogLevel::Warning
+                                              : LogLevel::Info;
+            Log(lvl, "[driver] %s", line.c_str());
+        }
+        start = end + 1;
+    }
 }
 } // namespace
 
+bool InstallDriverLogHook(HMODULE dzn) {
+    using SetHookFn = void(__cdecl*)(void (*)(int, const char*));
+    const auto set_hook =
+        dzn ? reinterpret_cast<SetHookFn>(GetProcAddress(dzn, "onyx_set_log_hook")) : nullptr;
+    if (!set_hook) {
+        ONYX_WARN("Driver log hook not available (vulkan_dzn.dll has no onyx_set_log_hook "
+                  "export, error %lu); driver errors only reach driver.log",
+                  dzn ? GetLastError() : 0ul);
+        return false;
+    }
+    set_hook(&MesaLogHook); // Dozen answers with a "[driver] dzn: log hook installed" line
+    ONYX_INFO("Driver log hook installed");
+    return true;
+}
+
 void CaptureStderr(const std::wstring& path) {
-    g_mesa_log_hook = MesaLogHook;
     g_stderr_path = path;
     g_stderr_read = 0;
     FILE* f = nullptr;
@@ -143,13 +165,23 @@ void CaptureStderr(const std::wstring& path) {
 void DrainStderrToLog() {
     if (g_stderr_path.empty()) return;
     fflush(stderr);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, g_stderr_path.c_str(), L"rb") != 0 || !f) return;
-    if (_fseeki64(f, g_stderr_read, SEEK_SET) == 0) {
+    // Share every access: the CRT keeps driver.log open for writing as stderr.
+    CREATEFILE2_EXTENDED_PARAMETERS p{sizeof(p)};
+    p.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+    const HANDLE f = CreateFile2FromAppW(g_stderr_path.c_str(), GENERIC_READ,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         OPEN_EXISTING, &p);
+    if (f == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(f, &size) && size.QuadPart < g_stderr_read)
+        g_stderr_read = 0; // truncated or recreated since the last drain
+    LARGE_INTEGER offset{};
+    offset.QuadPart = g_stderr_read;
+    if (SetFilePointerEx(f, offset, nullptr, FILE_BEGIN)) {
         std::string pending;
         char buf[4096];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        DWORD n = 0;
+        while (ReadFile(f, buf, sizeof(buf), &n, nullptr) && n > 0) {
             pending.append(buf, n);
             g_stderr_read += static_cast<long long>(n);
             if (pending.size() > 64 * 1024) break; // a runaway driver log stays readable
@@ -164,7 +196,7 @@ void DrainStderrToLog() {
             start = end + 1;
         }
     }
-    fclose(f);
+    CloseHandle(f);
 }
 
 std::vector<std::string> RecentLog(std::size_t max_lines) {

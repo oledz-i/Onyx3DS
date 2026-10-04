@@ -1,29 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Subject: [PATCH] util: forward log messages to an application hook
+Date: Sun, 4 Oct 2026 15:00:13 -0400
+Subject: [PATCH 5/7] util: forward log messages to an application hook
 
+Embedding applications on UWP (Xbox Dev Mode) cannot see stderr or the
+debugger output. Add g_mesa_log_hook, called from mesa_log_v() for every
+message that passes the level filter, independent of MESA_LOG. While it is
+set it replaces the default stderr logger, so applications that also
+capture stderr do not get every message twice.
 ---
+ src/util/log.c | 35 +++++++++++++++++++++++++++++++++++
+ src/util/log.h |  8 ++++++++
+ 2 files changed, 43 insertions(+)
+
 diff --git a/src/util/log.c b/src/util/log.c
-index b594a8f..821c8ba 100644
+index b594a8f..5ea17a5 100644
 --- a/src/util/log.c
 +++ b/src/util/log.c
-@@ -99,6 +99,10 @@ level_from_str(const char *str)
+@@ -99,6 +99,8 @@ level_from_str(const char *str)
     return MESA_NUM_LOG_LEVELS;
  }
  
-+/* Set by the embedding application to receive every message that would go to the
-+ * log file (used on UWP, where stderr is not visible). */
-+void (*g_mesa_log_hook)(int level, const char *msg);
++mesa_log_hook_func g_mesa_log_hook;
 +
  static uint32_t mesa_log_control;
  static FILE *mesa_log_file;
  static enum mesa_log_level mesa_max_log_level;
-@@ -312,6 +316,9 @@ logger_file(enum mesa_log_level level,
-    fprintf(fp, "%s", msg);
-    fflush(fp);
+@@ -420,6 +422,23 @@ logger_windbg(enum mesa_log_level level,
  
-+   if (g_mesa_log_hook)
-+      g_mesa_log_hook((int)level, msg);
+ #endif /* DETECT_OS_WINDOWS */
+ 
++static void
++logger_hook(mesa_log_hook_func hook,
++            enum mesa_log_level level,
++            const char *tag,
++            const char *format,
++            va_list va)
++{
++   char local_msg[1024];
++   char *msg = logger_vasnprintf(local_msg, sizeof(local_msg),
++         LOGGER_VASNPRINTF_AFFIX_TAG, level, tag, format, va);
 +
-    if (msg != local_msg)
-       free(msg);
++   hook((int)level, msg);
++
++   if (msg != local_msg)
++      free(msg);
++}
++
+ /* This is for use with debug functions that take a FILE, such as
+  * nir_print_shader, although switching to nir_log_shader* is preferred.
+  */
+@@ -476,7 +495,16 @@ mesa_log_v(enum mesa_log_level level, const char *tag, const char *format,
+    if (level > mesa_max_log_level)
+       return;
+ 
++   /* Independent of MESA_LOG: the application asked for every message. It
++    * replaces the default stderr logger, so messages are not reported twice
++    * by applications that also capture stderr.
++    */
++   mesa_log_hook_func hook = g_mesa_log_hook;
++
+    for (uint32_t i = 0; i < ARRAY_SIZE(loggers); i++) {
++      if (hook && loggers[i].bit == MESA_LOG_CONTROL_FILE &&
++          mesa_log_file == stderr)
++         continue;
+       if (mesa_log_control & loggers[i].bit) {
+          va_list copy;
+          va_copy(copy, va);
+@@ -484,6 +512,13 @@ mesa_log_v(enum mesa_log_level level, const char *tag, const char *format,
+          va_end(copy);
+       }
+    }
++
++   if (hook) {
++      va_list copy;
++      va_copy(copy, va);
++      logger_hook(hook, level, tag, format, copy);
++      va_end(copy);
++   }
  }
+ 
+ void
+diff --git a/src/util/log.h b/src/util/log.h
+index c1d9f80..a648783 100644
+--- a/src/util/log.h
++++ b/src/util/log.h
+@@ -54,6 +54,14 @@ enum mesa_log_level {
+ 
+ #define MAX_LOG_MESSAGE_LENGTH 4096
+ 
++/* Optional sink for every message that passes the log level filter, set by an
++ * embedding application (used on UWP, where stderr and the debugger output are
++ * not visible). It receives the mesa_log_level and the formatted message
++ * ("tag: text", no trailing newline) and may be called from any thread.
++ */
++typedef void (*mesa_log_hook_func)(int level, const char *msg);
++extern mesa_log_hook_func g_mesa_log_hook;
++
+ FILE *
+ mesa_log_get_file(void);
+ 
