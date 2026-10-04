@@ -1,0 +1,155 @@
+From c83260bedc1297cf2945743605cdd11c6aa4e0b2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 15:25:10 -0400
+Subject: [PATCH] renderer_software: display transfers and screen conversion
+ run on the drawing threads
+
+---
+ .../renderer_software/renderer_software.cpp   |  7 ++++--
+ .../renderer_software/sw_blitter.cpp          | 17 ++++++++++++-
+ .../renderer_software/sw_rasterizer.cpp       | 24 +++++++++++++++++++
+ .../renderer_software/sw_rasterizer.h         |  5 ++++
+ 4 files changed, 50 insertions(+), 3 deletions(-)
+
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index e9b8e48..840dd18 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -78,8 +78,11 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+         return;
+     }
+     const auto convert = [&](auto decode) {
++        // Blocks of rows are independent: spread them over the drawing threads.
+         constexpr u32 kBlockRows = 16;
+-        for (u32 y0 = 0; y0 < height; y0 += kBlockRows) {
++        const u32 blocks = (height + kBlockRows - 1) / kBlockRows;
++        rasterizer.ParallelFor(blocks, [&](u32 block) {
++            const u32 y0 = block * kBlockRows;
+             const u32 y1 = std::min(height, y0 + kBlockRows);
+             for (u32 x = 0; x < width; x++) {
+                 u8* dest = out + (static_cast<size_t>(x) * height + y0) * 4;
+@@ -89,7 +92,7 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+                     std::memcpy(dest, color.AsArray(), sizeof(color));
+                 }
+             }
+-        }
++        });
+     };
+     switch (framebuffer.color_format) {
+     case Pica::PixelFormat::RGBA8:
+diff --git a/src/video_core/renderer_software/sw_blitter.cpp b/src/video_core/renderer_software/sw_blitter.cpp
+index 39656a1..be8b599 100644
+--- a/src/video_core/renderer_software/sw_blitter.cpp
++++ b/src/video_core/renderer_software/sw_blitter.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <algorithm>
+ #include <cstring>
+ #include "common/alignment.h"
+ #include "common/color.h"
+@@ -11,6 +12,7 @@
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/renderer_software/sw_blitter.h"
+ #include "video_core/renderer_software/sw_frame_skip.h"
++#include "video_core/renderer_software/sw_rasterizer.h"
+ #include "video_core/utils.h"
+ 
+ namespace SwRenderer {
+@@ -199,7 +201,8 @@ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
+     const bool copy_direct =
+         config.input_format == config.output_format && config.scaling == config.NoScale;
+ 
+-    for (u32 y = 0; y < output_height; ++y) {
++    const auto transfer_rows = [&](u32 y_begin, u32 y_end) {
++    for (u32 y = y_begin; y < y_end; ++y) {
+         for (u32 x = 0; x < output_width; ++x) {
+             Common::Vec4<u8> src_color;
+ 
+@@ -314,6 +317,18 @@ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
+             }
+         }
+     }
++    };
++    // Every output pixel is written once, so bands of rows can run in parallel.
++    auto* sw_rasterizer = dynamic_cast<RasterizerSoftware*>(rasterizer);
++    constexpr u32 kBandRows = 8;
++    const u32 bands = (output_height + kBandRows - 1) / kBandRows;
++    if (sw_rasterizer && bands > 1) {
++        sw_rasterizer->ParallelFor(bands, [&](u32 band) {
++            transfer_rows(band * kBandRows, std::min(output_height, (band + 1) * kBandRows));
++        });
++    } else {
++        transfer_rows(0, output_height);
++    }
+ }
+ 
+ void SwBlitter::MemoryFill(const Pica::MemoryFillConfig& config) {
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index b01a81c..b33ce83 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -687,12 +687,36 @@ void RasterizerSoftware::DrawTriangles() {
+     pool->Execute(batch);
+ }
+ 
++void RasterizerSoftware::ParallelFor(u32 count, const std::function<void(u32)>& fn) {
++    DrawTriangles();
++    if (count == 0) {
++        return;
++    }
++    if (count == 1 || !pool || pool->NumThreads() == 0) {
++        for (u32 i = 0; i < count; ++i) {
++            fn(i);
++        }
++        return;
++    }
++    auto batch = std::make_shared<Batch>();
++    batch->task = fn;
++    batch->num_bands = count;
++    pool->Execute(batch);
++}
++
+ void RasterizerSoftware::Batch::Run() {
+     for (;;) {
+         const u32 b = next.fetch_add(1, std::memory_order_relaxed);
+         if (b >= num_bands) {
+             return;
+         }
++        if (task) {
++            task(b);
++            if (done.fetch_add(1, std::memory_order_acq_rel) + 1 == num_bands) {
++                done.notify_all();
++            }
++            continue;
++        }
+         const u32 y0 = lo + b * band_rows;
+         const u32 y1 = std::min(hi, y0 + band_rows);
+         for (const auto& job : jobs) {
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index d016563..85cb69e 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -34,6 +34,10 @@ public:
+     void AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
+                      const Pica::OutputVertex& v2) override;
+     void DrawTriangles() override;
++
++    /// Calls fn(0) .. fn(count - 1) spread over the drawing threads and this one; returns
++    /// when all are done. Calls must touch disjoint memory.
++    void ParallelFor(u32 count, const std::function<void(u32)>& fn);
+     void FlushAll() override {
+         DrawTriangles();
+     }
+@@ -95,6 +99,7 @@ private:
+     /// All triangles of one draw call, split into screen bands drawn by several threads.
+     struct Batch {
+         std::vector<PendingTriangle> jobs;
++        std::function<void(u32)> task; ///< Generic work instead of jobs (ParallelFor)
+         u32 lo = 0;
+         u32 hi = 0;
+         u32 band_rows = 1;
+-- 
+2.43.0
+

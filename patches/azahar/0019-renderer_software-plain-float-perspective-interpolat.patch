@@ -1,0 +1,123 @@
+From 732f18d3cfd0ee04dfc40f2626da7781fcc3c3d7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 15:24:05 -0400
+Subject: [PATCH] renderer_software: plain-float perspective interpolation;
+ evaluate only the TEV inputs an operation reads
+
+---
+ .../renderer_software/sw_rasterizer.cpp       | 70 ++++++++++++++-----
+ 1 file changed, 51 insertions(+), 19 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index 479f11a..b01a81c 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -389,7 +389,8 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+     const int bias2 =
+         IsRightSideOrFlatBottomEdge(vtxpos[2].xy(), vtxpos[0].xy(), vtxpos[1].xy()) ? -1 : 0;
+ 
+-    const auto w_inverse = Common::MakeVec(v0.pos.w, v1.pos.w, v2.pos.w);
++    const std::array<float, 3> w_inverse_f = {v0.pos.w.ToFloat32(), v1.pos.w.ToFloat32(),
++                                               v2.pos.w.ToFloat32()};
+ 
+     const auto textures = regs.texturing.GetTextures();
+     const auto tev_stages = regs.texturing.GetTevStages();
+@@ -483,11 +484,18 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                     continue;
+                 }
+ 
+-                const auto baricentric_coordinates = Common::MakeVec(
+-                    f24::FromFloat32(static_cast<f32>(w0)), f24::FromFloat32(static_cast<f32>(w1)),
+-                    f24::FromFloat32(static_cast<f32>(w2)));
+-                const f24 interpolated_w_inverse =
+-                    f24::One() / Common::Dot(w_inverse, baricentric_coordinates);
++                // Perspective-correct weights, computed once per pixel in plain float math
++                // (f24 is a float underneath; going through Dot() per attribute cost more
++                // than the rest of the interpolation).
++                const float bw0 = static_cast<float>(w0);
++                const float bw1 = static_cast<float>(w1);
++                const float bw2 = static_cast<float>(w2);
++                const float inv_w_sum = 1.0f / (w_inverse_f[0] * bw0 + w_inverse_f[1] * bw1 +
++                                                w_inverse_f[2] * bw2);
++                const f24 interpolated_w_inverse = f24::FromFloat32(inv_w_sum);
++                const float pw0 = bw0 * inv_w_sum;
++                const float pw1 = bw1 * inv_w_sum;
++                const float pw2 = bw2 * inv_w_sum;
+ 
+                 // interpolated_z = z / w
+                 const float interpolated_z_over_w =
+@@ -527,10 +535,8 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                  *coordinates.
+                  **/
+                 const auto get_interpolated_attribute = [&](f24 attr0, f24 attr1, f24 attr2) {
+-                    auto attr_over_w = Common::MakeVec(attr0, attr1, attr2);
+-                    f24 interpolated_attr_over_w =
+-                        Common::Dot(attr_over_w, baricentric_coordinates);
+-                    return interpolated_attr_over_w * interpolated_w_inverse;
++                    return f24::FromFloat32(attr0.ToFloat32() * pw0 + attr1.ToFloat32() * pw1 +
++                                            attr2.ToFloat32() * pw2);
+                 };
+ 
+                 const Common::Vec4<u8> primary_color{
+@@ -1017,11 +1023,30 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+         const auto source2 = tev_stage_index == 0 && tev_stage.color_source2 == Source::Previous
+                                  ? tev_stage.color_source3.Value()
+                                  : tev_stage.color_source2.Value();
+-        const std::array<Common::Vec3<u8>, 3> color_result = {
+-            GetColorModifier(tev_stage.color_modifier1, get_source(source1)),
+-            GetColorModifier(tev_stage.color_modifier2, get_source(source2)),
+-            GetColorModifier(tev_stage.color_modifier3, get_source(tev_stage.color_source3)),
++        // Only the inputs the operation reads: Replace uses one, Lerp and the
++        // multiply/add pairs use three, the rest two.
++        const auto operands = [](Operation op) -> u32 {
++            switch (op) {
++            case Operation::Replace:
++                return 1;
++            case Operation::Lerp:
++            case Operation::MultiplyThenAdd:
++            case Operation::AddThenMultiply:
++                return 3;
++            default:
++                return 2;
++            }
+         };
++        const u32 color_operands = operands(tev_stage.color_op);
++        std::array<Common::Vec3<u8>, 3> color_result{};
++        color_result[0] = GetColorModifier(tev_stage.color_modifier1, get_source(source1));
++        if (color_operands > 1) {
++            color_result[1] = GetColorModifier(tev_stage.color_modifier2, get_source(source2));
++        }
++        if (color_operands > 2) {
++            color_result[2] =
++                GetColorModifier(tev_stage.color_modifier3, get_source(tev_stage.color_source3));
++        }
+         const Common::Vec3<u8> color_output = ColorCombine(tev_stage.color_op, color_result);
+ 
+         u8 alpha_output;
+@@ -1030,11 +1055,18 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+             alpha_output = color_output.x;
+         } else {
+             // alpha combiner
+-            const std::array<u8, 3> alpha_result = {{
+-                GetAlphaModifier(tev_stage.alpha_modifier1, get_source(tev_stage.alpha_source1)),
+-                GetAlphaModifier(tev_stage.alpha_modifier2, get_source(tev_stage.alpha_source2)),
+-                GetAlphaModifier(tev_stage.alpha_modifier3, get_source(tev_stage.alpha_source3)),
+-            }};
++            const u32 alpha_operands = operands(tev_stage.alpha_op);
++            std::array<u8, 3> alpha_result{};
++            alpha_result[0] =
++                GetAlphaModifier(tev_stage.alpha_modifier1, get_source(tev_stage.alpha_source1));
++            if (alpha_operands > 1) {
++                alpha_result[1] = GetAlphaModifier(tev_stage.alpha_modifier2,
++                                                   get_source(tev_stage.alpha_source2));
++            }
++            if (alpha_operands > 2) {
++                alpha_result[2] = GetAlphaModifier(tev_stage.alpha_modifier3,
++                                                   get_source(tev_stage.alpha_source3));
++            }
+             alpha_output = AlphaCombine(tev_stage.alpha_op, alpha_result);
+         }
+ 
+-- 
+2.43.0
+

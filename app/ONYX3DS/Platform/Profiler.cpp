@@ -79,10 +79,24 @@ void Report(const char* label, Group& g, int failed) {
               100.0 * (g.total - g.in_exe - g.in_private) / g.total, failed);
     std::vector<std::pair<std::uint64_t, int>> top(g.hot.begin(), g.hot.end());
     std::sort(top.begin(), top.end(), [](auto& a, auto& b) { return a.second > b.second; });
-    for (size_t i = 0; i < top.size() && i < 40; ++i)
-        ONYX_INFO("Profile %s:   +0x%llX  %.1f%%", label,
-                  static_cast<unsigned long long>(top[i].first << 4),
-                  100.0 * top[i].second / g.total);
+    // Up to 200 hot spots, 20 per line ("offset:percent"), so whole functions can be
+    // added up against the map file.
+    std::string line;
+    int on_line = 0;
+    for (size_t i = 0; i < top.size() && i < 200; ++i) {
+        const double pct = 100.0 * top[i].second / g.total;
+        if (pct < 0.05) break;
+        char item[48];
+        std::snprintf(item, sizeof(item), " %llX:%.2f",
+                      static_cast<unsigned long long>(top[i].first << 4), pct);
+        line += item;
+        if (++on_line == 20) {
+            ONYX_INFO("Profile %s hot:%s", label, line.c_str());
+            line.clear();
+            on_line = 0;
+        }
+    }
+    if (!line.empty()) ONYX_INFO("Profile %s hot:%s", label, line.c_str());
     for (auto& [name, n] : g.modules)
         if (100.0 * n / g.total >= 1.0)
             ONYX_INFO("Profile %s: system code in %s  %.1f%%", label, name.c_str(),
