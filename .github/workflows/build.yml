@@ -143,3 +143,21 @@ jobs:
             out/AppPackages/**
             out/ONYX3DS.cer
           if-no-files-found: error
+
+  verify:
+    needs: package
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ONYX3DS-xbox
+          path: artifacts/ONYX3DS-xbox
+      - name: Import scan and launch test
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tools/verify-package.ps1
+      - if: always()
+        run: |
+          lvl=warning; [ "${{ job.status }}" = success ] || lvl=error
+          tools/ci-annotate.sh report-imports.txt Imports $lvl
+          tools/ci-annotate.sh report-launch.txt Launch $lvl
