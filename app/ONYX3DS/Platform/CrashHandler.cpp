@@ -17,6 +17,12 @@ namespace onyx::app {
 namespace {
 
 thread_local bool t_in_handler = false; // a fault while reporting must not recurse
+// RunGuarded nesting on this thread. When > 0, std::terminate and abort() turn
+// into an SEH exception the guard catches, instead of ending the process.
+thread_local int t_guard_depth = 0;
+thread_local bool t_raising_fatal = false;
+thread_local char t_fatal_msg[384] = {};
+constexpr DWORD kOnyxFatal = 0xE04F4E58; // 'ONX': terminate/abort redirected to the guard
 
 bool IsExecutable(DWORD protect) {
     return (protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
@@ -69,6 +75,7 @@ const char* CodeName(DWORD code) {
     case 0xC0000374: return "heap corruption";
     case 0xC0000409: return "stack buffer overrun / fail fast";
     case 0xE06D7363: return "C++ exception";
+    case kOnyxFatal: return "fatal error";
     default: return "exception";
     }
 }
@@ -146,6 +153,15 @@ void Report(const char* stage, EXCEPTION_POINTERS* ep) {
 
 LONG GuardFilter(EXCEPTION_POINTERS* ep, GuardedCrash* out) {
     const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
+    if (rec->ExceptionCode == kOnyxFatal) {
+        // Already logged by the terminate/abort hook; carry its message.
+        out->code = rec->ExceptionCode;
+        out->in_jit = false;
+        std::snprintf(out->what, sizeof(out->what), "%.95s", t_fatal_msg);
+        std::snprintf(out->where, sizeof(out->where), "the emulator core");
+        LogRaw("Recovered: the game was stopped and the app keeps running");
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
     Report("Emulator crashed; the game was stopped and the app keeps running", ep);
     out->code = rec->ExceptionCode;
     std::snprintf(out->what, sizeof(out->what), "%s", CodeName(rec->ExceptionCode));
@@ -174,6 +190,15 @@ bool RunGuardedImpl(void (*fn)(void*), void* ctx, GuardedCrash* out) {
     } __except (GuardFilter(GetExceptionInformation(), out)) {
         return false;
     }
+}
+
+// Sends this thread to the nearest RunGuarded handler. Frames in between are
+// abandoned without running destructors; the guard treats the core as dead.
+[[noreturn]] void RaiseToGuard(const char* msg) {
+    std::snprintf(t_fatal_msg, sizeof(t_fatal_msg), "%s", msg);
+    t_raising_fatal = true;
+    RaiseException(kOnyxFatal, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    std::abort(); // not reached
 }
 #else
 bool RunGuardedImpl(void (*fn)(void*), void* ctx, GuardedCrash*) {
@@ -204,6 +229,13 @@ void OnTerminate() {
     std::snprintf(line, sizeof(line), "std::terminate on thread %lu: uncaught %s",
                   GetCurrentThreadId(), what.c_str());
     LogRaw(line);
+#if defined(_MSC_VER)
+    if (t_guard_depth > 0 && !t_raising_fatal) {
+        char msg[300];
+        std::snprintf(msg, sizeof(msg), "%.280s", what.c_str());
+        RaiseToGuard(msg);
+    }
+#endif
     std::abort();
 }
 
@@ -211,12 +243,19 @@ void OnAbort(int) {
     char line[128];
     std::snprintf(line, sizeof(line), "abort() called on thread %lu", GetCurrentThreadId());
     LogRaw(line);
+#if defined(_MSC_VER)
+    if (t_guard_depth > 0 && !t_raising_fatal) RaiseToGuard("abort() in the emulator core");
+#endif
 }
 
 } // namespace
 
 bool RunGuarded(void (*fn)(void*), void* ctx, GuardedCrash* out) {
-    return RunGuardedImpl(fn, ctx, out);
+    ++t_guard_depth;
+    const bool ok = RunGuardedImpl(fn, ctx, out);
+    --t_guard_depth;
+    t_raising_fatal = false;
+    return ok;
 }
 
 void InstallCrashHandler() {

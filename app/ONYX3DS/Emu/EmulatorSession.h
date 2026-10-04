@@ -44,6 +44,9 @@ public:
     bool Ready() const { return ready_; }
     // The last game stopped because the CPU JIT crashed.
     bool CrashedInJit() const { return crashed_in_jit_.load(); }
+    // The last game stopped because the hardware (Vulkan) renderer crashed.
+    bool CrashedInGpu() const { return crashed_in_gpu_.load(); }
+    bool UsingSoftwareRenderer() const { return software_.load(); }
 
     D3D12Presenter& Presenter() { return presenter_; }
     InputManager& Input() { return input_; }
@@ -107,6 +110,8 @@ private:
     void EmulationThread(std::string rom_path);
     void EmulationThreadBody(const std::string& rom_path);
     void OnCoreCrashed(const GuardedCrash& crash);
+    // If the D3D12 device was removed, logs why (and DRED data when available).
+    void LogGpuRemovedReason();
     void RunCommands();
     void Pace(std::chrono::steady_clock::time_point& deadline);
     void Post(std::function<void()> command);
@@ -131,6 +136,11 @@ private:
     // never called again in this process; the user restarts the app.
     std::atomic<bool> core_crashed_{false};
     std::atomic<bool> crashed_in_jit_{false};
+    std::atomic<bool> crashed_in_gpu_{false};
+    // Vulkan (Dozen) came up at startup. Without it only the software renderer runs.
+    bool vulkan_ok_ = false;
+    // This game uses Azahar's software renderer: frames arrive as CPU pixels.
+    std::atomic<bool> software_{true};
     int frames_since_drain_ = 0;
     std::mutex init_mutex_;
 

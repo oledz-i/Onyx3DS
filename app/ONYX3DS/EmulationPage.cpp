@@ -185,7 +185,16 @@ void EmulationPage::OnStopped(const std::string& reason) {
     }
     ONYX_ERROR("Game stopped: %s", reason.c_str());
     LoadingOverlay().Visibility(Visibility::Collapsed);
-    const bool crashed = Emu().CrashedInJit() || reason.rfind("The emulator hit an error", 0) == 0;
+    const bool crashed = Emu().CrashedInJit() || Emu().CrashedInGpu() ||
+                         reason.rfind("The emulator hit an error", 0) == 0;
+    if (Emu().CrashedInGpu()) {
+        // Back to the software renderer for every game until the user opts in again.
+        auto& cfg = Svc().Config();
+        cfg.core[keys::kGraphicsApi] = "Software";
+        for (auto& [title, opts] : cfg.per_game) opts.erase(keys::kGraphicsApi);
+        Svc().SaveSettings();
+        ONYX_WARN("Hardware renderer crashed; switched to software rendering");
+    }
     if (Emu().CrashedInJit()) {
         // Fall back to the interpreter for every game until the user turns the JIT back on.
         auto& cfg = Svc().Config();

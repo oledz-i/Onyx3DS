@@ -6,10 +6,10 @@
 
 using namespace onyx;
 
-TEST_CASE("Series S profile forces Vulkan, 2x and fast shaders") {
+TEST_CASE("Series S profile: Software renderer by default, 2x and fast shaders") {
     const Settings s = Settings::Defaults(ConsoleModel::SeriesS);
     const auto o = s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000030800");
-    CHECK(o.at(keys::kGraphicsApi) == "Vulkan");
+    CHECK(o.at(keys::kGraphicsApi) == "Software");
     CHECK(o.at(keys::kResolution) == "2");
     CHECK(o.at(keys::kAccurateMul) == "disabled");
     CHECK(o.at(keys::kCpuJit) == "enabled");
@@ -36,7 +36,7 @@ TEST_CASE("Per-game overrides win, but never the renderer") {
     s.per_game["0004000000030800"] = {{keys::kResolution, "3"}, {keys::kGraphicsApi, "OpenGL"}};
     const auto o = s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000030800");
     CHECK(o.at(keys::kResolution) == "3");
-    CHECK(o.at(keys::kGraphicsApi) == "Vulkan");
+    CHECK(o.at(keys::kGraphicsApi) == "Software");
     CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000099900").at(keys::kResolution) == "2");
 }
 
@@ -127,4 +127,20 @@ TEST_CASE("Core option catalog survives a JSON round trip") {
     CHECK(r.options[0].values[1].label == "2x (800x480)");
     CHECK(r.categories[0].label == "Graphics");
     CHECK(CoreOptionCatalog::FromJson("garbage").options.empty());
+}
+
+TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
+    Settings s = Settings::Defaults(ConsoleModel::SeriesS);
+    s.core[keys::kGraphicsApi] = "Vulkan";
+    CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
+
+    s.version = 1;
+    const Settings back = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
+    CHECK(back.version == 2);
+    CHECK(back.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
+
+    Settings v2 = Settings::Defaults(ConsoleModel::SeriesS);
+    v2.core[keys::kGraphicsApi] = "Vulkan";
+    const Settings kept = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
+    CHECK(kept.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
 }

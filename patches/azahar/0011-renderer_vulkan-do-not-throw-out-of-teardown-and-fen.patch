@@ -1,0 +1,116 @@
+From c87bc7a8b33d68c9a1f59f1b2337ca271f5cd115 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sun, 4 Oct 2026 09:11:30 -0400
+Subject: [PATCH] renderer_vulkan: do not throw out of teardown and fence wait
+ threads
+
+After a lost device, vulkan.hpp throws from vkWaitForFences/vkDeviceWaitIdle.
+PresentWindow and RendererVulkan wait in their destructors (implicitly
+noexcept) and the fence wait threads have nothing above them, so either
+path called std::terminate and the process ended. Catch and log there; the
+wait threads still advance the GPU tick so the emulation thread is not left
+waiting forever.
+---
+ src/citra_libretro/libretro_vk.cpp            | 29 ++++++++++++-------
+ .../renderer_vulkan/renderer_vulkan.cpp       | 10 +++++--
+ .../renderer_vulkan/vk_master_semaphore.cpp   | 13 +++++----
+ 3 files changed, 34 insertions(+), 18 deletions(-)
+
+diff --git a/src/citra_libretro/libretro_vk.cpp b/src/citra_libretro/libretro_vk.cpp
+index 1589c90..1e60e1e 100644
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -401,9 +401,14 @@ PresentWindow::~PresentWindow() {
+ 
+     LOG_DEBUG(Render_Vulkan, "Destroying LibRetro PresentWindow");
+ 
+-    // Wait for any pending operations
+-    WaitPresent();
+-    device.waitIdle();
++    // Wait for any pending operations. Destructors are noexcept: if the device
++    // was lost, vulkan.hpp throws here and the process would be terminated.
++    try {
++        WaitPresent();
++        device.waitIdle();
++    } catch (const vk::SystemError& e) {
++        LOG_ERROR(Render_Vulkan, "PresentWindow teardown: {}", e.what());
++    }
+ 
+     // Destroy frame resources
+     DestroyFrameResources();
+@@ -865,15 +870,19 @@ void MasterSemaphoreLibRetro::WaitThread(std::stop_token token) {
+             wait_queue.pop();
+         }
+ 
+-        // Wait for fence (blocks only this background thread)
+-        const vk::Result result = device.waitForFences(fence, true, UINT64_MAX);
+-        if (result != vk::Result::eSuccess) {
+-            LOG_ERROR(Render_Vulkan, "Fence wait failed: {}", vk::to_string(result));
++        // Wait for fence (blocks only this background thread). An exception here
++        // (device lost) would terminate the process from this thread, so log it
++        // and still release the tick, or the emulation thread waits forever.
++        try {
++            const vk::Result result = device.waitForFences(fence, true, UINT64_MAX);
++            if (result != vk::Result::eSuccess) {
++                LOG_ERROR(Render_Vulkan, "Fence wait failed: {}", vk::to_string(result));
++            }
++            device.resetFences(fence);
++        } catch (const vk::SystemError& e) {
++            LOG_ERROR(Render_Vulkan, "Fence wait failed: {}", e.what());
+         }
+ 
+-        // Reset fence and return to pool
+-        device.resetFences(fence);
+-
+         // Update GPU tick - signals main thread's Wait()
+         gpu_tick.store(signal_value, std::memory_order_release);
+ 
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.cpp b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+index 5221fdf..d0048f0 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -137,9 +137,13 @@ RendererVulkan::RendererVulkan(Core::System& system, Pica::PicaCore& pica_,
+ 
+ RendererVulkan::~RendererVulkan() {
+     vk::Device device = instance.GetDevice();
+-    scheduler.Finish();
+-    main_present_window.WaitPresent();
+-    device.waitIdle();
++    try {
++        scheduler.Finish();
++        main_present_window.WaitPresent();
++        device.waitIdle();
++    } catch (const vk::SystemError& e) {
++        LOG_ERROR(Render_Vulkan, "Renderer teardown: {}", e.what());
++    }
+ 
+     device.destroyShaderModule(present_vertex_shader);
+     for (u32 i = 0; i < PRESENT_PIPELINES; i++) {
+diff --git a/src/video_core/renderer_vulkan/vk_master_semaphore.cpp b/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
+index 0e5ec6d..cae51d2 100644
+--- a/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
++++ b/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
+@@ -173,12 +173,15 @@ void MasterSemaphoreFence::WaitThread(std::stop_token token) {
+             wait_queue.pop();
+         }
+ 
+-        const vk::Result result = device.waitForFences(fence, true, WAIT_TIMEOUT);
+-        if (result != vk::Result::eSuccess) {
+-            UNREACHABLE_MSG("Fence wait failed with error {}", vk::to_string(result));
++        try {
++            const vk::Result result = device.waitForFences(fence, true, WAIT_TIMEOUT);
++            if (result != vk::Result::eSuccess) {
++                LOG_ERROR(Render_Vulkan, "Fence wait failed with error {}", vk::to_string(result));
++            }
++            device.resetFences(fence);
++        } catch (const vk::SystemError& e) {
++            LOG_ERROR(Render_Vulkan, "Fence wait failed: {}", e.what());
+         }
+-
+-        device.resetFences(fence);
+         gpu_tick.store(signal_value);
+ 
+         std::scoped_lock lock{free_mutex};
+-- 
+2.43.0
+

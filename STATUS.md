@@ -31,6 +31,15 @@
   15 s of a game, so an out-of-memory kill is visible.
 - Azahar logs synchronously now (patch 0008), so its last lines survive a crash.
 
+## Renderer (Oct 4)
+- Default renderer is Azahar's software renderer: frames come back as CPU pixels and
+  are uploaded to the D3D12 presenter, so Dozen is never used. Hardware (Vulkan via
+  Dozen) is opt-in under Settings > Renderer. On the Series S, Dozen lost the device
+  during renderer start-up (see onyx.log history); DRED breadcrumbs and the
+  device-removed reason are now logged for when that is picked up again.
+- A crash with the hardware renderer switches the setting back to Software; a crash
+  in JIT code switches the CPU to the interpreter.
+
 ## Next steps
 1. Re-run the page syntax checks; fix what remains.
 2. Push to GitHub and let `.github/workflows/build.yml` build on Windows; fix MSVC errors.

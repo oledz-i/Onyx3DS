@@ -78,6 +78,9 @@ std::vector<Curated> CuratedOptions() {
         {keys::kLanguage, "System language", "Language multi-language games start in.",
          {{"English", "English"}, {"Japanese", "Japanese"}, {"French", "French"}, {"Spanish", "Spanish"},
           {"German", "German"}, {"Italian", "Italian"}, {"Dutch", "Dutch"}}},
+        {keys::kGraphicsApi, "Renderer",
+         "Software always works but is slow. Hardware (Vulkan on D3D12) is fast but experimental on Xbox.",
+         {{"Software", "Software (safe)"}, {"Vulkan", "Hardware (experimental)"}}},
         {keys::kCpuJit, "CPU JIT",
          "Off uses the interpreter: much slower, but a fallback if the JIT crashes.",
          {{"enabled", "On (fast)"}, {"disabled", "Off (interpreter)"}}},
@@ -310,7 +313,9 @@ void SettingsPage::BuildEmulation() {
     Add(kit::SectionHeader("Emulation"));
     const CoreOptionCatalog catalog = Svc().Catalog();
     for (auto c : CuratedOptions()) {
-        if (const CoreOptionDef* def = catalog.Find(c.key); def && !def->values.empty()) {
+        // The core also lists OpenGL/auto renderers the Xbox build does not have.
+        if (const CoreOptionDef* def = catalog.Find(c.key);
+            def && !def->values.empty() && std::string(c.key) != keys::kGraphicsApi) {
             c.values.clear();
             for (const auto& v : def->values) c.values.emplace_back(v.value, v.label);
         }

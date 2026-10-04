@@ -98,7 +98,7 @@ struct ServiceSettings {
 };
 
 struct Settings {
-    int version = 1;
+    int version = 2;
     FolderConfig folders;
     QolSettings qol;
     ServiceSettings services;

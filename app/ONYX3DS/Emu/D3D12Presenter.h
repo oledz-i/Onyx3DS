@@ -59,6 +59,11 @@ public:
     void EndWrite(int slot_index, uint64_t ready_value);
     // Gives the slot back without publishing it (the copy failed).
     void AbortWrite(int slot_index);
+    // Software-rendered frame (XRGB8888 rows, as libretro hands them over):
+    // copied into a slot through an upload buffer on this presenter's own
+    // device. No Vulkan involved. Returns false if the frame was dropped.
+    bool PushCpuFrame(const void* data, uint32_t width, uint32_t height, size_t pitch);
+
     // Generation counter: bumps when a slot's texture is recreated, so the
     // Vulkan side knows to re-import it.
     uint32_t SlotGeneration(int slot_index) const;
@@ -100,6 +105,17 @@ private:
     UINT srv_stride_ = 0;
     winrt::com_ptr<ID3D12RootSignature> root_sig_;
     winrt::com_ptr<ID3D12PipelineState> pso_;
+
+    // CPU frame uploads (software renderer).
+    std::mutex upload_mutex_;
+    winrt::com_ptr<ID3D12Resource> upload_buffer_;
+    uint64_t upload_size_ = 0;
+    uint8_t* upload_mapped_ = nullptr;
+    winrt::com_ptr<ID3D12CommandAllocator> upload_alloc_;
+    winrt::com_ptr<ID3D12GraphicsCommandList> upload_cmd_;
+    winrt::com_ptr<ID3D12Fence> upload_fence_;
+    uint64_t upload_fence_value_ = 0;
+    HANDLE upload_event_ = nullptr;
 
     // Presenter-local fence (GPU progress of this queue).
     winrt::com_ptr<ID3D12Fence> fence_;

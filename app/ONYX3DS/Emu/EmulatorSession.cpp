@@ -129,14 +129,20 @@ bool EmulatorSession::Initialize(std::string& error) {
         probe_.notes.push_back(error);
         return false;
     }
-    if (!dozen_.Load(error)) {
-        probe_.notes.push_back(error);
-        return false;
+    // Vulkan through Dozen is only needed for the hardware renderer. If it does
+    // not come up, games still run with the software renderer.
+    std::string vk_error;
+    if (dozen_.Load(vk_error)) {
+        vulkan_ = std::make_unique<VulkanHost>(dozen_, presenter_);
+        if (vulkan_->CreateInstance(probe_, vk_error)) {
+            vulkan_ok_ = true;
+        } else {
+            vulkan_.reset();
+        }
     }
-    vulkan_ = std::make_unique<VulkanHost>(dozen_, presenter_);
-    if (!vulkan_->CreateInstance(probe_, error)) {
-        if (probe_.notes.empty()) probe_.notes.push_back(error);
-        return false;
+    if (!vulkan_ok_) {
+        probe_.notes.push_back("Hardware renderer unavailable: " + vk_error);
+        ONYX_WARN("Hardware renderer unavailable (%s); software rendering only", vk_error.c_str());
     }
     ready_ = true;
     return true;
@@ -198,6 +204,18 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         std::lock_guard lock(options_mutex_);
         options_ = settings.EffectiveCoreOptions(model, game.TitleIdHex());
         catalog_ = {};
+        const bool want_hw = options_[keys::kGraphicsApi] == "Vulkan";
+        if (want_hw && !vulkan_ok_)
+            ONYX_WARN("Hardware renderer requested but unavailable; using software");
+        software_ = !(want_hw && vulkan_ok_);
+        if (software_) {
+            options_[keys::kGraphicsApi] = "Software";
+            // The software renderer draws at native 3DS size whatever the scale,
+            // and a bigger output only makes the per-frame copy slower.
+            options_[keys::kResolution] = "1";
+        }
+        ONYX_INFO("Renderer: %s, CPU: %s", software_ ? "software" : "hardware (Vulkan)",
+                  options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT");
     }
     UpdateFolders(settings.folders);
     ff_speed_ = settings.qol.fast_forward_speed;
@@ -290,6 +308,10 @@ void EmulatorSession::OnCoreCrashed(const GuardedCrash& crash) {
     DrainStderrToLog(); // the driver's own explanation, if it gave one
     core_crashed_ = true;
     crashed_in_jit_ = crash.in_jit;
+    // Anything else that dies while the hardware renderer is in use is most
+    // likely the Vulkan/Dozen path: fall back to software next time.
+    crashed_in_gpu_ = !crash.in_jit && !software_;
+    LogGpuRemovedReason();
     ONYX_ERROR("Emulator crashed: %s at %s%s", crash.what, crash.where,
                crash.in_jit ? " (CPU JIT)" : "");
     // Only our own pieces are cleaned up; the core is left alone.
@@ -304,6 +326,10 @@ void EmulatorSession::OnCoreCrashed(const GuardedCrash& crash) {
     if (crash.in_jit)
         reason += "\n\nIt happened in the CPU JIT, so ONYX switched the CPU to the interpreter "
                   "(Settings > CPU JIT). Games will run slower until you switch it back.";
+    else if (crashed_in_gpu_)
+        reason += "\n\nIt happened with the hardware renderer, so ONYX switched to the "
+                  "software renderer (Settings > Renderer). Games will run slower until you "
+                  "switch it back.";
     reason += "\n\nClose and reopen ONYX 3DS before starting another game.";
     std::function<void(const std::string&)> stopped;
     {
@@ -311,6 +337,29 @@ void EmulatorSession::OnCoreCrashed(const GuardedCrash& crash) {
         stopped = events_.stopped;
     }
     if (stopped) stopped(reason);
+}
+
+void EmulatorSession::LogGpuRemovedReason() {
+    ID3D12Device* dev = presenter_.Device();
+    if (!dev) return;
+    const HRESULT hr = dev->GetDeviceRemovedReason();
+    if (hr == S_OK) return;
+    ONYX_ERROR("D3D12 device removed: 0x%08X", static_cast<unsigned>(hr));
+    winrt::com_ptr<ID3D12DeviceRemovedExtendedData> dred;
+    if (FAILED(dev->QueryInterface(IID_PPV_ARGS(dred.put())))) return;
+    D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)) && pf.PageFaultVA)
+        ONYX_ERROR("  GPU page fault at 0x%llx", static_cast<unsigned long long>(pf.PageFaultVA));
+    D3D12_AUTO_BREADCRUMB_NODE const* node = nullptr;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) node = bc.pHeadAutoBreadcrumbNode;
+    for (int n = 0; node && n < 16; node = node->pNext, ++n) {
+        const UINT done = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+        if (done >= node->BreadcrumbCount) continue; // this command list finished
+        ONYX_ERROR("  unfinished command list: %u of %u operations done, stopped at op %d", done,
+                   node->BreadcrumbCount,
+                   node->pCommandHistory ? static_cast<int>(node->pCommandHistory[done]) : -1);
+    }
 }
 
 void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
@@ -357,16 +406,18 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     std::string err;
     if (!loaded) {
         fail(core_reason("The emulator could not open this game. Is it a decrypted dump?"));
-    } else if (!hw_render_set_) {
+    } else if (!software_ && !hw_render_set_) {
         fail("The emulator did not request Vulkan rendering");
-    } else if (!vulkan_->CreateDevice(err)) {
+    } else if (!software_ && !vulkan_->CreateDevice(err)) {
         fail(err);
     } else {
         retro_system_av_info av{};
         retro_get_system_av_info(&av);
         audio_.Start(av.timing.sample_rate > 0 ? static_cast<uint32_t>(av.timing.sample_rate)
                                                : kCoreSampleRate);
-        if (hw_render_.context_reset) hw_render_.context_reset();
+        // Hardware: context_reset is where Azahar boots the game. Software:
+        // retro_load_game already did.
+        if (!software_ && hw_render_.context_reset) hw_render_.context_reset();
         // context_reset is where Azahar actually boots the game.
         const std::string reason = core_reason({});
         if (!reason.empty()) fail(reason);
@@ -374,8 +425,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
 
     DrainStderrToLog();
     if (!fail_reason.empty()) {
+        LogGpuRemovedReason();
         if (loaded) retro_unload_game();
-        vulkan_->DestroyDevice();
+        if (vulkan_ && !software_) vulkan_->DestroyDevice();
         audio_.Stop();
         state_ = SessionState::Failed;
         std::function<void(const std::string&)> stopped;
@@ -456,8 +508,8 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     if (write_auto_on_stop_) DoSaveState(0);
     if (ra_) ra_->UnloadGame();
     retro_unload_game();
-    if (hw_render_.context_destroy) hw_render_.context_destroy();
-    vulkan_->DestroyDevice();
+    if (!software_ && hw_render_.context_destroy) hw_render_.context_destroy();
+    if (vulkan_ && !software_) vulkan_->DestroyDevice();
     audio_.Stop();
     presenter_.SetPaused(false);
     state_ = SessionState::Idle;
@@ -562,7 +614,9 @@ void EmulatorSession::SetFastForward(bool on) {
 void EmulatorSession::ApplyCoreOptions(const CoreOptions& options) {
     std::lock_guard lock(options_mutex_);
     for (const auto& [k, v] : options) options_[k] = v;
-    options_[keys::kGraphicsApi] = "Vulkan";
+    // The renderer cannot change while a game runs.
+    options_[keys::kGraphicsApi] = software_ ? "Software" : "Vulkan";
+    if (software_) options_[keys::kResolution] = "1";
     options_dirty_ = true;
 }
 
@@ -656,7 +710,13 @@ bool EmulatorSession::InstallCia(const std::string& path, const std::function<vo
 // ---------------------------------------------------------------------------
 // libretro callbacks
 
-void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned height, size_t) {
+void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned height,
+                                   size_t pitch) {
+    if (software_) {
+        if (data && data != RETRO_HW_FRAME_BUFFER_VALID)
+            presenter_.PushCpuFrame(data, width, height, pitch);
+        return;
+    }
     if (data == RETRO_HW_FRAME_BUFFER_VALID && vulkan_) vulkan_->OnFrame(width, height);
     // nullptr = duplicate frame: the presenter keeps showing the last one.
 }
@@ -798,6 +858,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         return true;
     case RETRO_ENVIRONMENT_SET_HW_RENDER: {
         auto* cb = static_cast<retro_hw_render_callback*>(data);
+        if (software_ || !vulkan_) return false;
         if (cb->context_type != RETRO_HW_CONTEXT_VULKAN) return false; // only Vulkan on Xbox
         hw_render_ = *cb;
         hw_render_set_ = true;

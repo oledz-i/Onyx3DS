@@ -45,6 +45,7 @@ D3D12Presenter::~D3D12Presenter() {
         if (s.shared_handle) CloseHandle(s.shared_handle);
     if (shared_fence_handle_) CloseHandle(shared_fence_handle_);
     if (fence_event_) CloseHandle(fence_event_);
+    if (upload_event_) CloseHandle(upload_event_);
 }
 
 bool D3D12Presenter::Initialize(std::string& error) {
@@ -58,6 +59,16 @@ bool D3D12Presenter::Initialize(std::string& error) {
         DXGI_ADAPTER_DESC1 desc{};
         adapter->GetDesc1(&desc);
         if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+        // Device Removed Extended Data: if the GPU device is lost (the hardware
+        // renderer runs on this same device), the log can say which command
+        // stopped it. Must be set before the device exists; fails harmlessly.
+        {
+            winrt::com_ptr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(dred.put())))) {
+                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            }
+        }
         if (SUCCEEDED(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0,
                                         IID_PPV_ARGS(device_.put())))) {
             adapter_ = adapter;
@@ -325,6 +336,97 @@ void D3D12Presenter::EndWrite(int slot_index, uint64_t ready_value) {
 void D3D12Presenter::AbortWrite(int slot_index) {
     std::lock_guard lock(slot_mutex_);
     if (writing_ == slot_index) writing_ = -1;
+}
+
+bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t height,
+                                  size_t pitch) {
+    if (!data || width == 0 || height == 0 || !device_) return false;
+    std::lock_guard upload_lock(upload_mutex_);
+    try {
+        if (!upload_cmd_) {
+            winrt::check_hresult(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                 IID_PPV_ARGS(upload_alloc_.put())));
+            winrt::check_hresult(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                            upload_alloc_.get(), nullptr,
+                                                            IID_PPV_ARGS(upload_cmd_.put())));
+            upload_cmd_->Close();
+            winrt::check_hresult(
+                device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(upload_fence_.put())));
+            upload_event_ = CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+        }
+
+        int s = -1;
+        SharedSlot* slot = BeginWrite(width, height, s);
+        if (!slot) return false;
+
+        const D3D12_RESOURCE_DESC desc = slot->texture->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+        UINT64 total = 0;
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+
+        if (!upload_buffer_ || upload_size_ < total) {
+            if (upload_buffer_) upload_buffer_->Unmap(0, nullptr);
+            upload_buffer_ = nullptr;
+            upload_mapped_ = nullptr;
+            D3D12_HEAP_PROPERTIES hp{};
+            hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC bd{};
+            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bd.Width = total;
+            bd.Height = 1;
+            bd.DepthOrArraySize = 1;
+            bd.MipLevels = 1;
+            bd.SampleDesc.Count = 1;
+            bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (FAILED(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(upload_buffer_.put()))) ||
+                FAILED(upload_buffer_->Map(0, nullptr, reinterpret_cast<void**>(&upload_mapped_)))) {
+                upload_buffer_ = nullptr;
+                upload_mapped_ = nullptr;
+                AbortWrite(s);
+                return false;
+            }
+            upload_size_ = total;
+        }
+
+        // XRGB8888 (bytes B,G,R,X) -> RGBA8 with opaque alpha.
+        const auto* src = static_cast<const uint8_t*>(data);
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint32_t* in = reinterpret_cast<const uint32_t*>(src + y * pitch);
+            uint32_t* out = reinterpret_cast<uint32_t*>(upload_mapped_ + fp.Offset +
+                                                        static_cast<size_t>(y) * fp.Footprint.RowPitch);
+            for (uint32_t x = 0; x < width; ++x) {
+                const uint32_t p = in[x];
+                out[x] = 0xFF000000u | ((p & 0xFFu) << 16) | (p & 0xFF00u) | ((p >> 16) & 0xFFu);
+            }
+        }
+
+        upload_alloc_->Reset();
+        upload_cmd_->Reset(upload_alloc_.get(), nullptr);
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = slot->texture.get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION srcloc{};
+        srcloc.pResource = upload_buffer_.get();
+        srcloc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcloc.PlacedFootprint = fp;
+        // Simultaneous-access texture: implicitly promoted to COPY_DEST, decays to COMMON.
+        upload_cmd_->CopyTextureRegion(&dst, 0, 0, 0, &srcloc, nullptr);
+        upload_cmd_->Close();
+        ID3D12CommandList* lists[] = {upload_cmd_.get()};
+        queue_->ExecuteCommandLists(1, lists);
+        const uint64_t v = ++upload_fence_value_;
+        queue_->Signal(upload_fence_.get(), v);
+        if (upload_fence_->GetCompletedValue() < v) {
+            upload_fence_->SetEventOnCompletion(v, upload_event_);
+            WaitForSingleObject(upload_event_, 1000);
+        }
+        EndWrite(s, 0); // already complete on the GPU
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 uint32_t D3D12Presenter::SlotGeneration(int slot_index) const {

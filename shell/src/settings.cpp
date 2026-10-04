@@ -54,7 +54,6 @@ PerfProfile ResolveAuto(ConsoleModel model) {
 CoreOptions ProfileOptions(PerfProfile profile) {
     // Shared by every profile: settings that are always right on Xbox.
     CoreOptions o = {
-        {keys::kGraphicsApi, "Vulkan"},          // Vulkan runs on D3D12 through Dozen
         {keys::kHwShader, "enabled"},
         {keys::kShaderJit, "enabled"},
         {keys::kDiskShaderCache, "enabled"},
@@ -100,6 +99,9 @@ Settings Settings::Defaults(ConsoleModel model) {
         // Not owned by any profile: the app switches it off by itself after a JIT
         // crash, and the user can always switch back.
         {keys::kCpuJit, "enabled"},
+        // Software rendering never touches Dozen or the GPU driver, so it is the
+        // safe default on Xbox. Hardware (Vulkan through Dozen) is opt-in.
+        {keys::kGraphicsApi, "Software"},
         {keys::kNew3ds, "New 3DS"},
         {keys::kRegion, "Auto"},
         {keys::kLanguage, "English"},
@@ -132,7 +134,8 @@ CoreOptions Settings::EffectiveCoreOptions(ConsoleModel model,
     if (auto it = per_game.find(title_id_hex); it != per_game.end())
         for (const auto& [k, v] : it->second) out[k] = v;
     // Never let a saved value pick a renderer the console cannot run.
-    out[keys::kGraphicsApi] = "Vulkan";
+    // Only the two renderers the Xbox build has: Vulkan (via Dozen) or Software.
+    if (out[keys::kGraphicsApi] != "Vulkan") out[keys::kGraphicsApi] = "Software";
     out[keys::kUseLibretroSavePath] = "LibRetro Default";
     return out;
 }
@@ -303,6 +306,13 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
     for (const auto& [k, v] : core) s.core[k] = v;
     Take(j, "per_game", s.per_game);
     Take(j, "last_played_path", s.last_played_path);
+    // v2: renderer became a user setting with Software as the default. Older
+    // files were written when Vulkan was forced, so reset it once.
+    if (s.version < 2) {
+        s.core[keys::kGraphicsApi] = "Software";
+        for (auto& [title, opts] : s.per_game) opts.erase(keys::kGraphicsApi);
+        s.version = 2;
+    }
     return s;
 }
 
