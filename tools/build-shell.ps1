@@ -7,7 +7,7 @@ Use-VsDevShell
 $build = Join-Path $DepsBuild "shell"
 Write-Step "Building the ONYX shell for WindowsStore"
 Invoke-Checked cmake -S (Join-Path $Root "shell") -B $build -G "Visual Studio 17 2022" -A x64 `
-    -DCMAKE_SYSTEM_NAME=WindowsStore -DCMAKE_SYSTEM_VERSION=10.0 -DONYX_SHELL_TESTS=OFF
+    "-DCMAKE_SYSTEM_NAME=WindowsStore" "-DCMAKE_SYSTEM_VERSION=10.0" "-DONYX_SHELL_TESTS=OFF"
 Invoke-Checked cmake --build $build --config $Configuration --parallel
 foreach ($lib in "onyx_shell.lib", "rcheevos.lib") {
     Copy-Item (Get-ChildItem $build -Recurse -Filter $lib | Where-Object { $_.FullName -match "\\$Configuration\\" } |
