@@ -214,6 +214,8 @@ void D3D12Presenter::Attach(winrt::Windows::UI::Xaml::Controls::SwapChainPanel c
     want_height_ = h;
     if (!swapchain_ && !CreateSwapChain(w, h)) return;
     winrt::check_hresult(panel.as<ISwapChainPanelNative>()->SetSwapChain(swapchain_.get()));
+    ONYX_INFO("Display attached: panel %.0fx%.0f, scale %.2fx%.2f, swap chain %ux%u",
+              panel.ActualWidth(), panel.ActualHeight(), scale_x_.load(), scale_y_.load(), w, h);
     running_ = true;
     render_thread_ = std::thread([this] { RenderLoop(); });
 }
@@ -438,15 +440,43 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         }
         EndWrite(s, 0); // already complete on the GPU
         static uint64_t s_frames = 0;
-        if (++s_frames == 1 || s_frames % 600 == 0)
-            ONYX_INFO("Software frame %llu shown (%ux%u)", static_cast<unsigned long long>(s_frames),
-                      width, height);
+        if (++s_frames == 1 || s_frames == 30 || s_frames % 600 == 0) {
+            // How much of the picture is not black, sampled on a grid: tells a
+            // black frame from the emulator apart from a display problem.
+            uint64_t lit = 0, total = 0;
+            for (uint32_t y = 0; y < height; y += 8) {
+                const uint32_t* row = reinterpret_cast<const uint32_t*>(src + y * pitch);
+                for (uint32_t x = 0; x < width; x += 8, ++total)
+                    if (row[x] & 0x00F0F0F0u) ++lit;
+            }
+            ONYX_INFO("Software frame %llu uploaded (%ux%u), %.1f%% non-black",
+                      static_cast<unsigned long long>(s_frames), width, height,
+                      total ? 100.0 * lit / total : 0.0);
+        }
         return true;
     } catch (winrt::hresult_error const& e) {
         return fail("D3D12 error", e.code());
     } catch (...) {
         return fail("unexpected error", E_FAIL);
     }
+}
+
+void D3D12Presenter::ShowTestPattern() {
+    constexpr uint32_t w = 800, h = 480;
+    std::vector<uint32_t> px(static_cast<size_t>(w) * h);
+    const uint32_t bars[8] = {0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00,
+                              0xFF00FF, 0xFF0000, 0x0000FF, 0x101010}; // XRGB
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            px[static_cast<size_t>(y) * w + x] = bars[x * 8 / w];
+    const bool ok = PushCpuFrame(px.data(), w, h, w * 4);
+    if (ok) {
+        std::lock_guard lock(slot_mutex_);
+        displaying_ = latest_; // show it now, then hold it for two seconds
+        latest_ = -1;
+        hold_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    }
+    ONYX_INFO("Display self-test: colour bars %s", ok ? "sent to the screen" : "could NOT be uploaded");
 }
 
 uint32_t D3D12Presenter::SlotGeneration(int slot_index) const {
@@ -468,7 +498,7 @@ void D3D12Presenter::RenderLoop() {
         int slot;
         {
             std::lock_guard lock(slot_mutex_);
-            if (latest_ >= 0 && !paused_) {
+            if (latest_ >= 0 && !paused_ && std::chrono::steady_clock::now() >= hold_until_) {
                 displaying_ = latest_;
                 latest_ = -1;
             }
@@ -480,8 +510,21 @@ void D3D12Presenter::RenderLoop() {
             WaitForSingleObjectEx(fence_event_, 1000, FALSE);
         }
         DrawFrame(slot, back);
-        swapchain_->Present(1, 0);
+        const HRESULT phr = swapchain_->Present(1, 0);
+        if (FAILED(phr) && phr != last_present_hr_)
+            ONYX_ERROR("Present failed: 0x%08X (device: 0x%08X)", static_cast<unsigned>(phr),
+                       static_cast<unsigned>(device_->GetDeviceRemovedReason()));
+        last_present_hr_ = phr;
+        last_drawn_slot_ = slot;
         ++presents_in_window_;
+        static auto s_last_report = std::chrono::steady_clock::now();
+        if (std::chrono::steady_clock::now() - s_last_report > std::chrono::seconds(5)) {
+            s_last_report = std::chrono::steady_clock::now();
+            ONYX_INFO("Display: swap chain %ux%u (scale %.2f), drawing slot %d, present 0x%08X, "
+                      "%.0f presents/s, %.1f game frames/s",
+                      sc_width_, sc_height_, scale_x_.load(), slot, static_cast<unsigned>(phr),
+                      stats_.present_fps, stats_.emu_fps);
+        }
 
         const auto now = std::chrono::steady_clock::now();
         const double secs = std::chrono::duration<double>(now - window_start_).count();

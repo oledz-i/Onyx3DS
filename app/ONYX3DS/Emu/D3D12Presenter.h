@@ -63,6 +63,8 @@ public:
     // copied into a slot through an upload buffer on this presenter's own
     // device. No Vulkan involved. Returns false if the frame was dropped.
     bool PushCpuFrame(const void* data, uint32_t width, uint32_t height, size_t pitch);
+    // Shows colour bars through the same upload path (start-up self-test).
+    void ShowTestPattern();
 
     // Generation counter: bumps when a slot's texture is recreated, so the
     // Vulkan side knows to re-import it.
@@ -141,6 +143,10 @@ private:
     std::atomic<uint32_t> want_width_{1920}, want_height_{1080};
     std::atomic<float> scale_x_{1.0f}, scale_y_{1.0f};
     uint32_t sc_width_ = 0, sc_height_ = 0;
+    HRESULT last_present_hr_ = S_OK;
+    // While set, newer frames wait so the self-test pattern stays visible.
+    std::chrono::steady_clock::time_point hold_until_{};
+    int last_drawn_slot_ = -1;
 
     std::atomic<int> filter_{static_cast<int>(ScreenFilter::Smooth)};
     std::atomic<bool> paused_{false};

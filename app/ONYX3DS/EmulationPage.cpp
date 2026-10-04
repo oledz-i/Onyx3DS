@@ -147,6 +147,9 @@ void EmulationPage::StartGame() {
 void EmulationPage::OnStarted() {
     started_ = true;
     LoadingOverlay().Visibility(Visibility::Collapsed);
+    ONYX_INFO("Game started; loading screen hidden");
+    // Two seconds of colour bars: proves the picture path works before the game's first frame.
+    if (Emu().UsingSoftwareRenderer()) RunAsync([] { Emu().Presenter().ShowTestPattern(); });
     auto& session = Emu();
     Svc().StoreCatalog(session.Catalog());
 
