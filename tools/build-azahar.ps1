@@ -23,7 +23,7 @@ $cmakeArgs = @(
     "-DCITRA_WARNINGS_AS_ERRORS=OFF", "-DCITRA_USE_PRECOMPILED_HEADERS=ON",
     # UWP only hands out W^X JIT memory (patches\dynarmic)
     "-DDYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=ON",
-    "-DCMAKE_PROJECT_INCLUDE_BEFORE=$((Join-Path $Root 'tools\uwp-flags.cmake') -replace '\\','/')"
+    "-DCMAKE_PROJECT_INCLUDE=$((Join-Path $Root 'tools\uwp-flags.cmake') -replace '\\','/')"
 )
 Invoke-Checked cmake @cmakeArgs
 

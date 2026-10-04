@@ -1,4 +1,5 @@
-# Injected into the Azahar build with CMAKE_PROJECT_INCLUDE_BEFORE.
+# Injected into the Azahar build with CMAKE_PROJECT_INCLUDE (runs after each
+# project() call, once the compiler is known, so if(MSVC) works).
 # Visual Studio turns on /sdl (Security Development Lifecycle checks) for
 # Windows Store projects, which makes old-but-harmless CRT and Winsock calls in
 # third-party libraries hard errors. Switch that back off for this build.
