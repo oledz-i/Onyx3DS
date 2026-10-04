@@ -61,7 +61,7 @@ it can't run them.
 2. Choose your **Games** folder when asked. Other folders are under **Settings → Folders**.
 3. For updates and DLC: put the `.cia` files in the *Updates & DLC* folder and use
    **Settings → Updates & DLC** to install them.
-4. Optional: sign in to RetroAchievements and add a free SteamGridDB API key for box art
+4. Optional: add a free SteamGridDB API key for box art
    under **Settings → Online services**.
 
 ## Recommended settings for a first test

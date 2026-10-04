@@ -20,7 +20,7 @@
 
 ---
 
-ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core in a full-screen Xbox app: a game library with box art, per-game settings, save states, cheats, RetroAchievements and themes, all driven from a controller on the TV.
+ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core in a full-screen Xbox app: a game library with box art, per-game settings, save states, cheats and themes, all driven from a controller on the TV.
 
 > [!WARNING]
 > **ONYX is in ALPHA and still in its infancy.** It is not expected to work flawlessly
@@ -36,7 +36,6 @@ ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core 
 - **Save states**: multiple slots with thumbnails, plus an auto-save slot when you quit.
 - **Per-game settings**: change resolution, CPU clock and more for one game without touching the rest.
 - **Cheats**: downloads the cheat database for each game; toggle codes from the in-game menu.
-- **RetroAchievements**: sign in to earn achievements, with optional hardcore mode.
 - **Fast forward, screenshots, screen layouts**: all on controller hotkeys.
 - **Custom textures and mods**: texture packs and LayeredFS mods (`romfs/`, `exefs/`, `code.ips`) per game, from folders you choose.
 - **Crash protection**: emulator errors stop the game with an explanation instead of closing the app, and everything is written to a log you can share.

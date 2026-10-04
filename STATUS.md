@@ -2,8 +2,7 @@
 
 ## What works and is verified
 - `shell/` (game library, 3DS header/icon parsing, settings, per-game overrides,
-  folder remapping, cheat database client, SteamGridDB, RetroAchievements via
-  rcheevos, themes): builds and passes 33 unit tests (188 assertions) under ASan/UBSan.
+  folder remapping, cheat database client, SteamGridDB, themes): builds and passes 33 unit tests (188 assertions) under ASan/UBSan.
 - Azahar patches (`patches/azahar`, `patches/dynarmic`): UWP file access through
   *FromApp APIs, USB folder remapping hook, static libretro core, timeline-semaphore
   opt-in, working libretro cheat toggling, W^X JIT for Xbox. Syntax-checked for
