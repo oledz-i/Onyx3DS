@@ -96,18 +96,20 @@ try {
         if (Test-Path $lp) { $launch += "--- $f (last 60 lines)"; $launch += Get-Content $lp -Tail 60 }
     }
     if (!(Test-Path (Join-Path $logDir "onyx.log"))) { $launch += "(no onyx.log: died before OnLaunched)" }
-    $launch += "--- events"
-    $ev = @()
-    $ev += Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = $start } -ErrorAction SilentlyContinue |
-        Where-Object { $_.Message -match "ONYX3DS" }
-    foreach ($ln in "Microsoft-Windows-AppModel-Runtime/Admin", "Microsoft-Windows-TWinUI/Operational",
-                    "Microsoft-Windows-Immersive-Shell/Operational") {
-        $ev += Get-WinEvent -FilterHashtable @{ LogName = $ln; StartTime = $start } -ErrorAction SilentlyContinue |
-            Where-Object { $_.Level -le 3 }
-    }
-    foreach ($e in $ev | Select-Object -First 12) {
-        $launch += "[$($e.ProviderName) $($e.Id)] " + (($e.Message -split "`r?`n" | Where-Object { $_ } | Select-Object -First 8) -join ' | ')
-    }
+    try {
+        $launch += "--- events"
+        $ev = @()
+        $ev += Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = $start } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match "ONYX3DS" }
+        foreach ($ln in "Microsoft-Windows-AppModel-Runtime/Admin", "Microsoft-Windows-TWinUI/Operational",
+                        "Microsoft-Windows-Immersive-Shell/Operational") {
+            $ev += Get-WinEvent -FilterHashtable @{ LogName = $ln; StartTime = $start } -ErrorAction SilentlyContinue |
+                Where-Object { $_.Level -le 3 }
+        }
+        foreach ($e in $ev | Select-Object -First 12) {
+            $launch += "[$($e.ProviderName) $($e.Id)] " + (($e.Message -split "`r?`n" | Where-Object { $_ } | Select-Object -First 8) -join ' | ')
+        }
+    } catch { $launch += "(event log unavailable: $_)" }
 } catch {
     $failed = $true
     $launch += "Launch test error: $_"
