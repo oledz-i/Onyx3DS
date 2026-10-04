@@ -4,3 +4,4 @@ app/packages/
 build.log
 report.txt
 *.pfx
+app/ONYX3DS/*.dll

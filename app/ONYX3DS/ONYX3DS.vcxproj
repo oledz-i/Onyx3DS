@@ -227,21 +227,21 @@
     <Image Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
     <Image Include="Assets\StoreLogo.png" />
     <Image Include="Assets\Wide310x150Logo.png" />
-    <Content Include="Assets\Themes\**\*">
+    <!-- C++ app packaging picks up None/Image items with DeploymentContent. -->
+    <None Include="Assets\Themes\**\*">
       <DeploymentContent>true</DeploymentContent>
-    </Content>
-    <Content Include="Assets\Audio\**\*">
+    </None>
+    <None Include="Assets\Audio\**\*">
       <DeploymentContent>true</DeploymentContent>
-    </Content>
-    <!-- Native drivers loaded with LoadPackagedLibrary -->
-    <Content Include="$(OnyxDeps)bin\vulkan_dzn.dll">
-      <Link>vulkan_dzn.dll</Link>
+    </None>
+    <!-- Native drivers loaded with LoadPackagedLibrary; build-app.ps1 copies
+         them here from deps\bin so they land at the package root. -->
+    <None Include="vulkan_dzn.dll" Condition="Exists('vulkan_dzn.dll')">
       <DeploymentContent>true</DeploymentContent>
-    </Content>
-    <Content Include="$(OnyxDeps)bin\dxil.dll">
-      <Link>dxil.dll</Link>
+    </None>
+    <None Include="dxil.dll" Condition="Exists('dxil.dll')">
       <DeploymentContent>true</DeploymentContent>
-    </Content>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

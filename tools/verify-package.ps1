@@ -85,15 +85,15 @@ try {
     $launch += "Installed $($pkg.PackageFullName)"
     $start = Get-Date
     Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
-    Start-Sleep 25
+    Start-Sleep 40
     $p = Get-Process ONYX3DS -ErrorAction SilentlyContinue
-    if ($p) { $launch += "RUNNING after 25s (pid $($p.Id), $([int]($p.WorkingSet64/1MB)) MB)" }
-    else { $failed = $true; $launch += "NOT RUNNING after 25s (crashed or never started)" }
+    if ($p) { $launch += "RUNNING after 40s (pid $($p.Id), $([int]($p.WorkingSet64/1MB)) MB)" }
+    else { $failed = $true; $launch += "NOT RUNNING after 40s (crashed or never started)" }
 
     $logDir = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState"
     foreach ($f in "onyx.log", "onyx.prev.log") {
         $lp = Join-Path $logDir $f
-        if (Test-Path $lp) { $launch += "--- $f (last 40 lines)"; $launch += Get-Content $lp -Tail 40 }
+        if (Test-Path $lp) { $launch += "--- $f (last 60 lines)"; $launch += Get-Content $lp -Tail 60 }
     }
     if (!(Test-Path (Join-Path $logDir "onyx.log"))) { $launch += "(no onyx.log: died before OnLaunched)" }
     $launch += "--- events"
@@ -102,7 +102,8 @@ try {
         Where-Object { $_.Message -match "ONYX3DS" }
     foreach ($ln in "Microsoft-Windows-AppModel-Runtime/Admin", "Microsoft-Windows-TWinUI/Operational",
                     "Microsoft-Windows-Immersive-Shell/Operational") {
-        $ev += Get-WinEvent -FilterHashtable @{ LogName = $ln; StartTime = $start; Level = 1, 2, 3 } -ErrorAction SilentlyContinue
+        $ev += Get-WinEvent -FilterHashtable @{ LogName = $ln; StartTime = $start } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Level -le 3 }
     }
     foreach ($e in $ev | Select-Object -First 12) {
         $launch += "[$($e.ProviderName) $($e.Id)] " + (($e.Message -split "`r?`n" | Where-Object { $_ } | Select-Object -First 8) -join ' | ')

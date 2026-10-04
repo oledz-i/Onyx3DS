@@ -21,6 +21,13 @@ if (!(Test-Path $pfx)) {
     Export-Certificate -Cert $cert -FilePath (Join-Path $Root "out\ONYX3DS.cer") -Force | Out-Null
 }
 
+# Drivers ship at the package root (LoadPackagedLibrary looks there).
+foreach ($d in "vulkan_dzn.dll", "dxil.dll") {
+    $src = Join-Path $Root "deps\bin\$d"
+    if (Test-Path $src) { Copy-Item $src (Join-Path $Root "app\ONYX3DS\$d") -Force }
+    else { Write-Warning "$d not found in deps\bin; graphics will not work in this package" }
+}
+
 Write-Step "Building ONYX 3DS ($Configuration|x64)"
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "out") | Out-Null
 Invoke-Checked msbuild $proj /m /restore /p:Configuration=$Configuration /p:Platform=x64 `
