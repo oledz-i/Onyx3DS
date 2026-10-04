@@ -6,5 +6,8 @@ if (MSVC)
     # /FIwinapifamily.h: some headers test WINAPI_FAMILY_PARTITION() before
     # including any Windows header; CMake already defines WINAPI_FAMILY.
     add_compile_options(/sdl- /wd4996 /wd4146 /FIwinapifamily.h)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+    # Windows 10 target: cryptopp only enables its OS random generator (used
+    # by Azahar for console IDs and amiibo) when it can see this.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS
+                            _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 endif()
