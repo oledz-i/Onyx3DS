@@ -41,6 +41,7 @@ public:
     D3D12Presenter& operator=(const D3D12Presenter&) = delete;
 
     // Creates the device, queue and shared fence. Call once at startup.
+    void LogGpuCapabilities();
     bool Initialize(std::string& error);
     // Binds a swap chain to the panel (UI thread) and starts the render thread.
     void Attach(winrt::Windows::UI::Xaml::Controls::SwapChainPanel const& panel);

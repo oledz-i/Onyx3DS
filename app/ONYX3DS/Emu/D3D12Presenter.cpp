@@ -48,6 +48,52 @@ D3D12Presenter::~D3D12Presenter() {
     if (upload_event_) CloseHandle(upload_event_);
 }
 
+// What the GPU and its driver offer, for diagnosing the hardware renderer:
+// Dozen needs a shader model, binding tier and memory budget that a console in
+// Dev Mode may or may not provide, and DXIL.dll to sign the shaders it makes.
+void D3D12Presenter::LogGpuCapabilities() {
+    if (!device_) return;
+    D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_7};
+    while (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))) &&
+           sm.HighestShaderModel > D3D_SHADER_MODEL_5_1)
+        sm.HighestShaderModel = static_cast<D3D_SHADER_MODEL>(sm.HighestShaderModel - 1);
+    D3D12_FEATURE_DATA_D3D12_OPTIONS o{};
+    device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &o, sizeof(o));
+    D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1{};
+    device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1));
+    D3D12_FEATURE_DATA_ARCHITECTURE1 arch{};
+    device_->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &arch, sizeof(arch));
+    D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va{};
+    device_->CheckFeatureSupport(D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT, &va, sizeof(va));
+    ONYX_INFO("D3D12: shader model 0x%X, resource binding tier %d, tiled tier %d, wave ops %d, "
+              "UMA %d, cache-coherent UMA %d, GPU VA %u bits",
+              static_cast<unsigned>(sm.HighestShaderModel), static_cast<int>(o.ResourceBindingTier),
+              static_cast<int>(o.TiledResourcesTier), static_cast<int>(o1.WaveOps), arch.UMA,
+              arch.CacheCoherentUMA, va.MaxGPUVirtualAddressBitsPerResource);
+    winrt::com_ptr<IDXGIAdapter3> a3;
+    if (adapter_ && SUCCEEDED(adapter_->QueryInterface(IID_PPV_ARGS(a3.put())))) {
+        for (DXGI_MEMORY_SEGMENT_GROUP g : {DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+                                            DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL}) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO mi{};
+            if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, g, &mi)))
+                ONYX_INFO("D3D12 memory (%s): budget %llu MB, in use %llu MB",
+                          g == DXGI_MEMORY_SEGMENT_GROUP_LOCAL ? "local" : "shared",
+                          static_cast<unsigned long long>(mi.Budget >> 20),
+                          static_cast<unsigned long long>(mi.CurrentUsage >> 20));
+        }
+    }
+    // Dozen signs every shader with DXIL.dll; unsigned shaders are refused by the driver.
+    HMODULE dxil = LoadPackagedLibrary(L"dxil.dll", 0);
+    if (!dxil) {
+        ONYX_WARN("DXIL.dll could not be loaded from the package (error %lu): the hardware "
+                  "renderer's shaders will be unsigned and the driver may reject them",
+                  GetLastError());
+    } else {
+        ONYX_INFO("DXIL.dll loaded; DxcCreateInstance %s",
+                  GetProcAddress(dxil, "DxcCreateInstance") ? "found" : "MISSING");
+    }
+}
+
 bool D3D12Presenter::Initialize(std::string& error) {
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(factory_.put())))) {
         error = "DXGI factory creation failed";
@@ -82,6 +128,8 @@ bool D3D12Presenter::Initialize(std::string& error) {
         error = "No D3D12 device available";
         return false;
     }
+
+    LogGpuCapabilities();
 
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
