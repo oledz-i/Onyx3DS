@@ -10,6 +10,12 @@ $build = Join-Path $DepsBuild "mesa"
 $uwp = "-DMESA_UWP=1 -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00 /wd4189"
 # Dozen links D3D12/DXGI directly on UWP (patches\mesa replaces LoadLibrary).
 $link = "/APPCONTAINER WindowsApp.lib d3d12.lib dxgi.lib"
+# Link the app-flavoured C++ runtime (VCRUNTIME140_APP.dll, shipped by the
+# VCLibs package) instead of the desktop VCRUNTIME140.dll, which Xbox lacks.
+# link.exe searches LIB in order, so the store folder must come first.
+$store = Join-Path $env:VCToolsInstallDir "lib\x64\store"
+if (!(Test-Path (Join-Path $store "msvcrt.lib"))) { throw "Store CRT libs not found in $store" }
+$env:LIB = "$store;$env:LIB"
 
 # Always (re)configure so option changes reach a cached build directory.
 $reconfigure = @()
@@ -35,6 +41,10 @@ if ($true) {
 }
 
 Write-Step "Building vulkan_dzn.dll"
+# Force a relink: a LIB change alone does not make ninja relink a cached build.
+Remove-Item (Join-Path $build "src\microsoft\vulkan\vulkan_dzn.dll") -ErrorAction SilentlyContinue
 Invoke-Checked ninja -k 0 -C $build src/microsoft/vulkan/vulkan_dzn.dll
+$deps = (& dumpbin /dependents (Join-Path $build "src\microsoft\vulkan\vulkan_dzn.dll")) -match '^\s+VCRUNTIME140(_1)?\.dll\s*$'
+if ($deps) { throw "vulkan_dzn.dll still links the desktop C++ runtime: $($deps -join ', ')" }
 Copy-Item (Join-Path $build "src\microsoft\vulkan\vulkan_dzn.dll") (Join-Path $DepsBin "vulkan_dzn.dll") -Force
 Write-Host "Wrote $DepsBin\vulkan_dzn.dll" -ForegroundColor Green
