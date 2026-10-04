@@ -42,8 +42,9 @@ $rep = @("WindowsApp.lib: $($sdkLib.FullName) ($($allowed.Count) symbols)")
 foreach ($bin in Get-ChildItem $x -Include *.exe, *.dll -Recurse) {
     $bad = @(); $cur = $null
     foreach ($l in (& dumpbin /imports $bin.FullName)) {
+        if ($l -match '^\s+Summary\s*$') { break }
         if ($l -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1]; continue }
-        if (!$cur -or $shipped -contains $cur) { continue }
+        if (!$cur -or $shipped -contains $cur -or $cur -match '^api-ms-win-crt-') { continue }
         if ($l -match '^\s+[0-9A-F]+\s+(\S+)\s*$') {
             $fn = $Matches[1]
             if (!$allowed.Contains($fn)) { $bad += "$cur!$fn" }
@@ -51,8 +52,14 @@ foreach ($bin in Get-ChildItem $x -Include *.exe, *.dll -Recurse) {
     }
     $deps = (& dumpbin /dependents $bin.FullName) | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } |
         ForEach-Object { $_.Trim() }
-    $rep += "== $($bin.Name): imports from $($deps -join ', ')"
-    if ($bad) { $failed = $true; $rep += "   NOT AVAILABLE ON XBOX ($($bad.Count)): " + (($bad | Sort-Object -Unique) -join ' ') }
+    $rep += "== $($bin.Name): $($deps.Count) DLLs"
+    if ($bad) {
+        $failed = $true
+        $rep += "   NOT AVAILABLE ON XBOX ($($bad.Count)):"
+        foreach ($g in $bad | Sort-Object -Unique | Group-Object { $_.Split('!')[0] }) {
+            $rep += "   $($g.Name): " + (($g.Group | ForEach-Object { $_.Split('!')[1] }) -join ' ')
+        }
+    }
 }
 $rep | Set-Content report-imports.txt
 $rep | Write-Host
@@ -60,6 +67,7 @@ $rep | Write-Host
 # ----------------------------------------------------------------- launch --
 $launch = @()
 try {
+    Import-Module Appx -UseWindowsPowerShell -WarningAction SilentlyContinue
     $cer = Get-ChildItem $PackageRoot -Recurse -Filter *.cer | Select-Object -First 1
     Import-Certificate -FilePath $cer.FullName -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
     Import-Certificate -FilePath $cer.FullName -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
