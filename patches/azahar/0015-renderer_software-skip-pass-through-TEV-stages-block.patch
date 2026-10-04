@@ -1,4 +1,4 @@
-From 1e48c519177da4f099867ab8ad591bcd6acdc251 Mon Sep 17 00:00:00 2001
+From 98b3e11f830b36ca2eb59bd12f9f0e19483cfcb4 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 4 Oct 2026 13:32:08 -0400
 Subject: [PATCH] renderer_software: skip pass-through TEV stages; block-wise
@@ -11,7 +11,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  2 files changed, 78 insertions(+), 38 deletions(-)
 
 diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
-index 89b22f1..1227f4d 100644
+index 89b22f1..fe60abc 100644
 --- a/src/video_core/renderer_software/renderer_software.cpp
 +++ b/src/video_core/renderer_software/renderer_software.cpp
 @@ -2,6 +2,8 @@
@@ -56,8 +56,8 @@ index 89b22f1..1227f4d 100644
 +    if (color_fill.is_enabled) {
 +        const u8 fill[4] = {static_cast<u8>(color_fill.color_r), static_cast<u8>(color_fill.color_g),
 +                            static_cast<u8>(color_fill.color_b), 255};
-+        for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
-+            std::memcpy(out + i * 4, fill, 4);
++        for (size_t px = 0; px < static_cast<size_t>(width) * height; ++px) {
++            std::memcpy(out + px * 4, fill, 4);
 +        }
 +        return;
 +    }
