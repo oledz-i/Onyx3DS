@@ -1,0 +1,57 @@
+name: Bug report
+description: A crash, a game that won't boot, or something that doesn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing ONYX! The log is the most useful part of a report.
+        Get it from the Device Portal: **File explorer → LocalAppData → ONYX3DS_… → LocalState → onyx.log**.
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console
+      options: [Xbox Series X, Xbox Series S, Xbox One X, Xbox One S, Xbox One]
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game and title ID
+      description: The title ID is on the game's page in ONYX, e.g. 000400000007AE00.
+      placeholder: New Super Mario Bros. 2 (USA), 000400000007AE00
+    validations:
+      required: true
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      options: [Software (safe), Hardware (experimental)]
+    validations:
+      required: true
+  - type: dropdown
+    id: jit
+    attributes:
+      label: CPU JIT
+      options: ["On", "Off (interpreter)"]
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: ONYX build
+      description: Link to the Actions run or release you installed.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw. Photos of error screens help.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: onyx.log
+      description: Drag the file here, or paste the last ~100 lines.
+    validations:
+      required: true

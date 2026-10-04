@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Installation help
+    url: https://github.com/oledz-i/Onyx3DS/blob/main/docs/INSTALL.md
+    about: Step-by-step setup for Xbox Developer Mode.
