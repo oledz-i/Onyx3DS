@@ -7,7 +7,8 @@
 
 <p align="center">
   <b>A Nintendo 3DS emulator for Xbox, built on Azahar.</b><br>
-  Couch-friendly, controller-first, made for Xbox Series X|S in Dev Mode.
+  Couch-friendly, controller-first, made for Xbox Series X|S in Dev Mode.<br>
+  <b>ALPHA software: early in development, expect rough edges.</b>
 </p>
 
 <p align="center">
@@ -22,8 +23,10 @@
 ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core in a full-screen Xbox app: a game library with box art, per-game settings, save states, cheats, RetroAchievements and themes, all driven from a controller on the TV.
 
 > [!WARNING]
-> **Early alpha.** ONYX is under active development and games may not boot yet.
-> Expect crashes and slow performance. Bug reports with logs are very welcome (see
+> **ONYX is in ALPHA and still in its infancy.** It is not expected to work flawlessly
+> yet. Games boot and are playable on a Series S, but many run slowly, some don't work
+> at all, and the hardware renderer is still being brought up. Expect crashes, glitches
+> and missing features while it grows. Bug reports with logs are very welcome (see
 > [Reporting a bug](#reporting-a-bug)).
 
 ## Features
