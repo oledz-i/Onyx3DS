@@ -127,20 +127,22 @@ void MainPage::ApplyTheme() {
 }
 
 void MainPage::StartAmbientMotion() {
+    // Plain RenderTransforms only: XAML refuses RenderTransform on an element
+    // that also uses the Translation/TranslationTransition facade (that combo
+    // threw while building the page and crashed the app on launch).
+    // Each layer: [drift (slow loop), parallax (follows the stick)].
     const Theme& t = Svc().CurrentTheme();
     const bool motion = Svc().Config().qol.background_parallax && t.style.parallax > 0;
-    for (auto layer : {FarLayer(), NearLayer()}) {
-        layer.TranslationTransition(Vector3Transition());
-        layer.TranslationTransition().Duration(Ms(1200));
-    }
-    if (!motion) return;
-    // Slow drift on both light layers in opposite directions; the near layer
-    // moves further, which is what sells the depth.
-    auto drift = [&](Image const& img, double dx, double dy, int seconds) {
-        CompositeTransform xf;
-        img.RenderTransform(xf);
+    auto setup = [&](Image const& img, TranslateTransform& par, double dx, double dy, int seconds) {
+        TranslateTransform drift;
+        par = TranslateTransform();
+        TransformGroup group;
+        group.Children().Append(drift);
+        group.Children().Append(par);
+        img.RenderTransform(group);
+        if (!motion) return;
         Storyboard sb;
-        for (auto [prop, to] : {std::pair{L"TranslateX", dx}, std::pair{L"TranslateY", dy}}) {
+        for (auto [prop, to] : {std::pair{L"X", dx}, std::pair{L"Y", dy}}) {
             DoubleAnimation a;
             a.From(-to);
             a.To(to);
@@ -150,22 +152,39 @@ void MainPage::StartAmbientMotion() {
             SineEase ease;
             ease.EasingMode(EasingMode::EaseInOut);
             a.EasingFunction(ease);
-            Storyboard::SetTarget(a, xf);
+            Storyboard::SetTarget(a, drift);
             Storyboard::SetTargetProperty(a, prop);
             sb.Children().Append(a);
         }
         sb.Begin();
     };
-    drift(FarLayer(), 24 * t.style.parallax, 10 * t.style.parallax, 23);
-    drift(NearLayer(), -40 * t.style.parallax, -26 * t.style.parallax, 17);
+    // The near layer moves further, which is what sells the depth.
+    setup(FarLayer(), far_par_, 24 * t.style.parallax, 10 * t.style.parallax, 23);
+    setup(NearLayer(), near_par_, -40 * t.style.parallax, -26 * t.style.parallax, 17);
 }
 
 void MainPage::MoveParallax(float nx, float ny) {
     const Theme& t = Svc().CurrentTheme();
-    if (!Svc().Config().qol.background_parallax || t.style.parallax <= 0) return;
-    const float p = static_cast<float>(t.style.parallax);
-    FarLayer().Translation(float3{-nx * 18 * p, -ny * 10 * p, 0});
-    NearLayer().Translation(float3{-nx * 42 * p, -ny * 24 * p, 0});
+    if (!far_par_ || !Svc().Config().qol.background_parallax || t.style.parallax <= 0) return;
+    const double p = t.style.parallax;
+    // Ease toward the new offset rather than jumping.
+    Storyboard sb;
+    auto ease_to = [&](TranslateTransform const& tr, double x, double y) {
+        for (auto [prop, to] : {std::pair{L"X", x}, std::pair{L"Y", y}}) {
+            DoubleAnimation a;
+            a.To(to);
+            a.Duration(DurationHelper::FromTimeSpan(std::chrono::milliseconds(1200)));
+            CubicEase ease;
+            ease.EasingMode(EasingMode::EaseOut);
+            a.EasingFunction(ease);
+            Storyboard::SetTarget(a, tr);
+            Storyboard::SetTargetProperty(a, prop);
+            sb.Children().Append(a);
+        }
+    };
+    ease_to(far_par_, -nx * 18 * p, -ny * 10 * p);
+    ease_to(near_par_, -nx * 42 * p, -ny * 24 * p);
+    sb.Begin();
 }
 
 // ---------------------------------------------------------------------------

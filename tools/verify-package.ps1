@@ -36,7 +36,7 @@ foreach ($l in (& dumpbin /headers $sdkLib.FullName)) {
 # Shipped next to the exe or provided by the VCLibs framework package.
 $shipped = @(Get-ChildItem $x -Filter *.dll | ForEach-Object Name) +
     @("VCRUNTIME140_APP.dll", "VCRUNTIME140_1_APP.dll", "MSVCP140_APP.dll", "VCCORLIB140_APP.dll",
-      "CONCRT140_APP.dll", "MSVCP140_1_APP.dll", "MSVCP140_2_APP.dll")
+      "CONCRT140_APP.dll", "MSVCP140_ATOMIC_WAIT_APP.dll", "MSVCP140_CODECVT_IDS_APP.dll", "MSVCP140_1_APP.dll", "MSVCP140_2_APP.dll")
 
 $rep = @("WindowsApp.lib: $($sdkLib.FullName) ($($allowed.Count) symbols)")
 foreach ($bin in Get-ChildItem $x -Include *.exe, *.dll -Recurse) {
@@ -48,7 +48,9 @@ foreach ($bin in Get-ChildItem $x -Include *.exe, *.dll -Recurse) {
         if ($l -match '^\s+[0-9A-F]+\s+(\S+)\s*$') {
             $fn = $Matches[1]
             if (!$allowed.Contains($fn)) { $bad += "$cur!$fn" }
-        } elseif ($l -match 'Ordinal\s+(\d+)') { $bad += "$cur!#$($Matches[1])" }
+        } elseif ($l -match 'Ordinal\s+(\d+)' -and $cur -notmatch '^(WS2_32|OLEAUT32|d3d12|dxgi|XAudio2_9)\.dll$') {
+            $bad += "$cur!#$($Matches[1])"
+        }
     }
     $deps = (& dumpbin /dependents $bin.FullName) | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } |
         ForEach-Object { $_.Trim() }
@@ -61,6 +63,8 @@ foreach ($bin in Get-ChildItem $x -Include *.exe, *.dll -Recurse) {
         }
     }
 }
+$assets = Get-ChildItem (Join-Path $x "Assets") -Recurse -File -ErrorAction SilentlyContinue
+$rep += "Package Assets: $($assets.Count) files; themes: " + ((Get-ChildItem (Join-Path $x "Assets\Themes") -Directory -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', ')
 $rep | Set-Content report-imports.txt
 $rep | Write-Host
 

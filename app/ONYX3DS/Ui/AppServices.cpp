@@ -109,7 +109,9 @@ void AppServices::RescanLibrary(std::function<void(size_t)> done) {
 
 void AppServices::ReloadThemes() {
     themes_ = LoadThemes(fs_, Paths().builtin_themes, settings_.folders.themes);
-    ONYX_INFO("%zu themes available", themes_.size());
+    ONYX_INFO("%zu themes available (built-in dir %s: %s, %zu entries)", themes_.size(),
+              Paths().builtin_themes.c_str(), fs_.IsDirectory(Paths().builtin_themes) ? "found" : "MISSING",
+              fs_.List(Paths().builtin_themes).size());
 }
 
 const Theme& AppServices::CurrentTheme() const {

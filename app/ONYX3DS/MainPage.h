@@ -38,6 +38,8 @@ private:
     std::string focused_path_;
     Windows::UI::Xaml::DispatcherTimer clock_{nullptr};
     Windows::UI::Xaml::Media::ThemeShadow shadow_{nullptr};
+    Windows::UI::Xaml::Media::TranslateTransform far_par_{nullptr};
+    Windows::UI::Xaml::Media::TranslateTransform near_par_{nullptr};
     bool initialised_ = false;
     bool resume_checked_ = false;
     std::string theme_applied_;

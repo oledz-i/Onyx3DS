@@ -16,6 +16,32 @@ using namespace winrt::Windows::UI::Xaml::Controls;
 using namespace winrt::Windows::UI::Xaml::Navigation;
 using namespace onyx::app;
 
+namespace {
+// Replaces the window content with the error text (and the log location) when
+// a page cannot be built. Safe to call repeatedly; only the first message sticks.
+void ShowFatal(std::wstring const& message) {
+    static bool shown = false;
+    if (shown) return;
+    shown = true;
+    try {
+        TextBlock text;
+        text.TextWrapping(TextWrapping::Wrap);
+        text.FontSize(28);
+        text.Margin(Thickness{96, 64, 96, 64});
+        text.Foreground(winrt::Windows::UI::Xaml::Media::SolidColorBrush(winrt::Windows::UI::Colors::White()));
+        text.Text(L"ONYX 3DS hit a problem.\n\n" + message +
+                  L"\n\nTake a photo of this screen. The full log is in the Device Portal under "
+                  L"File explorer > LocalAppData > ONYX3DS > LocalState > onyx.log.");
+        Grid g;
+        g.Background(winrt::Windows::UI::Xaml::Media::SolidColorBrush(winrt::Windows::UI::ColorHelper::FromArgb(255, 24, 26, 32)));
+        g.Children().Append(text);
+        Window::Current().Content(g);
+        Window::Current().Activate();
+    } catch (...) {
+    }
+}
+} // namespace
+
 namespace winrt::ONYX3DS::implementation {
 
 App::App() {
@@ -31,8 +57,12 @@ App::App() {
         }
     });
 #endif
+    // Never vanish back to Dev Home: log it, keep running, and say so on
+    // screen so there is something to report.
     UnhandledException([](IInspectable const&, UnhandledExceptionEventArgs const& e) {
         ONYX_ERROR("Unhandled exception: %s", Utf8(e.Message()).c_str());
+        e.Handled(true);
+        ShowFatal(L"Unexpected error: " + std::wstring(e.Message()));
     });
 }
 
@@ -52,7 +82,11 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     if (!root) {
         root = Frame();
         root.NavigationFailed([](IInspectable const&, NavigationFailedEventArgs const& args) {
-            ONYX_ERROR("Navigation to %s failed", Utf8(args.SourcePageType().Name).c_str());
+            ONYX_ERROR("Navigation to %s failed: 0x%08X", Utf8(args.SourcePageType().Name).c_str(),
+                       static_cast<unsigned>(args.Exception().value));
+            args.Handled(true);
+            ShowFatal(L"Could not open " + std::wstring(args.SourcePageType().Name) + L" (error 0x" +
+                      std::to_wstring(static_cast<unsigned>(args.Exception().value)) + L")");
         });
         Window::Current().Content(root);
     }
