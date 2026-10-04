@@ -66,6 +66,12 @@ public:
     // Shows colour bars through the same upload path (start-up self-test).
     void ShowTestPattern();
 
+    // Software frames are also kept as BGRA pixels for the XAML image view,
+    // which shows them without the D3D12 swap chain. Copies the newest frame
+    // if it is newer than `seq` and returns true.
+    bool TakeMirror(std::vector<uint8_t>& bgra, uint32_t& width, uint32_t& height, uint64_t& seq);
+    void ClearMirror();
+
     // Generation counter: bumps when a slot's texture is recreated, so the
     // Vulkan side knows to re-import it.
     uint32_t SlotGeneration(int slot_index) const;
@@ -107,6 +113,13 @@ private:
     UINT srv_stride_ = 0;
     winrt::com_ptr<ID3D12RootSignature> root_sig_;
     winrt::com_ptr<ID3D12PipelineState> pso_;
+
+    // Newest software frame as opaque BGRA for the XAML view.
+    std::mutex mirror_mutex_;
+    std::vector<uint8_t> mirror_;
+    uint32_t mirror_w_ = 0, mirror_h_ = 0;
+    uint64_t mirror_seq_ = 0;
+    void Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch);
 
     // CPU frame uploads (software renderer).
     std::mutex upload_mutex_;

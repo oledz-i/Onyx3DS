@@ -343,6 +343,7 @@ void D3D12Presenter::AbortWrite(int slot_index) {
 bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t height,
                                   size_t pitch) {
     if (!data || width == 0 || height == 0 || !device_) return false;
+    if (std::chrono::steady_clock::now() >= hold_until_) Mirror(data, width, height, pitch);
     std::lock_guard upload_lock(upload_mutex_);
     static int s_logged = 0;
     auto fail = [&](const char* what, HRESULT hr) {
@@ -461,6 +462,38 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
     }
 }
 
+void D3D12Presenter::Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch) {
+    std::lock_guard lock(mirror_mutex_);
+    mirror_.resize(static_cast<size_t>(width) * height * 4);
+    const auto* src = static_cast<const uint8_t*>(data);
+    for (uint32_t y = 0; y < height; ++y) {
+        // XRGB8888 is B,G,R,X in memory: already BGRA, just make it opaque.
+        const uint32_t* in = reinterpret_cast<const uint32_t*>(src + y * pitch);
+        uint32_t* out = reinterpret_cast<uint32_t*>(mirror_.data() + static_cast<size_t>(y) * width * 4);
+        for (uint32_t x = 0; x < width; ++x) out[x] = in[x] | 0xFF000000u;
+    }
+    mirror_w_ = width;
+    mirror_h_ = height;
+    ++mirror_seq_;
+}
+
+bool D3D12Presenter::TakeMirror(std::vector<uint8_t>& bgra, uint32_t& width, uint32_t& height,
+                                uint64_t& seq) {
+    std::lock_guard lock(mirror_mutex_);
+    if (mirror_seq_ == seq || mirror_.empty()) return false;
+    bgra = mirror_;
+    width = mirror_w_;
+    height = mirror_h_;
+    seq = mirror_seq_;
+    return true;
+}
+
+void D3D12Presenter::ClearMirror() {
+    std::lock_guard lock(mirror_mutex_);
+    mirror_.clear();
+    mirror_w_ = mirror_h_ = 0;
+}
+
 void D3D12Presenter::ShowTestPattern() {
     constexpr uint32_t w = 800, h = 480;
     std::vector<uint32_t> px(static_cast<size_t>(w) * h);
@@ -557,7 +590,9 @@ void D3D12Presenter::DrawFrame(int slot, UINT back) {
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(back) * rtv_stride_;
-    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // Dark blue rather than black: around the picture it shows that the swap
+    // chain itself is reaching the screen.
+    const float clear[4] = {0.02f, 0.04f, 0.12f, 1.0f};
     cmd_->ClearRenderTargetView(rtv, clear, 0, nullptr);
 
     uint64_t wait_value = 0;

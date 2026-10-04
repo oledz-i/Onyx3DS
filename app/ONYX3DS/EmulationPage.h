@@ -34,6 +34,13 @@ private:
     bool quitting_ = false;
     bool started_ = false;
     Windows::UI::Xaml::DispatcherTimer fps_timer_{nullptr};
+    // Software frames drawn through a XAML Image.
+    Windows::UI::Xaml::DispatcherTimer sw_timer_{nullptr};
+    Windows::UI::Xaml::Media::Imaging::WriteableBitmap sw_bitmap_{nullptr};
+    std::vector<uint8_t> sw_pixels_;
+    uint64_t sw_seq_ = 0;
+    uint64_t sw_shown_ = 0;
+    void UpdateSoftwareView();
     std::chrono::steady_clock::time_point menu_opened_at_{};
 };
 

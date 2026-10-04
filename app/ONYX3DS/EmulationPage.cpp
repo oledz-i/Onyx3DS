@@ -40,6 +40,11 @@ void EmulationPage::InitializeComponent() {
     fps_timer_.Tick([weak = get_weak()](auto&&, auto&&) {
         if (auto self = weak.get()) self->UpdateFps();
     });
+    sw_timer_ = DispatcherTimer();
+    sw_timer_.Interval(std::chrono::milliseconds(16));
+    sw_timer_.Tick([weak = get_weak()](auto&&, auto&&) {
+        if (auto self = weak.get()) self->UpdateSoftwareView();
+    });
     Panel().SizeChanged([](IInspectable const& sender, SizeChangedEventArgs const& e) {
         auto panel = sender.as<SwapChainPanel>();
         Emu().Presenter().OnPanelResized(static_cast<float>(e.NewSize().Width),
@@ -104,8 +109,11 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
 
 void EmulationPage::OnNavigatedFrom(NavigationEventArgs const&) {
     fps_timer_.Stop();
+    if (sw_timer_) sw_timer_.Stop();
     Emu().SetEvents({});
     Emu().Presenter().Detach();
+    Emu().Presenter().ClearMirror();
+    sw_seq_ = 0;
 }
 
 void EmulationPage::StartGame() {
@@ -144,12 +152,37 @@ void EmulationPage::StartGame() {
     fps_timer_.Start();
 }
 
+void EmulationPage::UpdateSoftwareView() {
+    uint32_t w = 0, h = 0;
+    if (!Emu().Presenter().TakeMirror(sw_pixels_, w, h, sw_seq_)) return;
+    try {
+        if (!sw_bitmap_ || sw_bitmap_.PixelWidth() != static_cast<int32_t>(w) ||
+            sw_bitmap_.PixelHeight() != static_cast<int32_t>(h)) {
+            sw_bitmap_ = Windows::UI::Xaml::Media::Imaging::WriteableBitmap(w, h);
+            SoftwareView().Source(sw_bitmap_);
+            ONYX_INFO("Software view: %ux%u through XAML", w, h);
+        }
+        uint8_t* dst = sw_bitmap_.PixelBuffer().data();
+        std::memcpy(dst, sw_pixels_.data(), std::min<size_t>(sw_pixels_.size(), sw_bitmap_.PixelBuffer().Length()));
+        sw_bitmap_.Invalidate();
+        if (++sw_shown_ == 1 || sw_shown_ % 600 == 0)
+            ONYX_INFO("Software view: %llu frames shown", static_cast<unsigned long long>(sw_shown_));
+    } catch (hresult_error const& e) {
+        ONYX_ERROR("Software view failed: %s", Utf8(e.message()).c_str());
+        sw_timer_.Stop();
+    }
+}
+
 void EmulationPage::OnStarted() {
     started_ = true;
     LoadingOverlay().Visibility(Visibility::Collapsed);
     ONYX_INFO("Game started; loading screen hidden");
     // Two seconds of colour bars: proves the picture path works before the game's first frame.
-    if (Emu().UsingSoftwareRenderer()) RunAsync([] { Emu().Presenter().ShowTestPattern(); });
+    if (Emu().UsingSoftwareRenderer()) {
+        SoftwareView().Visibility(Visibility::Visible);
+        sw_timer_.Start();
+        RunAsync([] { Emu().Presenter().ShowTestPattern(); });
+    }
     auto& session = Emu();
     Svc().StoreCatalog(session.Catalog());
 
@@ -175,6 +208,7 @@ void EmulationPage::OnStarted() {
 
 void EmulationPage::OnStopped(const std::string& reason) {
     fps_timer_.Stop();
+    if (sw_timer_) sw_timer_.Stop();
     if (started_) {
         Svc().Library().RecordSession(game_.path, Emu().SessionSeconds(), NowUnix());
     }

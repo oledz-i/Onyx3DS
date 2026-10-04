@@ -7,6 +7,8 @@
     <Grid x:Name="Root" Background="Black">
         <!-- D3D12Presenter draws the game here. -->
         <SwapChainPanel x:Name="Panel" />
+        <!-- Software renderer frames, shown by XAML itself (independent of the swap chain). -->
+        <Image x:Name="SoftwareView" Stretch="Uniform" IsHitTestVisible="False" Visibility="Collapsed" />
 
         <TextBlock x:Name="FpsText" Margin="40,28,0,0" FontSize="20" FontFamily="Consolas"
                    Foreground="#E6FFFFFF" HorizontalAlignment="Left" VerticalAlignment="Top"
