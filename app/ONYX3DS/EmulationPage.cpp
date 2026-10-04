@@ -175,6 +175,12 @@ void EmulationPage::UpdateSoftwareView() {
 
 void EmulationPage::OnStarted() {
     started_ = true;
+    // No system cursor over the game: the controller goes to the 3DS.
+    Application::Current().RequiresPointerMode(ApplicationRequiresPointerMode::WhenRequested);
+    try {
+        winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().PointerCursor(nullptr);
+    } catch (...) {
+    }
     LoadingOverlay().Visibility(Visibility::Collapsed);
     ONYX_INFO("Game started; loading screen hidden");
     // Two seconds of colour bars: proves the picture path works before the game's first frame.

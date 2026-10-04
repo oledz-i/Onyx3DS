@@ -47,6 +47,10 @@ namespace winrt::ONYX3DS::implementation {
 
 App::App() {
     InitializeComponent();
+    // Xbox "mouse mode" (a cursor driven by the controller) is on by default for
+    // UWP apps. App.xaml asks for WhenRequested too, but set it in code as well:
+    // ONYX is a controller app and the game needs the raw buttons.
+    RequiresPointerMode(ApplicationRequiresPointerMode::WhenRequested);
     Suspending({this, &App::OnSuspending});
     Resuming({this, &App::OnResuming});
 
