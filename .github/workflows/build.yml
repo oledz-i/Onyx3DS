@@ -53,9 +53,11 @@ jobs:
         run: |
           {
             echo "=== error lines ==="
-            grep -inE "error|exception|failed|cannot|not found" build.log | grep -viE "warning|0 error" | head -n 25
+            # Compiler/linker/MSBuild errors first (deduplicated), then anything else.
+            grep -E "(: (fatal )?error [A-Z]+[0-9]+|error MSB[0-9]+|error LNK[0-9]+|CMake Error|Exception:)" build.log \
+              | sed -E 's/ \[[^]]*\.vcxproj\]$//' | awk '!seen[$0]++' | head -n 40
             echo "=== last 60 lines ==="
-            tail -n 60 build.log
+            tail -n 25 build.log
           } > report.txt || true
           msg=$(sed -e 's/%/%25/g' -e 's/\r//g' report.txt | awk 'BEGIN{ORS="%0A"} {print}')
           echo "::error title=Build log tail::${msg}"
