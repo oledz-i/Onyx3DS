@@ -18,6 +18,19 @@ void InstallCrashHandler();
 // that runs emulator code.
 void InstallThreadCrashHooks();
 
+// What RunGuarded caught.
+struct GuardedCrash {
+    unsigned long code = 0;  // Windows exception code
+    bool in_jit = false;     // faulted in, or writing to, JIT-generated code
+    char where[256] = {};    // "ONYX3DS.exe+0x1234", "private executable memory", ...
+    char what[96] = {};      // "access violation", ...
+};
+
+// Runs fn(ctx). If it crashes (access violation, failed assert, uncaught C++
+// exception, ...), logs the crash, fills `out` and returns false instead of
+// letting the process die. State touched by fn is left as it was at the crash.
+bool RunGuarded(void (*fn)(void*), void* ctx, GuardedCrash* out);
+
 // Logs the app's memory use against the limit Xbox gives it. `when` labels the line.
 void LogMemoryUsage(const char* when);
 

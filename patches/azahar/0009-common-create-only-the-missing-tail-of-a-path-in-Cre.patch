@@ -1,0 +1,98 @@
+From 048b1280ea178233ba203037dc1ea2fa3d024d5f Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sun, 4 Oct 2026 07:58:30 -0400
+Subject: [PATCH] common: create only the missing tail of a path in
+ CreateFullPath
+
+CreateFullPath walked down from the drive root, calling IsDirectory and then
+CreateDir on every prefix. Inside the Xbox (UWP) app container the drive root
+"Q:/" cannot be stat'ed or created, so creating any folder under LocalState
+failed (SDMC, NAND, save data), and the first service that unwrapped the
+missing archive hit an assert. Find the deepest ancestor that already exists
+and create only the directories below it.
+---
+ src/common/file_util.cpp | 53 +++++++++++++++++++++++-----------------
+ 1 file changed, 30 insertions(+), 23 deletions(-)
+
+diff --git a/src/common/file_util.cpp b/src/common/file_util.cpp
+index 84c59e8..d942629 100644
+--- a/src/common/file_util.cpp
++++ b/src/common/file_util.cpp
+@@ -414,7 +414,6 @@ bool CreateDir(const std::string& path_in) {
+ }
+ 
+ bool CreateFullPath(const std::string& fullPath) {
+-    int panicCounter = 100;
+     LOG_TRACE(Common_Filesystem, "path {}", fullPath);
+ 
+     if (FileUtil::Exists(fullPath)) {
+@@ -422,36 +421,44 @@ bool CreateFullPath(const std::string& fullPath) {
+         return true;
+     }
+ 
+-    std::size_t position = 0;
+-    while (true) {
+-        std::size_t prev_pos = position;
+-        // Find next sub path
+-        position = fullPath.find(DIR_SEP_CHR, prev_pos);
+-
++    // Directory prefixes of fullPath, each ending in a separator. The last
++    // component (after the final separator) is a file name and is not created.
++    std::vector<std::string> prefixes;
++    for (std::size_t i = 0; i < fullPath.size(); ++i) {
++        const char c = fullPath[i];
+ #ifdef _WIN32
+-        if (position == fullPath.npos)
+-            position = fullPath.find(DIR_SEP_CHR_WIN, prev_pos);
++        const bool is_sep = c == DIR_SEP_CHR || c == DIR_SEP_CHR_WIN;
++#else
++        const bool is_sep = c == DIR_SEP_CHR;
+ #endif
++        if (is_sep) {
++            prefixes.emplace_back(fullPath.substr(0, i + 1));
++        }
++    }
++    if (prefixes.size() > 100) {
++        LOG_ERROR(Common, "CreateFullPath: directory structure is too deep");
++        return false;
++    }
+ 
+-        // we're done, yay!
+-        if (position == fullPath.npos)
+-            return true;
+-
+-        // Include the '/' so the first call is CreateDir("/") rather than CreateDir("")
+-        std::string const subPath(fullPath.substr(0, position + 1));
+-        if (!FileUtil::IsDirectory(subPath) && !FileUtil::CreateDir(subPath)) {
+-            LOG_ERROR(Common, "CreateFullPath: directory creation failed");
+-            return false;
++    // Find the deepest directory that already exists and only create below it.
++    // Sandboxed platforms (UWP on Xbox, Android) may refuse to stat or create
++    // the drive root and other ancestors outside the app's folders, so walking
++    // down from the root fails even when the parent of the target exists.
++    std::size_t first_missing = 0;
++    for (std::size_t i = prefixes.size(); i > 0; --i) {
++        if (FileUtil::IsDirectory(prefixes[i - 1])) {
++            first_missing = i;
++            break;
+         }
++    }
+ 
+-        // A safety check
+-        panicCounter--;
+-        if (panicCounter <= 0) {
+-            LOG_ERROR(Common, "CreateFullPath: directory structure is too deep");
++    for (std::size_t i = first_missing; i < prefixes.size(); ++i) {
++        if (!FileUtil::CreateDir(prefixes[i]) && !FileUtil::IsDirectory(prefixes[i])) {
++            LOG_ERROR(Common, "CreateFullPath: directory creation failed on {}", prefixes[i]);
+             return false;
+         }
+-        position++;
+     }
++    return true;
+ }
+ 
+ bool DeleteDir(const std::string& filename_in) {
+-- 
+2.43.0
+

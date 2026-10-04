@@ -55,7 +55,6 @@ CoreOptions ProfileOptions(PerfProfile profile) {
     // Shared by every profile: settings that are always right on Xbox.
     CoreOptions o = {
         {keys::kGraphicsApi, "Vulkan"},          // Vulkan runs on D3D12 through Dozen
-        {keys::kCpuJit, "enabled"},
         {keys::kHwShader, "enabled"},
         {keys::kShaderJit, "enabled"},
         {keys::kDiskShaderCache, "enabled"},
@@ -98,6 +97,9 @@ Settings Settings::Defaults(ConsoleModel model) {
     Settings s;
     s.profile = PerfProfile::Auto;
     s.core = {
+        // Not owned by any profile: the app switches it off by itself after a JIT
+        // crash, and the user can always switch back.
+        {keys::kCpuJit, "enabled"},
         {keys::kNew3ds, "New 3DS"},
         {keys::kRegion, "Auto"},
         {keys::kLanguage, "English"},

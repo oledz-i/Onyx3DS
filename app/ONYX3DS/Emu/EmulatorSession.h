@@ -21,6 +21,8 @@
 
 namespace onyx::app {
 
+struct GuardedCrash;
+
 enum class SessionState { Idle, Starting, Running, Paused, Stopping, Failed };
 
 struct SessionEvents {
@@ -40,6 +42,8 @@ public:
     bool Initialize(std::string& error);
     const VulkanProbe& Probe() const { return probe_; }
     bool Ready() const { return ready_; }
+    // The last game stopped because the CPU JIT crashed.
+    bool CrashedInJit() const { return crashed_in_jit_.load(); }
 
     D3D12Presenter& Presenter() { return presenter_; }
     InputManager& Input() { return input_; }
@@ -101,6 +105,8 @@ public:
 private:
     EmulatorSession();
     void EmulationThread(std::string rom_path);
+    void EmulationThreadBody(const std::string& rom_path);
+    void OnCoreCrashed(const GuardedCrash& crash);
     void RunCommands();
     void Pace(std::chrono::steady_clock::time_point& deadline);
     void Post(std::function<void()> command);
@@ -121,6 +127,10 @@ private:
     VulkanProbe probe_{};
     bool ready_ = false;
     bool core_initialised_ = false;
+    // Set when the core crashed. Its state is undefined afterwards, so it is
+    // never called again in this process; the user restarts the app.
+    std::atomic<bool> core_crashed_{false};
+    std::atomic<bool> crashed_in_jit_{false};
     std::mutex init_mutex_;
 
     SessionEvents events_;

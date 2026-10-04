@@ -186,6 +186,10 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         error = "A game is already running";
         return false;
     }
+    if (core_crashed_) {
+        error = "The emulator stopped after an error earlier. Close and reopen ONYX 3DS to play again.";
+        return false;
+    }
     if (thread_.joinable()) thread_.join();
 
     game_ = game;
@@ -250,6 +254,65 @@ void EmulatorSession::EmulationThread(std::string rom_path) {
     InstallThreadCrashHooks();
     LogMemoryUsage("before loading the game");
     WatchMemoryFor(15); // an out-of-memory kill shows as usage reaching the limit
+    crashed_in_jit_ = false;
+
+    // Everything that calls into the core runs under a crash guard: a fault in
+    // Azahar, dynarmic or the driver stops the game with an error on screen
+    // instead of closing the app.
+    struct Ctx {
+        EmulatorSession* self;
+        const std::string* path;
+        std::string error; // a C++ exception escaping the body
+    } ctx{this, &rom_path, {}};
+    GuardedCrash crash{};
+    const bool ok = RunGuarded(
+        [](void* p) {
+            auto* c = static_cast<Ctx*>(p);
+            try {
+                c->self->EmulationThreadBody(*c->path);
+            } catch (const std::exception& e) {
+                c->error = e.what();
+            } catch (...) {
+                c->error = "unknown error";
+            }
+        },
+        &ctx, &crash);
+    if (!ok) {
+        OnCoreCrashed(crash);
+    } else if (!ctx.error.empty()) {
+        std::snprintf(crash.what, sizeof(crash.what), "error: %s", ctx.error.substr(0, 80).c_str());
+        std::snprintf(crash.where, sizeof(crash.where), "the emulator core");
+        OnCoreCrashed(crash);
+    }
+}
+
+void EmulatorSession::OnCoreCrashed(const GuardedCrash& crash) {
+    core_crashed_ = true;
+    crashed_in_jit_ = crash.in_jit;
+    ONYX_ERROR("Emulator crashed: %s at %s%s", crash.what, crash.where,
+               crash.in_jit ? " (CPU JIT)" : "");
+    // Only our own pieces are cleaned up; the core is left alone.
+    try {
+        audio_.Stop();
+        presenter_.SetPaused(false);
+    } catch (...) {
+    }
+    state_ = SessionState::Failed;
+    std::string reason = std::string("The emulator hit an error (") + crash.what + " in " +
+                         crash.where + ") and the game was stopped.";
+    if (crash.in_jit)
+        reason += "\n\nIt happened in the CPU JIT, so ONYX switched the CPU to the interpreter "
+                  "(Settings > CPU JIT). Games will run slower until you switch it back.";
+    reason += "\n\nClose and reopen ONYX 3DS before starting another game.";
+    std::function<void(const std::string&)> stopped;
+    {
+        std::lock_guard lock(events_mutex_);
+        stopped = events_.stopped;
+    }
+    if (stopped) stopped(reason);
+}
+
+void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
 
     std::string fail_reason;
     auto fail = [&](const std::string& why) {

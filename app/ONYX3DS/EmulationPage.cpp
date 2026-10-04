@@ -185,10 +185,21 @@ void EmulationPage::OnStopped(const std::string& reason) {
     }
     ONYX_ERROR("Game stopped: %s", reason.c_str());
     LoadingOverlay().Visibility(Visibility::Collapsed);
+    const bool crashed = Emu().CrashedInJit() || reason.rfind("The emulator hit an error", 0) == 0;
+    if (Emu().CrashedInJit()) {
+        // Fall back to the interpreter for every game until the user turns the JIT back on.
+        auto& cfg = Svc().Config();
+        cfg.core[keys::kCpuJit] = "disabled";
+        for (auto& [title, opts] : cfg.per_game) opts.erase(keys::kCpuJit);
+        Svc().SaveSettings();
+        ONYX_WARN("CPU JIT crashed; switched to the interpreter");
+    }
     ContentDialog d;
-    d.Title(box_value(L"The game couldn't start"));
-    d.Content(box_value(kit::H(reason + "\n\nCommon fixes: use a decrypted dump, put aes_keys.txt / "
-                                        "seeddb.bin in your System folder, and check Settings > System check.")));
+    d.Title(box_value(crashed ? L"The emulator stopped" : L"The game couldn't start"));
+    d.Content(box_value(kit::H(
+        crashed ? reason
+                : reason + "\n\nCommon fixes: use a decrypted dump, put aes_keys.txt / "
+                           "seeddb.bin in your System folder, and check Settings > System check.")));
     d.CloseButtonText(L"Back to menu");
     d.Closed([leave](auto&&, auto&&) { leave(); });
     d.ShowAsync();

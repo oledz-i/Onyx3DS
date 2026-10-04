@@ -144,6 +144,44 @@ void Report(const char* stage, EXCEPTION_POINTERS* ep) {
 #endif
 }
 
+LONG GuardFilter(EXCEPTION_POINTERS* ep, GuardedCrash* out) {
+    const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
+    Report("Emulator crashed; the game was stopped and the app keeps running", ep);
+    out->code = rec->ExceptionCode;
+    std::snprintf(out->what, sizeof(out->what), "%s", CodeName(rec->ExceptionCode));
+    Describe(rec->ExceptionAddress, out->where, sizeof(out->where));
+    MEMORY_BASIC_INFORMATION mbi{};
+    const bool pc_in_jit = VirtualQuery(rec->ExceptionAddress, &mbi, sizeof(mbi)) != 0 &&
+                           mbi.Type == MEM_PRIVATE && IsExecutable(mbi.Protect);
+    bool write_to_code = false;
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2 &&
+        rec->ExceptionInformation[0] == 1) {
+        MEMORY_BASIC_INFORMATION t{};
+        const void* target = reinterpret_cast<const void*>(rec->ExceptionInformation[1]);
+        write_to_code = VirtualQuery(target, &t, sizeof(t)) != 0 && t.Type == MEM_PRIVATE &&
+                        IsExecutable(t.Protect);
+    }
+    out->in_jit = pc_in_jit || write_to_code;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+#if defined(_MSC_VER)
+// No C++ objects with destructors in here: __try needs a frame without unwinding.
+bool RunGuardedImpl(void (*fn)(void*), void* ctx, GuardedCrash* out) {
+    __try {
+        fn(ctx);
+        return true;
+    } __except (GuardFilter(GetExceptionInformation(), out)) {
+        return false;
+    }
+}
+#else
+bool RunGuardedImpl(void (*fn)(void*), void* ctx, GuardedCrash*) {
+    fn(ctx); // MinGW syntax checks only; the Xbox build is MSVC
+    return true;
+}
+#endif
+
 LONG WINAPI OnUnhandled(EXCEPTION_POINTERS* ep) {
     if (t_in_handler) return EXCEPTION_CONTINUE_SEARCH;
     t_in_handler = true;
@@ -176,6 +214,10 @@ void OnAbort(int) {
 }
 
 } // namespace
+
+bool RunGuarded(void (*fn)(void*), void* ctx, GuardedCrash* out) {
+    return RunGuardedImpl(fn, ctx, out);
+}
 
 void InstallCrashHandler() {
     SetUnhandledExceptionFilter(&OnUnhandled);
