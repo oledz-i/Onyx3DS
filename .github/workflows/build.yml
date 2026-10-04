@@ -163,35 +163,63 @@ jobs:
           tools/ci-annotate.sh report-imports.txt Imports $lvl
           tools/ci-annotate.sh report-launch.txt Launch $lvl
 
-  # Pushing a tag like v2.0 publishes a GitHub Release with just what an
-  # install needs: the .msix and its x64 dependency (plus the map file for
-  # decoding crash logs).
+  # Publishes a GitHub Release with just what an install needs: the .msix and
+  # its x64 dependency (plus the map file for decoding crash logs). Runs for
+  # a v* tag, or on main when the package version (Package.appxmanifest,
+  # e.g. 2.0.0.0 -> v2.0) has no release yet. Notes: docs/releases/<tag>.md.
   release:
     needs: verify
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Decide the release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            ver=$(grep -oP '<Identity[^>]*Version="\K[0-9.]+' app/ONYX3DS/Package.appxmanifest)
+            IFS=. read -r a b c d <<< "$ver"
+            tag="v$a.$b"
+            [ "${c:-0}" != 0 ] && tag="$tag.$c"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - if: steps.tag.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: ONYX3DS-xbox
           path: pkg
       - name: Collect release files
+        if: steps.tag.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          msix=$(find pkg -name '*.msix' -o -name '*.appx' | grep -v Dependencies | head -1)
+          msix=$(find pkg \( -name '*.msix' -o -name '*.appx' \) -not -path '*Dependencies*' | head -1)
           [ -n "$msix" ] || { echo "no package found"; exit 1; }
-          cp "$msix" "dist/ONYX3DS-${GITHUB_REF_NAME}.msix"
+          cp "$msix" "dist/ONYX3DS-$TAG.msix"
           find pkg -path '*Dependencies/x64/*' -type f -exec cp {} dist/ \;
-          [ -f pkg/ONYX3DS.map ] && cp pkg/ONYX3DS.map "dist/ONYX3DS-${GITHUB_REF_NAME}.map" || true
+          if [ -f pkg/ONYX3DS.map ]; then cp pkg/ONYX3DS.map "dist/ONYX3DS-$TAG.map"; fi
           ls -la dist
       - name: Publish release
+        if: steps.tag.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || notes=/dev/null
-          gh release create "$GITHUB_REF_NAME" dist/* --title "ONYX ${GITHUB_REF_NAME}" --notes-file "$notes" --latest
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "ONYX $TAG" --notes-file "$notes" --latest
