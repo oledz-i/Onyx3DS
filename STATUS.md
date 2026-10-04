@@ -23,6 +23,14 @@
   2. Azahar compiling as WindowsStore (expect a few more UWP API fixes)
   3. Real 30-60 FPS on Series S — measured only once it runs.
 
+## Crash reporting (Oct 4)
+- Native faults, failed Azahar ASSERTs, uncaught C++ exceptions and abort() are now
+  written to onyx.log as `[CRASH]` lines with the faulting module+offset and a stack
+  scan. Offsets inside ONYX3DS.exe decode with `out/ONYX3DS.map` (in the CI artifact).
+- Memory use vs. the Xbox limit is logged at launch and every 500 ms for the first
+  15 s of a game, so an out-of-memory kill is visible.
+- Azahar logs synchronously now (patch 0008), so its last lines survive a crash.
+
 ## Next steps
 1. Re-run the page syntax checks; fix what remains.
 2. Push to GitHub and let `.github/workflows/build.yml` build on Windows; fix MSVC errors.

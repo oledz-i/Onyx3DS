@@ -142,6 +142,7 @@ jobs:
           path: |
             out/AppPackages/**
             out/ONYX3DS.cer
+            out/ONYX3DS.map
           if-no-files-found: error
 
   verify:

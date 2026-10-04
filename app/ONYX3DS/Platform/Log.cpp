@@ -73,6 +73,22 @@ void Log(LogLevel level, const char* fmt, ...) {
     }
 }
 
+void LogRaw(const char* text) {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char line[1024];
+    const int n = std::snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d [CRASH] %s\n", t.wHour,
+                                t.wMinute, t.wSecond, t.wMilliseconds, text);
+    if (n <= 0) return;
+    const DWORD len = static_cast<DWORD>(std::min<int>(n, sizeof(line) - 1));
+    OutputDebugStringA(line);
+    if (g_file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(g_file, line, len, &written, nullptr);
+        FlushFileBuffers(g_file);
+    }
+}
+
 std::vector<std::string> RecentLog(std::size_t max_lines) {
     std::lock_guard lock(g_mutex);
     const std::size_t start = g_ring.size() > max_lines ? g_ring.size() - max_lines : 0;

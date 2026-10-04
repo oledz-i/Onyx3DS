@@ -16,6 +16,10 @@ void LogInit(const std::wstring& log_file);
 void Log(LogLevel level, const char* fmt, ...);
 std::vector<std::string> RecentLog(std::size_t max_lines = 200);
 
+// Writes one line straight to onyx.log and flushes it, without taking the log
+// lock. Only for crash handlers, which may run while another thread holds it.
+void LogRaw(const char* text);
+
 #define ONYX_INFO(...) ::onyx::app::Log(::onyx::app::LogLevel::Info, __VA_ARGS__)
 #define ONYX_WARN(...) ::onyx::app::Log(::onyx::app::LogLevel::Warning, __VA_ARGS__)
 #define ONYX_ERROR(...) ::onyx::app::Log(::onyx::app::LogLevel::Error, __VA_ARGS__)

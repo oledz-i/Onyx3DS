@@ -5,6 +5,7 @@
 #include <cstdarg>
 
 #include "Emu/AzaharBridge.h"
+#include "Platform/CrashHandler.h"
 #include "Platform/Imaging.h"
 #include "Platform/Log.h"
 #include "Platform/UwpPlatform.h"
@@ -246,6 +247,9 @@ void EmulatorSession::RunCommands() {
 void EmulatorSession::EmulationThread(std::string rom_path) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    InstallThreadCrashHooks();
+    LogMemoryUsage("before loading the game");
+    WatchMemoryFor(15); // an out-of-memory kill shows as usage reaching the limit
 
     std::string fail_reason;
     auto fail = [&](const std::string& why) {

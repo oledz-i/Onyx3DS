@@ -1,0 +1,111 @@
+From 8bcee7ebc18b0c131b8e6b3d7fac848178f1bfb8 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sun, 4 Oct 2026 00:42:44 -0400
+Subject: [PATCH] video_core: W^X shader JIT memory on UWP, instant libretro
+ logging
+
+Xbox Dev Mode only hands out executable memory through VirtualAllocFromApp /
+VirtualProtectFromApp, and never as writable and executable at once. Xbyak's
+default allocator mallocs a buffer and asks plain VirtualProtect for RWX, which
+fails there and throws ERR_CANT_PROTECT the first time a Pica shader is JIT
+compiled. On UWP, give JitShader RW pages from VirtualAllocFromApp and flip
+them to RX after the shader is generated.
+
+Also write libretro log lines synchronously, so the lines before a hard crash
+reach the frontend instead of dying in the background queue.
+---
+ src/citra_libretro/citra_libretro.cpp         |  3 ++
+ .../shader/shader_jit_x64_compiler.cpp        | 48 +++++++++++++++++++
+ 2 files changed, 51 insertions(+)
+
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index 34133d0..2b5fd1d 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -73,6 +73,9 @@ CitraLibRetro* emu_instance;
+ 
+ void retro_init() {
+     emu_instance = new CitraLibRetro();
++    // Write every log line straight to the frontend instead of through the
++    // background queue, so the lines leading up to a hard crash are not lost.
++    Settings::values.instant_debug_log = true;
+     Common::Log::LibRetroStart(LibRetro::GetLoggingBackend());
+     Common::Log::SetGlobalFilter(emu_instance->log_filter);
+ 
+diff --git a/src/video_core/shader/shader_jit_x64_compiler.cpp b/src/video_core/shader/shader_jit_x64_compiler.cpp
+index a8b3567..b571ace 100644
+--- a/src/video_core/shader/shader_jit_x64_compiler.cpp
++++ b/src/video_core/shader/shader_jit_x64_compiler.cpp
+@@ -20,9 +20,46 @@
+ #include "video_core/pica_types.h"
+ #include "video_core/shader/shader_jit_x64_compiler.h"
+ 
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#include <winapifamily.h>
++#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) && !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++#include <memoryapi.h>
++#define SHADER_JIT_UWP 1
++#endif
++#endif
++
+ using namespace Common::X64;
+ using namespace Xbyak::util;
+ using Xbyak::Label;
++
++#ifdef SHADER_JIT_UWP
++namespace {
++// Xbox Dev Mode (UWP): executable memory only comes from the *FromApp allocators
++// (with the codeGeneration capability), and a page may never be writable and
++// executable at once. Xbyak's default allocator mallocs and then asks plain
++// VirtualProtect for RWX, which fails there and throws ERR_CANT_PROTECT. Hand
++// Xbyak RW pages instead, and flip them to RX once the shader is generated.
++struct UwpCodeAllocator final : Xbyak::Allocator {
++    uint8_t* alloc(size_t size) override {
++        return static_cast<uint8_t*>(
++            VirtualAllocFromApp(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
++    }
++    void free(uint8_t* p) override {
++        if (p) {
++            VirtualFree(p, 0, MEM_RELEASE);
++        }
++    }
++    bool useProtect() const override {
++        return false; // JitShader::Compile makes the pages executable itself
++    }
++};
++UwpCodeAllocator uwp_code_allocator;
++} // namespace
++#endif
+ using Xbyak::Reg32;
+ using Xbyak::Reg64;
+ using Xbyak::Xmm;
+@@ -1096,11 +1133,22 @@ void JitShader::Compile(const std::array<u32, MAX_PROGRAM_CODE_LENGTH>* program_
+ 
+     ready();
+ 
++#ifdef SHADER_JIT_UWP
++    DWORD old_protect = 0;
++    const BOOL protected_ok = VirtualProtectFromApp(const_cast<uint8_t*>(getCode()), MAX_SHADER_SIZE,
++                                                    PAGE_EXECUTE_READ, &old_protect);
++    ASSERT_MSG(protected_ok, "Could not make shader JIT code executable (error {})", GetLastError());
++#endif
++
+     ASSERT_MSG(getSize() <= MAX_SHADER_SIZE, "Compiled a shader that exceeds the allocated size!");
+     LOG_DEBUG(HW_GPU, "Compiled shader size={}", getSize());
+ }
+ 
++#ifdef SHADER_JIT_UWP
++JitShader::JitShader() : Xbyak::CodeGenerator(MAX_SHADER_SIZE, nullptr, &uwp_code_allocator) {}
++#else
+ JitShader::JitShader() : Xbyak::CodeGenerator(MAX_SHADER_SIZE) {}
++#endif
+ 
+ void JitShader::Compile_Log2(Xbyak::Label subroutine) {
+     // SSE does not have a log instruction, thus we must approximate.
+-- 
+2.43.0
+

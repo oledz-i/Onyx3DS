@@ -3,6 +3,7 @@
 #include "App.h"
 
 #include "MainPage.h"
+#include "Platform/CrashHandler.h"
 #include "Platform/Log.h"
 #include "Ui/AppServices.h"
 
@@ -68,7 +69,9 @@ App::App() {
 
 void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     LogInit(Wide(Paths().log_file));
+    InstallCrashHandler();
     ONYX_INFO("ONYX 3DS starting");
+    LogMemoryUsage("at launch"); // the limit shows whether Dev Home runs this as an App or a Game
 
     // Full 1920x1080 layout on Xbox (otherwise XAML scales to 200% = 960x540)
     // and draw to the edges; pages keep their own TV-safe margins.

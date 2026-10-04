@@ -83,6 +83,9 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
+      <!-- Crash lines in onyx.log give ONYX3DS.exe+offset; the map turns that into a function. -->
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(ProjectDir)..\..\out\ONYX3DS.map</MapFileName>
       <AdditionalLibraryDirectories>$(OnyxDeps)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>azahar_all.lib;onyx_shell.lib;rcheevos.lib;d3d12.lib;dxgi.lib;dxguid.lib;xaudio2.lib;WindowsApp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <!-- Azahar's libraries and ours both pull in fmt/boost pieces -->
@@ -132,6 +135,7 @@
     <ClInclude Include="Emu\EmulatorSession.h" />
     <ClInclude Include="Emu\InputManager.h" />
     <ClInclude Include="Emu\VulkanHost.h" />
+    <ClInclude Include="Platform\CrashHandler.h" />
     <ClInclude Include="Platform\Imaging.h" />
     <ClInclude Include="Platform\Log.h" />
     <ClInclude Include="Platform\UwpPlatform.h" />
@@ -191,6 +195,7 @@
     <ClCompile Include="Emu\EmulatorSession.cpp" />
     <ClCompile Include="Emu\InputManager.cpp" />
     <ClCompile Include="Emu\VulkanHost.cpp" />
+    <ClCompile Include="Platform\CrashHandler.cpp" />
     <ClCompile Include="Platform\Imaging.cpp" />
     <ClCompile Include="Platform\Log.cpp" />
     <ClCompile Include="Platform\UwpPlatform.cpp" />
