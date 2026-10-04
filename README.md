@@ -24,7 +24,7 @@ ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core 
 
 > [!WARNING]
 > **ONYX is in ALPHA and still in its infancy.** It is not expected to work flawlessly
-> yet. Games boot and are playable on a Series S, but many run slowly, some don't work
+> yet. Games boot and are playable on a Series X/S, but many run slowly, some don't work
 > at all, and the hardware renderer is still being brought up. Expect crashes, glitches
 > and missing features while it grows. Bug reports with logs are very welcome (see
 > [Reporting a bug](#reporting-a-bug)).
