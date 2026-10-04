@@ -70,7 +70,7 @@ Encrypted dumps are detected and flagged in the library. ONYX cannot decrypt the
 The short version:
 
 1. Download the latest `ONYX3DS-xbox` package from [Actions](https://github.com/oledz-i/Onyx3DS/actions/workflows/build.yml) (or Releases, once there are some).
-2. Open the **Xbox Device Portal** in a browser on your PC and install the `.msix` together with the files in its `Dependencies\x64` folder.
+2. Open the **Xbox Device Portal** in a browser on your PC and install two things: the ONYX `.msix` and the dependency in `Dependencies\x64`. Nothing else in the download is needed.
 3. In **Dev Home**, highlight ONYX, press **Menu → View details**, and set **App type** to **Game**. This matters: as an *App*, Xbox gives it too little memory to emulate anything.
 4. Launch ONYX, choose your ROM folder, and pick a game.
 

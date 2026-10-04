@@ -16,16 +16,17 @@ This guide takes you from a console in retail mode to a game library in ONYX.
 - From [Actions](https://github.com/oledz-i/Onyx3DS/actions/workflows/build.yml), open the
   latest successful run and download the **`ONYX3DS-xbox`** artifact (a GitHub login is
   needed for Actions downloads). Releases will be posted once ONYX is out of alpha.
-- Unzip it on your PC. Inside `AppPackages\...` you'll find the `.msix` and a
-  `Dependencies\x64` folder.
+- Unzip it on your PC. Inside `AppPackages\...` you'll find the ONYX `.msix` and a
+  `Dependencies` folder. You only need the `.msix` and what's in `Dependencies\x64`;
+  everything else (other architectures, the certificate, `.map` and symbol files) can be ignored.
 
 ## 3. Install with the Device Portal
 
 1. On your PC, open the Device Portal address in a browser and accept the certificate
    warning (the portal uses a self-signed certificate).
 2. Under **Home → My games & apps**, choose **Add**.
-3. Select the ONYX `.msix`, then on the next page add **every file** from
-   `Dependencies\x64`, and start the install.
+3. Select the ONYX `.msix`, then on the next page add the file from
+   `Dependencies\x64`, and start the install. That's all ONYX needs.
 4. Updating later works the same way; your settings and saves are kept.
 
 ## 4. Set ONYX to run as a Game
