@@ -9,8 +9,15 @@
 #include <cstdarg>
 #include <cstdio>
 
+// Mesa/Dozen's logger calls this for every message (see patches/mesa/0005). If the driver
+// library is not part of this build the fallback below stands in for the missing symbol.
+extern "C" void (*g_mesa_log_hook)(int level, const char* msg);
+extern "C" void (*g_mesa_log_hook_unused)(int level, const char* msg) = nullptr;
+#pragma comment(linker, "/alternatename:g_mesa_log_hook=g_mesa_log_hook_unused")
+
 namespace onyx::app {
 namespace {
+void MesaLogHook(int level, const char* msg);
 std::mutex g_mutex;
 std::deque<std::string> g_ring;
 HANDLE g_file = INVALID_HANDLE_VALUE;
@@ -98,7 +105,17 @@ std::wstring g_stderr_path;
 long long g_stderr_read = 0;
 } // namespace
 
+namespace {
+void MesaLogHook(int level, const char* msg) {
+    std::string line(msg ? msg : "");
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+    if (line.empty()) return;
+    Log(level <= 0 ? LogLevel::Error : LogLevel::Warning, "[driver] %s", line.c_str());
+}
+} // namespace
+
 void CaptureStderr(const std::wstring& path) {
+    g_mesa_log_hook = MesaLogHook;
     g_stderr_path = path;
     g_stderr_read = 0;
     FILE* f = nullptr;

@@ -1,0 +1,29 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] util: forward log messages to an application hook
+
+---
+diff --git a/src/util/log.c b/src/util/log.c
+index b594a8f..821c8ba 100644
+--- a/src/util/log.c
++++ b/src/util/log.c
+@@ -99,6 +99,10 @@ level_from_str(const char *str)
+    return MESA_NUM_LOG_LEVELS;
+ }
+ 
++/* Set by the embedding application to receive every message that would go to the
++ * log file (used on UWP, where stderr is not visible). */
++void (*g_mesa_log_hook)(int level, const char *msg);
++
+ static uint32_t mesa_log_control;
+ static FILE *mesa_log_file;
+ static enum mesa_log_level mesa_max_log_level;
+@@ -312,6 +316,9 @@ logger_file(enum mesa_log_level level,
+    fprintf(fp, "%s", msg);
+    fflush(fp);
+ 
++   if (g_mesa_log_hook)
++      g_mesa_log_hook((int)level, msg);
++
+    if (msg != local_msg)
+       free(msg);
+ }

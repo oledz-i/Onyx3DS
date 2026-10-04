@@ -1,0 +1,26 @@
+From 67bde33c097476af8340159c7ab9b7cdb9ec3a9d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 14:23:41 -0400
+Subject: [PATCH] renderer_vulkan: 96 MiB upload buffer (512 MiB persistent
+ mapping is too much for a console)
+
+---
+ src/video_core/renderer_vulkan/vk_texture_runtime.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index 077c4d6..028e60e 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -158,7 +158,7 @@ vk::ImageSubresourceRange MakeSubresourceRange(vk::ImageAspectFlags aspect, u32
+     };
+ }
+ 
+-constexpr u64 UPLOAD_BUFFER_SIZE = 512_MiB;
++constexpr u64 UPLOAD_BUFFER_SIZE = 96_MiB; // 512 MiB overran the console GPU budget
+ constexpr u64 DOWNLOAD_BUFFER_SIZE = 16_MiB;
+ 
+ } // Anonymous namespace
+-- 
+2.43.0
+

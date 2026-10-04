@@ -1,0 +1,298 @@
+From c4beffa16fa1a2999e19586687d95d6259dc6e13 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 14:22:30 -0400
+Subject: [PATCH] renderer_software: rasterize each draw call as parallel
+ screen bands; direct-copy display transfers
+
+---
+ .../renderer_software/sw_blitter.cpp          |  24 +++-
+ .../renderer_software/sw_rasterizer.cpp       | 106 ++++++++++++++----
+ .../renderer_software/sw_rasterizer.h         |  42 ++++++-
+ 3 files changed, 143 insertions(+), 29 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_blitter.cpp b/src/video_core/renderer_software/sw_blitter.cpp
+index 0a68afd..f00756e 100644
+--- a/src/video_core/renderer_software/sw_blitter.cpp
++++ b/src/video_core/renderer_software/sw_blitter.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <cstring>
+ #include "common/alignment.h"
+ #include "common/color.h"
+ #include "common/vector_math.h"
+@@ -188,6 +189,12 @@ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
+     rasterizer->FlushRegion(config.GetPhysicalInputAddress(), input_size);
+     rasterizer->InvalidateRegion(config.GetPhysicalOutputAddress(), output_size);
+ 
++    const u32 dst_bytes_per_pixel = BytesPerPixel(config.output_format);
++    const u32 src_bytes_per_pixel = BytesPerPixel(config.input_format);
++    // Same format and no scaling: the pixel bytes are copied as they are.
++    const bool copy_direct =
++        config.input_format == config.output_format && config.scaling == config.NoScale;
++
+     for (u32 y = 0; y < output_height; ++y) {
+         for (u32 x = 0; x < output_width; ++x) {
+             Common::Vec4<u8> src_color;
+@@ -207,8 +214,6 @@ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
+                 output_y = y;
+             }
+ 
+-            const u32 dst_bytes_per_pixel = BytesPerPixel(config.output_format);
+-            const u32 src_bytes_per_pixel = BytesPerPixel(config.input_format);
+             u32 src_offset;
+             u32 dst_offset;
+ 
+@@ -251,6 +256,21 @@ void SwBlitter::DisplayTransfer(const Pica::DisplayTransferConfig& config) {
+             }
+ 
+             const u8* src_pixel = src_pointer + src_offset;
++            if (copy_direct) {
++                u8* direct_dst = dst_pointer + dst_offset;
++                switch (dst_bytes_per_pixel) {
++                case 4:
++                    std::memcpy(direct_dst, src_pixel, 4);
++                    break;
++                case 3:
++                    std::memcpy(direct_dst, src_pixel, 3);
++                    break;
++                default:
++                    std::memcpy(direct_dst, src_pixel, 2);
++                    break;
++                }
++                continue;
++            }
+             src_color = DecodePixel(config.input_format, src_pixel);
+             if (config.scaling == config.ScaleX) {
+                 const auto pixel =
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index f42155c..c567059 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -2,7 +2,11 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <thread>
+ #include <boost/container/static_vector.hpp>
++#if defined(_M_X64) || defined(__x86_64__)
++#include <immintrin.h>
++#endif
+ #include "common/logging/log.h"
+ #include "common/microprofile.h"
+ #include "common/quaternion.h"
+@@ -98,6 +102,12 @@ private:
+     Common::Vec4<f24> bias;
+ };
+ 
++inline void YieldCpu() {
++#if defined(_M_X64) || defined(__x86_64__)
++    _mm_pause();
++#endif
++}
++
+ } // Anonymous namespace
+ 
+ RasterizerSoftware::RasterizerSoftware(Memory::MemorySystem& memory_, Pica::PicaCore& pica_)
+@@ -299,8 +309,6 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+     const auto textures = regs.texturing.GetTextures();
+     const auto tev_stages = regs.texturing.GetTevStages();
+ 
+-    fb.Bind();
+-
+     // Enter rasterization loop, starting at the center of the topleft bounding box corner.
+     // TODO: Not sure if looping through x first might be faster
+     // One scanline of the triangle. (Was queued as its own job per scanline;
+@@ -342,7 +350,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+     const bool need_uv1 = textures[1].enabled || (textures[2].enabled && use_coord1_for_2);
+     const bool need_uv2 = textures[2].enabled && !use_coord1_for_2;
+ 
+-    const auto process_scanline = [&](u16 y) {
++    auto process_scanline = [=, this](u16 y) {
+             // Edge function values at the first pixel of the row, and their step per pixel.
+             std::array<s64, 3> base;
+             std::array<s64, 3> step;
+@@ -535,38 +543,92 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+             }
+     };
+ 
+-    // Queueing every scanline as a separate job and waiting after each triangle
+-    // spends more time waking and joining workers than drawing for the many
+-    // small triangles 2D games use. Draw small triangles on this thread, and
+-    // split large ones into one contiguous band of scanlines per worker.
++    // Rasterization is deferred to DrawTriangles(): the whole draw call's triangles are
++    // queued here, then each screen band is drawn by one thread with every triangle in
++    // submission order (per-pixel order is preserved, bands never overlap).
+     const u16 first_y = static_cast<u16>(min_y + 8);
+     if (first_y >= max_y) {
+         return;
+     }
+     const u32 rows = (static_cast<u32>(max_y) - first_y + 0xF) >> 4;
+     const u32 cols = max_x > min_x ? (static_cast<u32>(max_x) - min_x) >> 4 : 0;
+-    constexpr u32 kInlinePixels = 8 * 1024;
+-    if (rows < 16 || rows * cols < kInlinePixels || num_sw_threads < 2) {
+-        for (u32 r = 0; r < rows; ++r) {
+-            process_scanline(static_cast<u16>(first_y + r * 0x10));
++    pending_area += static_cast<u64>(rows) * cols;
++    pending.push_back(PendingTriangle{std::move(process_scanline), static_cast<u32>(first_y >> 4),
++                                      rows});
++}
++
++void RasterizerSoftware::DrawTriangles() {
++    if (pending.empty()) {
++        return;
++    }
++    fb.Bind();
++    constexpr u64 kInlinePixels = 6 * 1024;
++    if (num_sw_threads < 2 || pending_area < kInlinePixels) {
++        for (const auto& job : pending) {
++            for (u32 r = 0; r < job.rows; ++r) {
++                job.scanline(static_cast<u16>(((job.first_row + r) << 4) + 8));
++            }
+         }
++        pending.clear();
++        pending_area = 0;
+         return;
+     }
+-    const u32 bands = std::min<u32>(static_cast<u32>(num_sw_threads), rows / 4);
+-    const u32 per_band = (rows + bands - 1) / bands;
+-    for (u32 b = 0; b < bands; ++b) {
+-        const u32 r0 = b * per_band;
+-        const u32 r1 = std::min(rows, r0 + per_band);
+-        if (r0 >= r1) {
+-            break;
++
++    auto batch = std::make_shared<Batch>();
++    batch->jobs = std::move(pending);
++    pending.clear();
++    pending_area = 0;
++    u32 lo = ~0u;
++    u32 hi = 0;
++    for (const auto& job : batch->jobs) {
++        lo = std::min(lo, job.first_row);
++        hi = std::max(hi, job.first_row + job.rows);
++    }
++    const u32 range = hi - lo;
++    const u32 want = static_cast<u32>(num_sw_threads) * 2;
++    batch->lo = lo;
++    batch->hi = hi;
++    batch->band_rows = std::max<u32>(4, (range + want - 1) / want);
++    batch->num_bands = (range + batch->band_rows - 1) / batch->band_rows;
++
++    // Workers only touch this batch through the shared pointer, so a worker that wakes up
++    // after the batch is finished finds nothing to do and never touches freed state.
++    const u32 helpers = std::min<u32>(static_cast<u32>(num_sw_threads), batch->num_bands) - 1;
++    for (u32 i = 0; i < helpers; ++i) {
++        sw_workers.QueueWork([batch] { batch->Run(); });
++    }
++    batch->Run();
++    // The main thread joins in above; this only waits for bands other threads still draw.
++    u32 spins = 0;
++    while (batch->done.load(std::memory_order_acquire) < batch->num_bands) {
++        if (++spins < 4000) {
++            YieldCpu();
++        } else {
++            std::this_thread::yield();
+         }
+-        sw_workers.QueueWork([&process_scanline, first_y, r0, r1] {
++    }
++}
++
++void RasterizerSoftware::Batch::Run() {
++    for (;;) {
++        const u32 b = next.fetch_add(1, std::memory_order_relaxed);
++        if (b >= num_bands) {
++            return;
++        }
++        const u32 y0 = lo + b * band_rows;
++        const u32 y1 = std::min(hi, y0 + band_rows);
++        for (const auto& job : jobs) {
++            if (job.first_row >= y1 || job.first_row + job.rows <= y0) {
++                continue;
++            }
++            const u32 r0 = y0 > job.first_row ? y0 - job.first_row : 0;
++            const u32 r1 = std::min(job.rows, y1 - job.first_row);
+             for (u32 r = r0; r < r1; ++r) {
+-                process_scanline(static_cast<u16>(first_y + r * 0x10));
++                job.scanline(static_cast<u16>(((job.first_row + r) << 4) + 8));
+             }
+-        });
++        }
++        done.fetch_add(1, std::memory_order_release);
+     }
+-    sw_workers.WaitForRequests();
+ }
+ 
+ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index a25cbf6..21d143e 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -4,7 +4,11 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++#include <functional>
++#include <memory>
+ #include <span>
++#include <vector>
+ #include "common/thread_worker.h"
+ #include "video_core/pica/regs_texturing.h"
+ #include "video_core/rasterizer_interface.h"
+@@ -26,11 +30,19 @@ public:
+ 
+     void AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
+                      const Pica::OutputVertex& v2) override;
+-    void DrawTriangles() override {}
+-    void FlushAll() override {}
+-    void FlushRegion(PAddr addr, u32 size) override {}
+-    void InvalidateRegion(PAddr addr, u32 size) override {}
+-    void FlushAndInvalidateRegion(PAddr addr, u32 size) override {}
++    void DrawTriangles() override;
++    void FlushAll() override {
++        DrawTriangles();
++    }
++    void FlushRegion(PAddr addr, u32 size) override {
++        DrawTriangles();
++    }
++    void InvalidateRegion(PAddr addr, u32 size) override {
++        DrawTriangles();
++    }
++    void FlushAndInvalidateRegion(PAddr addr, u32 size) override {
++        DrawTriangles();
++    }
+     void ClearAll(bool flush) override {}
+ 
+ private:
+@@ -72,6 +84,26 @@ private:
+     std::size_t num_sw_threads;
+     Common::ThreadWorker sw_workers;
+     Framebuffer fb;
++
++    /// A triangle waiting for DrawTriangles(): draws one scanline of itself per call.
++    struct PendingTriangle {
++        std::function<void(u16)> scanline;
++        u32 first_row; ///< First covered pixel row
++        u32 rows;
++    };
++    /// All triangles of one draw call, split into screen bands drawn by several threads.
++    struct Batch {
++        std::vector<PendingTriangle> jobs;
++        u32 lo = 0;
++        u32 hi = 0;
++        u32 band_rows = 1;
++        u32 num_bands = 0;
++        std::atomic<u32> next{0};
++        std::atomic<u32> done{0};
++        void Run();
++    };
++    std::vector<PendingTriangle> pending;
++    u64 pending_area = 0;
+ };
+ 
+ } // namespace SwRenderer
+-- 
+2.43.0
+
