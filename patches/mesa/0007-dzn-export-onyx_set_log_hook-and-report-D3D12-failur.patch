@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 86895886eb746c4e0ad87dfc98b70767666e873f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 4 Oct 2026 15:03:57 -0400
-Subject: [PATCH 7/7] dzn: export onyx_set_log_hook and report D3D12 failures
+Subject: [PATCH] dzn: export onyx_set_log_hook and report D3D12 failures
 
 Release builds of Dozen fail silently: most D3D12 HRESULTs are dropped and
 turned into VK_ERROR_OUT_OF_HOST_MEMORY. For the UWP (Xbox Dev Mode) port:
@@ -22,7 +22,7 @@ turned into VK_ERROR_OUT_OF_HOST_MEMORY. For the UWP (Xbox Dev Mode) port:
 ---
  src/microsoft/vulkan/dzn_cmd_buffer.c     |  16 +--
  src/microsoft/vulkan/dzn_descriptor_set.c |   8 +-
- src/microsoft/vulkan/dzn_device.c         | 133 ++++++++++++++++------
+ src/microsoft/vulkan/dzn_device.c         | 134 ++++++++++++++++------
  src/microsoft/vulkan/dzn_image.c          |   8 +-
  src/microsoft/vulkan/dzn_meta.c           |   4 +-
  src/microsoft/vulkan/dzn_pipeline.c       |  54 +++++++--
@@ -30,7 +30,7 @@ turned into VK_ERROR_OUT_OF_HOST_MEMORY. For the UWP (Xbox Dev Mode) port:
  src/microsoft/vulkan/dzn_query.c          |   8 +-
  src/microsoft/vulkan/dzn_sync.c           |  26 ++---
  src/microsoft/vulkan/dzn_util.c           |  47 ++++++++
- 10 files changed, 239 insertions(+), 82 deletions(-)
+ 10 files changed, 240 insertions(+), 82 deletions(-)
 
 diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
 index fd85f88..8cf1d50 100644
@@ -111,7 +111,7 @@ index c8821c9..36770f6 100644
              return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
           }
 diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
-index 9232be0..d209e1d 100644
+index 9232be0..ee9a3a4 100644
 --- a/src/microsoft/vulkan/dzn_device.c
 +++ b/src/microsoft/vulkan/dzn_device.c
 @@ -38,6 +38,8 @@
@@ -289,24 +289,25 @@ index 9232be0..d209e1d 100644
        return vk_device_set_lost(&device->vk, "D3D12 device removed");
  
     return VK_SUCCESS;
-@@ -2456,6 +2504,16 @@ dzn_device_create(struct dzn_physical_device *pdev,
+@@ -2456,6 +2504,17 @@ dzn_device_create(struct dzn_physical_device *pdev,
     }
  
     assert(queue_count == qindex);
++#ifdef _WIN32
++   const unsigned validator_version =
++      (unsigned)dxil_get_validator_version(instance->dxil_validator);
++#else
++   const unsigned validator_version = 0u;
++#endif
 +   mesa_logi("dzn: device created: shader model 0x%x, validator 0x%x, bindless %d, "
 +             "enhanced barriers %d, %u queue(s)",
-+             (unsigned)pdev->shader_model,
-+#ifdef _WIN32
-+             (unsigned)dxil_get_validator_version(instance->dxil_validator),
-+#else
-+             0u,
-+#endif
++             (unsigned)pdev->shader_model, validator_version,
 +             (int)device->bindless, (int)pdev->options12.EnhancedBarriersSupported,
 +             queue_count);
     *out = dzn_device_to_handle(device);
     return VK_SUCCESS;
  }
-@@ -2473,7 +2531,10 @@ serialize_root_sig(struct dzn_device *device,
+@@ -2473,7 +2532,10 @@ serialize_root_sig(struct dzn_device *device,
           instance->d3d12.serialize_root_sig(desc, &sig, &error);
  
     if (FAILED(hr)) {
@@ -318,7 +319,7 @@ index 9232be0..d209e1d 100644
           const char *error_msg = (const char *)ID3D10Blob_GetBufferPointer(error);
           fprintf(stderr,
                   "== SERIALIZE ROOT SIG ERROR =============================================\n"
-@@ -2498,11 +2559,11 @@ dzn_device_create_root_sig(struct dzn_device *device,
+@@ -2498,11 +2560,11 @@ dzn_device_create_root_sig(struct dzn_device *device,
        return NULL;
  
     ID3D12RootSignature *root_sig = NULL;
@@ -332,7 +333,7 @@ index 9232be0..d209e1d 100644
     ID3D10Blob_Release(sig);
     return root_sig;
  }
-@@ -2754,7 +2815,7 @@ dzn_device_memory_create(struct dzn_device *device,
+@@ -2754,7 +2816,7 @@ dzn_device_memory_create(struct dzn_device *device,
  #ifdef _WIN32
     HANDLE handle_from_name = NULL;
     if (import_name) {
@@ -341,7 +342,7 @@ index 9232be0..d209e1d 100644
           error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
           goto cleanup;
        }
-@@ -2789,7 +2850,7 @@ dzn_device_memory_create(struct dzn_device *device,
+@@ -2789,7 +2851,7 @@ dzn_device_memory_create(struct dzn_device *device,
     } else if (import_handle) {
        error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
        if (image || buffer) {
@@ -350,7 +351,7 @@ index 9232be0..d209e1d 100644
              goto cleanup;
  
           /* Verify compatibility */
-@@ -2824,7 +2885,7 @@ dzn_device_memory_create(struct dzn_device *device,
+@@ -2824,7 +2886,7 @@ dzn_device_memory_create(struct dzn_device *device,
           else if ((heap_desc.Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES) && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
              goto cleanup;
        } else {
@@ -359,7 +360,7 @@ index 9232be0..d209e1d 100644
              goto cleanup;
  
           D3D12_HEAP_DESC desc = dzn_ID3D12Heap_GetDesc(mem->heap);
-@@ -2852,34 +2913,34 @@ dzn_device_memory_create(struct dzn_device *device,
+@@ -2852,34 +2914,34 @@ dzn_device_memory_create(struct dzn_device *device,
              .Layout = image->desc.Layout,
              .Flags = image->desc.Flags,
           };
@@ -402,7 +403,7 @@ index 9232be0..d209e1d 100644
           goto cleanup;
     }
  
-@@ -2903,11 +2964,11 @@ dzn_device_memory_create(struct dzn_device *device,
+@@ -2903,11 +2965,11 @@ dzn_device_memory_create(struct dzn_device *device,
           res_desc.SampleDesc.Quality = 0;
           res_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
           res_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -416,7 +417,7 @@ index 9232be0..d209e1d 100644
           if (FAILED(hr))
              goto cleanup;
        }
-@@ -2924,8 +2985,8 @@ dzn_device_memory_create(struct dzn_device *device,
+@@ -2924,8 +2986,8 @@ dzn_device_memory_create(struct dzn_device *device,
        const SECURITY_ATTRIBUTES *pAttributes = NULL;
        const wchar_t *name = NULL;
  #endif
@@ -427,7 +428,7 @@ index 9232be0..d209e1d 100644
           goto cleanup;
     }
  
-@@ -3338,13 +3399,13 @@ dzn_BindBufferMemory2(VkDevice _device,
+@@ -3338,13 +3400,13 @@ dzn_BindBufferMemory2(VkDevice _device,
        } else {
           D3D12_RESOURCE_DESC desc = buffer->desc;
           desc.Flags |= mem->res_flags;
@@ -443,7 +444,7 @@ index 9232be0..d209e1d 100644
              return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
        }
  
-@@ -3409,9 +3470,9 @@ dzn_event_create(struct dzn_device *device,
+@@ -3409,9 +3471,9 @@ dzn_event_create(struct dzn_device *device,
  
     vk_object_base_init(&device->vk, &event->base, VK_OBJECT_TYPE_EVENT);
  
@@ -455,7 +456,7 @@ index 9232be0..d209e1d 100644
        dzn_event_destroy(event, pAllocator);
        return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
     }
-@@ -3814,7 +3875,7 @@ dzn_GetMemoryFdPropertiesKHR(VkDevice _device,
+@@ -3814,7 +3876,7 @@ dzn_GetMemoryFdPropertiesKHR(VkDevice _device,
  #endif
     VK_FROM_HANDLE(dzn_device, device, _device);
     IUnknown *opened_object;
@@ -856,3 +857,6 @@ index 0c4a39b..6c14d12 100644
  static const DXGI_FORMAT formats[PIPE_FORMAT_COUNT] = {
  #define MAP_FORMAT_NORM(FMT) \
     [PIPE_FORMAT_ ## FMT ## _UNORM] = DXGI_FORMAT_ ## FMT ## _UNORM, \
+-- 
+2.43.0
+
