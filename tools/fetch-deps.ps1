@@ -27,6 +27,7 @@ Write-Step "Patching Azahar"
 Apply-Patches $azahar (Join-Path $Root "patches\azahar")
 Apply-Patches (Join-Path $azahar "externals\dynarmic") (Join-Path $Root "patches\dynarmic")
 Apply-Patches (Join-Path $azahar "externals\boost") (Join-Path $Root "patches\boost")
+Apply-Patches (Join-Path $azahar "externals\cryptopp") (Join-Path $Root "patches\cryptopp")
 
 }
 # --- Mesa (Dozen) ---------------------------------------------------------------

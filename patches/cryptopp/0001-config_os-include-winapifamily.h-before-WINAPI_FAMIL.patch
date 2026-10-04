@@ -1,0 +1,31 @@
+From affd091dd411e8756422fdc31479c537a3a54ea9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 01:07:58 +0000
+Subject: [PATCH] config_os: include winapifamily.h before
+ WINAPI_FAMILY_PARTITION checks
+
+---
+ include/cryptopp/config_os.h | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/include/cryptopp/config_os.h b/include/cryptopp/config_os.h
+index a08864f..04a28fd 100644
+--- a/include/cryptopp/config_os.h
++++ b/include/cryptopp/config_os.h
+@@ -125,6 +125,13 @@
+ #	define HIGHRES_TIMER_AVAILABLE
+ #endif
+ 
++// WINAPI_FAMILY_PARTITION() lives in winapifamily.h; make sure it is defined
++// before the checks below when WINAPI_FAMILY comes from the command line
++// (Universal Windows Platform builds).
++#if defined(WINAPI_FAMILY) && !defined(WINAPI_FAMILY_PARTITION)
++# include <winapifamily.h>
++#endif
++
+ #ifdef CRYPTOPP_WIN32_AVAILABLE
+ # if !defined(WINAPI_FAMILY)
+ #	define THREAD_TIMER_AVAILABLE
+-- 
+2.43.0
+
