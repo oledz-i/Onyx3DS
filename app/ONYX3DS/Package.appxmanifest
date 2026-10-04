@@ -3,11 +3,13 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+  IgnorableNamespaces="uap mp rescap">
 
   <!-- Publisher must match the signing certificate (tools/build-app.ps1 makes
        a self-signed "CN=ONYX3DS" one). -->
   <Identity Name="ONYX3DS" Publisher="CN=ONYX3DS" Version="0.1.0.0" ProcessorArchitecture="x64" />
+  <mp:PhoneIdentity PhoneProductId="6f3a9c1e-2b7d-4e55-9a0c-3d8e1f2a4b60" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
 
   <Properties>
     <DisplayName>ONYX 3DS</DisplayName>
