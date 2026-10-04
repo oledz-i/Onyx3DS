@@ -108,6 +108,8 @@ jobs:
           if grep -qE ": (fatal )?error C[0-9]+|error MSB4|XamlCompiler error|error MIDL" app.log; then cp app.log build.log; exit 1; fi
       - if: failure()
         run: tools/ci-report.sh build.log App
+      - if: success()
+        run: tools/ci-report.sh app.log App warning
       - uses: actions/upload-artifact@v4
         with:
           name: shell-libs

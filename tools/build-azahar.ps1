@@ -22,9 +22,10 @@ $cmakeArgs = @(
     "-DENABLE_DISCORD_RPC=OFF", "-DENABLE_LTO=OFF",
     "-DCITRA_WARNINGS_AS_ERRORS=OFF", "-DCITRA_USE_PRECOMPILED_HEADERS=OFF",
     # UWP only hands out W^X JIT memory (patches\dynarmic)
-    "-DDYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=ON"
+    "-DDYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=ON",
+    "-DCMAKE_PROJECT_INCLUDE_BEFORE=$((Join-Path $Root 'tools\uwp-flags.cmake') -replace '\\','/')"
 )
-if (!(Test-Path (Join-Path $build "CMakeCache.txt"))) { Invoke-Checked cmake @cmakeArgs } else { Invoke-Checked cmake $build }
+Invoke-Checked cmake @cmakeArgs
 
 Write-Step "Building Azahar ($Configuration)"
 Invoke-Checked cmake --build $build --config $Configuration --target citra_libretro --parallel

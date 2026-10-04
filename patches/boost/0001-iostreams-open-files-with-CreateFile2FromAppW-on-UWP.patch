@@ -1,0 +1,76 @@
+From f6aba5d42c06e91b8743613944537b58e5f8e209 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:35:34 +0000
+Subject: [PATCH] iostreams: open files with CreateFile2FromAppW on UWP
+
+---
+ libs/iostreams/src/file_descriptor.cpp | 39 ++++++++++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+
+diff --git a/libs/iostreams/src/file_descriptor.cpp b/libs/iostreams/src/file_descriptor.cpp
+index 19ed52e..d90857f 100644
+--- a/libs/iostreams/src/file_descriptor.cpp
++++ b/libs/iostreams/src/file_descriptor.cpp
+@@ -27,6 +27,37 @@
+ // Must come last.
+ #include <boost/iostreams/detail/config/disable_warnings.hpp>
+ 
++#if defined(_WIN32)
++# include <windows.h>
++# include <winapifamily.h>
++# if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) && \
++     !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++// Universal Windows Platform: CreateFileA/W are desktop-only; open through
++// CreateFile2FromAppW so files the app was granted (USB drives) work too.
++#  include <fileapifromapp.h>
++#  include <string>
++#  define BOOST_IOSTREAMS_UWP 1
++namespace {
++HANDLE uwp_create_file(const wchar_t* path, DWORD access, DWORD share, DWORD disposition,
++                       DWORD attributes)
++{
++    CREATEFILE2_EXTENDED_PARAMETERS params = {};
++    params.dwSize = sizeof(params);
++    params.dwFileAttributes = attributes;
++    return ::CreateFile2FromAppW(path, access, share, disposition, &params);
++}
++HANDLE uwp_create_file(const char* path, DWORD access, DWORD share, DWORD disposition,
++                       DWORD attributes)
++{
++    const int n = ::MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
++    std::wstring wide(n > 0 ? n : 1, L'\0');
++    if (n > 0) ::MultiByteToWideChar(CP_UTF8, 0, path, -1, &wide[0], n);
++    return uwp_create_file(wide.c_str(), access, share, disposition, attributes);
++}
++} // namespace
++# endif
++#endif
++
+     // OS-specific headers for low-level i/o.
+ 
+ #include <fcntl.h>       // file opening flags.
+@@ -173,6 +204,13 @@ void file_descriptor_impl::open(const detail::path& p, BOOST_IOS::openmode mode)
+     }
+     
+ 
++#ifdef BOOST_IOSTREAMS_UWP
++    HANDLE handle = p.is_wide() ?
++        uwp_create_file( p.c_wstr(), dwDesiredAccess, FILE_SHARE_READ | FILE_SHARE_WRITE,
++                         dwCreationDisposition, FILE_ATTRIBUTE_NORMAL ) :
++        uwp_create_file( p.c_str(), dwDesiredAccess, FILE_SHARE_READ | FILE_SHARE_WRITE,
++                         dwCreationDisposition, FILE_ATTRIBUTE_NORMAL );
++#else
+     HANDLE handle = p.is_wide() ?
+         ::CreateFileW( p.c_wstr(),
+                        dwDesiredAccess,
+@@ -188,6 +226,7 @@ void file_descriptor_impl::open(const detail::path& p, BOOST_IOS::openmode mode)
+                        dwCreationDisposition,
+                        FILE_ATTRIBUTE_NORMAL,
+                        NULL );                 // hTemplateFile
++#endif
+     if (handle != INVALID_HANDLE_VALUE) {
+         handle_ = handle;
+         flags_ = close_always;
+-- 
+2.43.0
+

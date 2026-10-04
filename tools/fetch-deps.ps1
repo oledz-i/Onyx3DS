@@ -26,6 +26,7 @@ try {
 Write-Step "Patching Azahar"
 Apply-Patches $azahar (Join-Path $Root "patches\azahar")
 Apply-Patches (Join-Path $azahar "externals\dynarmic") (Join-Path $Root "patches\dynarmic")
+Apply-Patches (Join-Path $azahar "externals\boost") (Join-Path $Root "patches\boost")
 
 }
 # --- Mesa (Dozen) ---------------------------------------------------------------
@@ -54,11 +55,7 @@ $dxil = Join-Path $DepsBin "dxil.dll"
 if (!(Test-Path $dxil)) {
     Write-Step "Downloading DXIL.dll (DirectX Shader Compiler release)"
     $zip = Join-Path $Deps "dxc.zip"
-    $release = Invoke-RestMethod -Uri $DxcReleaseApi -Headers @{ "User-Agent" = "ONYX3DS-build" }
-    $asset = $release.assets | Where-Object { $_.name -match '^dxc_.*\.zip$' } | Select-Object -First 1
-    if (!$asset) { throw "No Windows dxc_*.zip asset in the latest DirectXShaderCompiler release" }
-    Write-Host "   $($release.tag_name): $($asset.name)"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+    Invoke-WebRequest -Uri $DxcZipUrl -OutFile $zip
     $out = Join-Path $Deps "dxc"
     Expand-Archive -Force $zip $out
     Copy-Item (Join-Path $out "bin\x64\dxil.dll") $dxil

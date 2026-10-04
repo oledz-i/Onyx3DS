@@ -11,4 +11,4 @@ log=${1:-build.log}
   tail -n 20 "$log"
 } > report.txt
 msg=$(sed -e 's/%/%25/g' -e 's/\r//g' report.txt | awk 'BEGIN{ORS="%0A"} {print}')
-echo "::error title=${2:-Build} errors::${msg}"
+echo "::${3:-error} title=${2:-Build} log::${msg}"

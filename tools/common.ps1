@@ -15,8 +15,8 @@ $Script:AzaharCommit = (Get-Content "$Root\patches\azahar\BASE_COMMIT" -Raw).Tri
 $Script:MesaRepos = @("https://gitlab.freedesktop.org/mesa/mesa.git",
                       "https://github.com/chaotic-cx/mesa-mirror.git")
 $Script:MesaCommit = (Get-Content "$Root\patches\mesa\BASE_COMMIT" -Raw).Trim()
-# DXIL.dll comes from the latest DirectX Shader Compiler release on GitHub.
-$Script:DxcReleaseApi = "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest"
+# DXIL.dll from a pinned DirectX Shader Compiler release (no API call, so no rate limits).
+$Script:DxcZipUrl = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip"
 
 function Write-Step($text) {
     Write-Host ""

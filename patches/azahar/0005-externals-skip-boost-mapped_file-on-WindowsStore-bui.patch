@@ -1,0 +1,44 @@
+From 03f84d56741e0bd62edd1c90f26b6b7cbcbfa54f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:35:48 +0000
+Subject: [PATCH] externals: skip boost mapped_file on WindowsStore builds
+
+---
+ externals/CMakeLists.txt | 13 +++++++------
+ externals/boost          |  2 +-
+ 2 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/externals/CMakeLists.txt b/externals/CMakeLists.txt
+index 9b7a3fe4a..e76f24262 100644
+--- a/externals/CMakeLists.txt
++++ b/externals/CMakeLists.txt
+@@ -39,12 +39,13 @@ else()
+     target_link_libraries(boost_serialization PUBLIC boost)
+ 
+     # Boost::iostreams
+-    add_library(
+-        boost_iostreams
+-        STATIC
+-        ${CMAKE_SOURCE_DIR}/externals/boost/libs/iostreams/src/file_descriptor.cpp
+-        ${CMAKE_SOURCE_DIR}/externals/boost/libs/iostreams/src/mapped_file.cpp
+-    )
++    set(boost_iostreams_SRC ${CMAKE_SOURCE_DIR}/externals/boost/libs/iostreams/src/file_descriptor.cpp)
++    # mapped_file uses desktop-only Win32 file mapping APIs and Azahar does not
++    # use it, so UWP (WindowsStore) builds leave it out.
++    if (NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
++        list(APPEND boost_iostreams_SRC ${CMAKE_SOURCE_DIR}/externals/boost/libs/iostreams/src/mapped_file.cpp)
++    endif()
++    add_library(boost_iostreams STATIC ${boost_iostreams_SRC})
+     target_link_libraries(boost_iostreams PUBLIC boost)
+     # Add additional boost libs here; remember to ALIAS them in the root CMakeLists!
+ endif()
+diff --git a/externals/boost b/externals/boost
+index 6a85c3100..f6aba5d42 160000
+--- a/externals/boost
++++ b/externals/boost
+@@ -1 +1 @@
+-Subproject commit 6a85c3100499e886e11c87a5c2109eedacea0a61
++Subproject commit f6aba5d42c06e91b8743613944537b58e5f8e209
+-- 
+2.43.0
+
