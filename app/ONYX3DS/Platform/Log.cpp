@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
 #include "Platform/Log.h"
+#include <sys/stat.h>
+#include <share.h>
+#include <io.h>
+#include <fcntl.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -98,11 +102,25 @@ void CaptureStderr(const std::wstring& path) {
     g_stderr_path = path;
     g_stderr_read = 0;
     FILE* f = nullptr;
-    if (_wfreopen_s(&f, path.c_str(), L"w", stderr) == 0 && f) {
+    const errno_t e = _wfreopen_s(&f, path.c_str(), L"w", stderr);
+    if (e == 0 && f) {
         setvbuf(stderr, nullptr, _IONBF, 0); // unbuffered: survives a crash
-    } else {
-        g_stderr_path.clear();
+        ONYX_INFO("Driver messages go to driver.log");
+        return;
     }
+    // The CRT could not reopen stderr (no console to replace). Open the file ourselves
+    // and put it on file descriptor 2, which is what the driver's stderr writes use.
+    int fd = -1;
+    const errno_t e2 = _wsopen_s(&fd, path.c_str(), _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY,
+                                 _SH_DENYNO, _S_IREAD | _S_IWRITE);
+    if (e2 == 0 && fd >= 0 && _dup2(fd, 2) == 0) {
+        ONYX_INFO("Driver messages go to driver.log (reopen failed with %d, used fd 2)",
+                  static_cast<int>(e));
+        return;
+    }
+    ONYX_WARN("Could not capture driver messages (reopen error %d, open error %d)",
+              static_cast<int>(e), static_cast<int>(e2));
+    g_stderr_path.clear();
 }
 
 void DrainStderrToLog() {

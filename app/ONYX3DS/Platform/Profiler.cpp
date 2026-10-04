@@ -6,8 +6,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -48,10 +50,26 @@ void OnThreadNamed(const char* name) {
     g_sampler.targets.push_back({real, 1});
 }
 
+// Copies a few words from the (suspended) target thread's stack. Guarded: near the
+// top of a stack the read can run off the end.
+bool CopyStack(const void* sp, std::uintptr_t* out, int n) {
+    __try {
+        const auto* p = static_cast<const std::uintptr_t*>(sp);
+        for (int i = 0; i < n; ++i) out[i] = p[i];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+constexpr int kStackWords = 96;
+
 struct Group {
     std::unordered_map<std::uint64_t, int> hot; // exe offset (16-byte bucket) -> samples
+    std::unordered_map<std::uint64_t, int> callers; // exe offset of the caller of system code
+    std::unordered_map<std::string, int> modules;   // system module -> samples
     int total = 0, in_exe = 0, in_private = 0;
-    void Clear() { hot.clear(); total = in_exe = in_private = 0; }
+    void Clear() { hot.clear(); callers.clear(); modules.clear(); total = in_exe = in_private = 0; }
 };
 
 void Report(const char* label, Group& g, int failed) {
@@ -65,6 +83,16 @@ void Report(const char* label, Group& g, int failed) {
         ONYX_INFO("Profile %s:   +0x%llX  %.1f%%", label,
                   static_cast<unsigned long long>(top[i].first << 4),
                   100.0 * top[i].second / g.total);
+    for (auto& [name, n] : g.modules)
+        if (100.0 * n / g.total >= 1.0)
+            ONYX_INFO("Profile %s: system code in %s  %.1f%%", label, name.c_str(),
+                      100.0 * n / g.total);
+    std::vector<std::pair<std::uint64_t, int>> cal(g.callers.begin(), g.callers.end());
+    std::sort(cal.begin(), cal.end(), [](auto& a, auto& b) { return a.second > b.second; });
+    for (size_t i = 0; i < cal.size() && i < 25; ++i)
+        ONYX_INFO("Profile %s:   system code called from +0x%llX  %.1f%%", label,
+                  static_cast<unsigned long long>(cal[i].first << 4),
+                  100.0 * cal[i].second / g.total);
 }
 
 void SampleLoop() {
@@ -88,6 +116,15 @@ void SampleLoop() {
         exe_end = p;
     }
 
+    // Names for the system modules that show up in samples.
+    std::vector<std::pair<std::uintptr_t, std::string>> known;
+    for (const wchar_t* m : {L"ntdll.dll", L"kernelbase.dll", L"kernel32.dll", L"win32u.dll",
+                             L"ucrtbase.dll", L"vcruntime140_app.dll", L"vcruntime140_1_app.dll",
+                             L"msvcp140_app.dll", L"vulkan_dzn.dll", L"d3d12.dll", L"dxgi.dll",
+                             L"combase.dll", L"dxil.dll"}) {
+        if (HMODULE h = GetModuleHandleW(m))
+            known.emplace_back(reinterpret_cast<std::uintptr_t>(h), Utf8(std::wstring(m)));
+    }
     Group groups[2];
     int failed = 0;
     auto last_report = std::chrono::steady_clock::now();
@@ -105,6 +142,10 @@ void SampleLoop() {
             ctx.ContextFlags = CONTEXT_CONTROL;
             const BOOL ok = get_ctx(t.handle, &ctx);
             const auto rip = ok ? static_cast<std::uintptr_t>(ctx.Rip) : 0;
+            std::uintptr_t stack[kStackWords];
+            bool have_stack = false;
+            if (ok && (rip < exe || rip >= exe_end))
+                have_stack = CopyStack(reinterpret_cast<const void*>(ctx.Rsp), stack, kStackWords);
             resume(t.handle);
             if (!ok) { ++failed; continue; }
             Group& g = groups[t.group];
@@ -114,8 +155,29 @@ void SampleLoop() {
                 ++g.hot[(rip - exe) >> 4];
             } else {
                 MEMORY_BASIC_INFORMATION m{};
-                if (VirtualQuery(reinterpret_cast<void*>(rip), &m, sizeof(m)) && m.Type == MEM_PRIVATE)
+                if (VirtualQuery(reinterpret_cast<void*>(rip), &m, sizeof(m)) && m.Type == MEM_PRIVATE) {
                     ++g.in_private; // JIT-generated guest code
+                } else {
+                    // System or other module code: which module, and who called into it.
+                    const auto base = reinterpret_cast<std::uintptr_t>(m.AllocationBase);
+                    std::string mod = "other";
+                    for (auto& [b, n] : known)
+                        if (b == base) { mod = n; break; }
+                    if (mod == "other") {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "module@%p", reinterpret_cast<void*>(base));
+                        mod = buf;
+                    }
+                    ++g.modules[mod];
+                    if (have_stack) {
+                        for (int i = 0; i < kStackWords; ++i) {
+                            if (stack[i] >= exe && stack[i] < exe_end) {
+                                ++g.callers[(stack[i] - exe) >> 4];
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
         const auto now = std::chrono::steady_clock::now();

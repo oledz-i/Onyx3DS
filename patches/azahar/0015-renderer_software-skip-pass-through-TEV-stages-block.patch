@@ -1,0 +1,172 @@
+From 1e48c519177da4f099867ab8ad591bcd6acdc251 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 13:32:08 -0400
+Subject: [PATCH] renderer_software: skip pass-through TEV stages; block-wise
+ screen conversion
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../renderer_software/renderer_software.cpp   | 71 ++++++++++++-------
+ .../renderer_software/sw_rasterizer.cpp       | 45 ++++++++----
+ 2 files changed, 78 insertions(+), 38 deletions(-)
+
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index 89b22f1..1227f4d 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -2,6 +2,8 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <algorithm>
++#include <cstring>
+ #include "common/color.h"
+ #include "core/core.h"
+ #include "video_core/gpu.h"
+@@ -49,33 +51,52 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+     info.width = pixel_stride;
+     info.pixels.resize(info.width * info.height * 4);
+ 
+-    for (u32 y = 0; y < info.height; y++) {
+-        for (u32 x = 0; x < info.width; x++) {
+-            const u8* pixel = framebuffer_data + (y * pixel_stride + pixel_stride - x) * bpp;
+-            Common::Vec4 color = [&] {
+-                if (color_fill.is_enabled) {
+-                    return Common::Vec4<u8>(color_fill.color_r, color_fill.color_g,
+-                                            color_fill.color_b, 255);
+-                }
+-
+-                switch (framebuffer.color_format) {
+-                case Pica::PixelFormat::RGBA8:
+-                    return Common::Color::DecodeRGBA8(pixel);
+-                case Pica::PixelFormat::RGB8:
+-                    return Common::Color::DecodeRGB8(pixel);
+-                case Pica::PixelFormat::RGB565:
+-                    return Common::Color::DecodeRGB565(pixel);
+-                case Pica::PixelFormat::RGB5A1:
+-                    return Common::Color::DecodeRGB5A1(pixel);
+-                case Pica::PixelFormat::RGBA4:
+-                    return Common::Color::DecodeRGBA4(pixel);
++    // The screen buffer is stored transposed (x-major). Converting in blocks of rows
++    // keeps both the reads and the writes in cache, and the pixel format is chosen
++    // once per frame instead of once per pixel.
++    u8* const out = info.pixels.data();
++    const u32 width = info.width;
++    const u32 height = info.height;
++    if (color_fill.is_enabled) {
++        const u8 fill[4] = {static_cast<u8>(color_fill.color_r), static_cast<u8>(color_fill.color_g),
++                            static_cast<u8>(color_fill.color_b), 255};
++        for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
++            std::memcpy(out + i * 4, fill, 4);
++        }
++        return;
++    }
++    const auto convert = [&](auto decode) {
++        constexpr u32 kBlockRows = 16;
++        for (u32 y0 = 0; y0 < height; y0 += kBlockRows) {
++            const u32 y1 = std::min(height, y0 + kBlockRows);
++            for (u32 x = 0; x < width; x++) {
++                u8* dest = out + (static_cast<size_t>(x) * height + y0) * 4;
++                for (u32 y = y0; y < y1; y++, dest += 4) {
++                    const u8* pixel = framebuffer_data + (y * pixel_stride + pixel_stride - x) * bpp;
++                    const Common::Vec4<u8> color = decode(pixel);
++                    std::memcpy(dest, color.AsArray(), sizeof(color));
+                 }
+-                UNREACHABLE();
+-            }();
+-            const u32 output_offset = (x * info.height + y) * 4;
+-            u8* dest = info.pixels.data() + output_offset;
+-            std::memcpy(dest, color.AsArray(), sizeof(color));
++            }
+         }
++    };
++    switch (framebuffer.color_format) {
++    case Pica::PixelFormat::RGBA8:
++        convert([](const u8* p) { return Common::Color::DecodeRGBA8(p); });
++        break;
++    case Pica::PixelFormat::RGB8:
++        convert([](const u8* p) { return Common::Color::DecodeRGB8(p); });
++        break;
++    case Pica::PixelFormat::RGB565:
++        convert([](const u8* p) { return Common::Color::DecodeRGB565(p); });
++        break;
++    case Pica::PixelFormat::RGB5A1:
++        convert([](const u8* p) { return Common::Color::DecodeRGB5A1(p); });
++        break;
++    case Pica::PixelFormat::RGBA4:
++        convert([](const u8* p) { return Common::Color::DecodeRGBA4(p); });
++        break;
++    default:
++        UNREACHABLE();
+     }
+ }
+ 
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index bde2c07..f42155c 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -802,9 +802,40 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+                         regs.texturing.tev_combiner_buffer_color.a.Value())
+             .Cast<u8>();
+ 
++    const auto update_buffers = [&](u32 tev_stage_index) {
++        combiner_buffer = next_combiner_buffer;
++
++        if (regs.texturing.tev_combiner_buffer_input.TevStageUpdatesCombinerBufferColor(
++                tev_stage_index)) {
++            next_combiner_buffer.r() = combiner_output.r();
++            next_combiner_buffer.g() = combiner_output.g();
++            next_combiner_buffer.b() = combiner_output.b();
++        }
++
++        if (regs.texturing.tev_combiner_buffer_input.TevStageUpdatesCombinerBufferAlpha(
++                tev_stage_index)) {
++            next_combiner_buffer.a() = combiner_output.a();
++        }
++    };
++
+     for (u32 tev_stage_index = 0; tev_stage_index < tev_stages.size(); ++tev_stage_index) {
+         const auto& tev_stage = tev_stages[tev_stage_index];
+         using Source = TexturingRegs::TevStageConfig::Source;
++        using Operation = TexturingRegs::TevStageConfig::Operation;
++
++        // Most games use one or two stages; the rest are left as "pass the previous
++        // result through unchanged". Evaluating those (three modifiers, a combiner,
++        // and the same for alpha) was the bulk of the per-pixel cost.
++        if (tev_stage_index > 0 && tev_stage.color_op == Operation::Replace &&
++            tev_stage.alpha_op == Operation::Replace &&
++            tev_stage.color_source1 == Source::Previous &&
++            tev_stage.color_modifier1 == TexturingRegs::TevStageConfig::ColorModifier::SourceColor &&
++            tev_stage.alpha_source1 == Source::Previous &&
++            tev_stage.alpha_modifier1 == TexturingRegs::TevStageConfig::AlphaModifier::SourceAlpha &&
++            tev_stage.GetColorMultiplier() == 1 && tev_stage.GetAlphaMultiplier() == 1) {
++            update_buffers(tev_stage_index);
++            continue;
++        }
+ 
+         auto get_source = [&](Source source) -> Common::Vec4<u8> {
+             switch (source) {
+@@ -876,19 +907,7 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+         combiner_output[2] = std::min(255U, color_output.b() * tev_stage.GetColorMultiplier());
+         combiner_output[3] = std::min(255U, alpha_output * tev_stage.GetAlphaMultiplier());
+ 
+-        combiner_buffer = next_combiner_buffer;
+-
+-        if (regs.texturing.tev_combiner_buffer_input.TevStageUpdatesCombinerBufferColor(
+-                tev_stage_index)) {
+-            next_combiner_buffer.r() = combiner_output.r();
+-            next_combiner_buffer.g() = combiner_output.g();
+-            next_combiner_buffer.b() = combiner_output.b();
+-        }
+-
+-        if (regs.texturing.tev_combiner_buffer_input.TevStageUpdatesCombinerBufferAlpha(
+-                tev_stage_index)) {
+-            next_combiner_buffer.a() = combiner_output.a();
+-        }
++        update_buffers(tev_stage_index);
+     }
+ 
+     return combiner_output;
+-- 
+2.43.0
+
