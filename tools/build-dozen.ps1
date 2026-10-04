@@ -32,6 +32,6 @@ if (!(Test-Path (Join-Path $build "build.ninja"))) {
 }
 
 Write-Step "Building vulkan_dzn.dll"
-Invoke-Checked ninja -C $build src/microsoft/vulkan/vulkan_dzn.dll
+Invoke-Checked ninja -k 0 -C $build src/microsoft/vulkan/vulkan_dzn.dll
 Copy-Item (Join-Path $build "src\microsoft\vulkan\vulkan_dzn.dll") (Join-Path $DepsBin "vulkan_dzn.dll") -Force
 Write-Host "Wrote $DepsBin\vulkan_dzn.dll" -ForegroundColor Green

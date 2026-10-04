@@ -6,7 +6,7 @@ log=${1:-build.log}
 {
   echo "=== compiler / linker errors ==="
   grep -E "(: (fatal )?error [A-Z]+[0-9]+|error MSB[0-9]+|error LNK[0-9]+|CMake Error|ERROR:|Exception:)" "$log" \
-    | sed -E 's/ \[[^]]*\.vcxproj\]$//' | awk '!seen[$0]++' | head -n 45
+    | sed -E 's/ \[[^]]*\.vcxproj\]$//' | awk '!seen[$0]++' | head -n 80
   echo "=== last 20 lines ==="
   tail -n 20 "$log"
 } > report.txt

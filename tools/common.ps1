@@ -53,8 +53,15 @@ function Apply-Patches($repoDir, $patchDir) {
     $stamp = Join-Path $repoDir ".onyx-patched"
     if ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $sig)) { return }
     if (Test-Path $stamp) {
-        Write-Host "   patch series changed, resetting modified files in $repoDir"
-        Invoke-Checked git -C $repoDir checkout -- .
+        Write-Host "   patch series changed, resetting patched files in $repoDir"
+        # Refresh first so files that only got new timestamps from the cache
+        # restore are not rewritten (that would force a full rebuild).
+        git -C $repoDir update-index -q --refresh | Out-Null
+        $changed = @(git -C $repoDir diff --name-only)
+        if ($changed.Count) { Invoke-Checked git -C $repoDir checkout -- @changed }
+        foreach ($f in @(git -C $repoDir ls-files --others --exclude-standard)) {
+            if ($f -ne ".onyx-patched") { Remove-Item -Force (Join-Path $repoDir $f) }
+        }
     }
     foreach ($p in $patches) {
         Write-Host "   applying $($p.Name)"

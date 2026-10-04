@@ -10,6 +10,7 @@ $pfx = Join-Path $Root "app\ONYX3DS\ONYX3DS_TemporaryKey.pfx"
 
 # A self-signed certificate whose subject matches the manifest Publisher.
 # Dev Mode accepts it; keep the .pfx so updates install over the old version.
+New-Item -ItemType Directory -Force -Path (Join-Path $Root "out") | Out-Null
 if (!(Test-Path $pfx)) {
     Write-Step "Creating a signing certificate (CN=ONYX3DS)"
     $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=ONYX3DS" -KeyUsage DigitalSignature `

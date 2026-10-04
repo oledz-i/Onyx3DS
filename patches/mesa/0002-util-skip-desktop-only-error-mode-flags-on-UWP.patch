@@ -1,0 +1,25 @@
+From 7b209c7e8668b306c835bf49c09d2d17c6c1561c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:41:19 +0000
+Subject: [PATCH] util: skip desktop-only error-mode flags on UWP
+
+---
+ src/util/u_debug.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/util/u_debug.c b/src/util/u_debug.c
+index 002ae5f..83e51e1 100644
+--- a/src/util/u_debug.c
++++ b/src/util/u_debug.c
+@@ -87,7 +87,7 @@ debug_disable_win32_error_dialogs(void)
+     */
+    UINT uMode = SetErrorMode(0);
+    SetErrorMode(uMode);
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(MESA_UWP)
+    if (uMode & SEM_FAILCRITICALERRORS) {
+       /* Disable assertion failure message box.
+        * http://msdn.microsoft.com/en-us/library/sas1dkb2.aspx
+-- 
+2.43.0
+
