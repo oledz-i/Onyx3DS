@@ -9,8 +9,9 @@
 
 namespace onyx::app {
 
-// Process-wide hooks: vectored exception handler, unhandled exception filter,
-// SIGABRT. Call once, right after LogInit.
+// Process-wide hooks: unhandled exception filter and SIGABRT. (Xbox's SDK has
+// no vectored exception handlers, so only faults nothing catches are logged.)
+// Call once, right after LogInit.
 void InstallCrashHandler();
 
 // Per-thread hooks (std::terminate handler). Call at the top of every thread

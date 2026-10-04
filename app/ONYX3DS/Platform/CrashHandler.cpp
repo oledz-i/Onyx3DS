@@ -2,7 +2,6 @@
 #include "pch.h"
 #include "Platform/CrashHandler.h"
 
-#include <atomic>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -17,10 +16,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace onyx::app {
 namespace {
 
-std::atomic<int> g_fault_reports{0};
-std::atomic<int> g_cpp_reports{0};
-constexpr int kMaxFaultReports = 6;
-constexpr int kMaxCppReports = 12;
 thread_local bool t_in_handler = false; // a fault while reporting must not recurse
 
 bool IsExecutable(DWORD protect) {
@@ -75,24 +70,6 @@ const char* CodeName(DWORD code) {
     case 0xC0000409: return "stack buffer overrun / fail fast";
     case 0xE06D7363: return "C++ exception";
     default: return "exception";
-    }
-}
-
-bool IsFault(DWORD code) {
-    switch (code) {
-    case EXCEPTION_ACCESS_VIOLATION:
-    case EXCEPTION_ILLEGAL_INSTRUCTION:
-    case EXCEPTION_PRIV_INSTRUCTION:
-    case EXCEPTION_STACK_OVERFLOW:
-    case EXCEPTION_INT_DIVIDE_BY_ZERO:
-    case EXCEPTION_BREAKPOINT:
-    case EXCEPTION_IN_PAGE_ERROR:
-    case EXCEPTION_DATATYPE_MISALIGNMENT:
-    case 0xC0000374:
-    case 0xC0000409:
-        return true;
-    default:
-        return false;
     }
 }
 
@@ -167,28 +144,6 @@ void Report(const char* stage, EXCEPTION_POINTERS* ep) {
 #endif
 }
 
-LONG CALLBACK OnFirstChance(EXCEPTION_POINTERS* ep) {
-    if (t_in_handler) return EXCEPTION_CONTINUE_SEARCH;
-    t_in_handler = true;
-    const DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (IsFault(code)) {
-        if (g_fault_reports.fetch_add(1) < kMaxFaultReports) Report("Fault", ep);
-    } else if (code == 0xE06D7363) {
-        // Most C++ exceptions are thrown and caught normally; log them briefly so
-        // an uncaught one (an Xbyak or Vulkan error, say) has its type on record.
-        if (g_cpp_reports.fetch_add(1) < kMaxCppReports) {
-            char line[512];
-            char where[256];
-            Describe(ep->ExceptionRecord->ExceptionAddress, where, sizeof(where));
-            std::snprintf(line, sizeof(line), "C++ exception thrown: %s from %s, thread %lu",
-                          CppTypeName(ep->ExceptionRecord), where, GetCurrentThreadId());
-            LogRaw(line);
-        }
-    }
-    t_in_handler = false;
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
 LONG WINAPI OnUnhandled(EXCEPTION_POINTERS* ep) {
     if (t_in_handler) return EXCEPTION_CONTINUE_SEARCH;
     t_in_handler = true;
@@ -223,7 +178,6 @@ void OnAbort(int) {
 } // namespace
 
 void InstallCrashHandler() {
-    AddVectoredExceptionHandler(1, &OnFirstChance);
     SetUnhandledExceptionFilter(&OnUnhandled);
     std::signal(SIGABRT, &OnAbort);
     InstallThreadCrashHooks();
