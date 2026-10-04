@@ -24,7 +24,7 @@ AppServices& Svc() {
     return AppServices::Get();
 }
 
-std::string Parent(const std::string& dir) {
+std::string ParentDir(const std::string& dir) {
     std::string d = NormalizeSlashes(dir);
     while (!d.empty() && d.back() == '/') d.pop_back();
     const auto slash = d.find_last_of('/');
@@ -63,7 +63,7 @@ void FolderPage::OnNavigatedTo(NavigationEventArgs const& e) {
         auto self = weak.get();
         if (!self || self->current_.empty()) return false;
         Svc().PlaySfx("back");
-        self->Browse(Parent(self->current_));
+        self->Browse(ParentDir(self->current_));
         return true;
     });
 
@@ -73,7 +73,7 @@ void FolderPage::OnNavigatedTo(NavigationEventArgs const& e) {
         if (auto self = weak.get()) self->Choose();
     }, true));
     buttons.Children().Append(kit::ActionButton("Up", kit::glyph::Back, [weak] {
-        if (auto self = weak.get()) self->Browse(Parent(self->current_));
+        if (auto self = weak.get()) self->Browse(ParentDir(self->current_));
     }));
     buttons.Children().Append(kit::ActionButton("New folder here", kit::glyph::Folder, [weak] {
         auto self = weak.get();

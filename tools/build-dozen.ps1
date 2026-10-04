@@ -7,7 +7,7 @@ Use-VsDevShell
 
 $src = Join-Path $Deps "mesa"
 $build = Join-Path $DepsBuild "mesa"
-$uwp = "-DMESA_UWP=1 -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00"
+$uwp = "-DMESA_UWP=1 -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00 /wd4189"
 # Dozen links D3D12/DXGI directly on UWP (patches\mesa replaces LoadLibrary).
 $link = "/APPCONTAINER WindowsApp.lib d3d12.lib dxgi.lib"
 

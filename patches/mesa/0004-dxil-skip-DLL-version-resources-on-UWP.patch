@@ -1,0 +1,36 @@
+From 0fdb77c0fac529f9f6069ca7535a9bda26bd00c1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:56:59 +0000
+Subject: [PATCH] dxil: skip DLL version resources on UWP
+
+---
+ src/microsoft/compiler/dxil_validator.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/microsoft/compiler/dxil_validator.cpp b/src/microsoft/compiler/dxil_validator.cpp
+index 3d9eb6b..9d2898b 100644
+--- a/src/microsoft/compiler/dxil_validator.cpp
++++ b/src/microsoft/compiler/dxil_validator.cpp
+@@ -130,6 +130,11 @@ get_validator_version(IDxcValidator *val)
+ static uint64_t
+ get_dll_version(HMODULE mod)
+ {
++#ifdef DXIL_UWP
++   /* File version resources (GetFileVersionInfo) are desktop-only. */
++   (void)mod;
++   return 0;
++#else
+    WCHAR filename[MAX_PATH];
+    DWORD filename_length = GetModuleFileNameW(mod, filename, ARRAY_SIZE(filename));
+ 
+@@ -164,6 +169,7 @@ get_dll_version(HMODULE mod)
+       (uint64_t)version_info->dwFileVersionLS;
+    free(version_data);
+    return ret;
++#endif
+ }
+ #endif
+ 
+-- 
+2.43.0
+

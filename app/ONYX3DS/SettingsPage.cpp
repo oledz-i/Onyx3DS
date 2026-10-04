@@ -718,7 +718,7 @@ void SettingsPage::BuildSystem() {
     std::string tail;
     for (const auto& line : RecentLog(40)) tail += line + "\n";
     auto log = kit::Text(tail.empty() ? "(empty)" : tail, 14);
-    log.winrt::Windows::UI::Xaml::Media::FontFamily(FontFamily(L"Consolas"));
+    log.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily(L"Consolas"));
     log.IsTextSelectionEnabled(true);
     Add(kit::Card(log, 16));
     (void)weak;

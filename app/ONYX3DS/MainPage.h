@@ -29,7 +29,7 @@ private:
     void UpdateClock();
     void StartAmbientMotion();
     void MoveParallax(float nx, float ny);
-    void OnKeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
+    void HandleKeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
     std::vector<onyx::GameEntry> games_;
     int page_ = 0;

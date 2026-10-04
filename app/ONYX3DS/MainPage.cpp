@@ -48,7 +48,7 @@ TimeSpan Ms(int ms) {
 
 void MainPage::InitializeComponent() {
     MainPageT::InitializeComponent();
-    KeyDown({this, &MainPage::OnKeyDown});
+    KeyDown({this, &MainPage::HandleKeyDown});
 
     clock_ = DispatcherTimer();
     clock_.Interval(std::chrono::seconds(1));
@@ -110,7 +110,7 @@ void MainPage::ApplyTheme() {
     NearLayer().Source(ImageFromFile(Svc().ThemeAsset(t.textures.background_near)));
     BarImage().Source(ImageFromFile(Svc().ThemeAsset(t.textures.bar)));
     const auto font = winrt::Windows::UI::Xaml::Media::FontFamily(kit::H(t.style.font));
-    for (auto tb : {TitleText(), InfoText(), ClockText(), DateText(), HintText()}) tb.winrt::Windows::UI::Xaml::Media::FontFamily(font);
+    for (auto tb : {TitleText(), InfoText(), ClockText(), DateText(), HintText()}) tb.FontFamily(font);
     TitleText().Foreground(Svc().ThemeBrush(t.colors.text));
     InfoText().Foreground(Svc().ThemeBrush(t.colors.text_muted));
     ClockText().Foreground(Svc().ThemeBrush(t.colors.bar_text));
@@ -619,7 +619,7 @@ void MainPage::ShowToolsMenu() {
     menu.ShowAt(RightButtonHost());
 }
 
-void MainPage::OnKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
+void MainPage::HandleKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
     auto focused = FocusManager::GetFocusedElement().try_as<Button>();
     std::optional<GameEntry> game;
     int slot = -1;

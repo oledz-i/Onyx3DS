@@ -1,0 +1,32 @@
+From c1fec5fd7afe935c33669f9ef5facc754fd3b79d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:57:08 +0000
+Subject: [PATCH] common: include <string> in logging/backend.h
+
+---
+ externals/boost              | 2 +-
+ src/common/logging/backend.h | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/externals/boost b/externals/boost
+index f6aba5d42..ef1352617 160000
+--- a/externals/boost
++++ b/externals/boost
+@@ -1 +1 @@
+-Subproject commit f6aba5d42c06e91b8743613944537b58e5f8e209
++Subproject commit ef135261774fbb788f2c60f013ea3e2aa7eefd96
+diff --git a/src/common/logging/backend.h b/src/common/logging/backend.h
+index 550a93967..00dc12418 100644
+--- a/src/common/logging/backend.h
++++ b/src/common/logging/backend.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <string>
+ #include <string_view>
+ #include "common/logging/filter.h"
+ #ifdef HAVE_LIBRETRO
+-- 
+2.43.0
+
