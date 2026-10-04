@@ -1,68 +1,140 @@
-# Builds ONYX 3DS on every push: unit tests on Linux, the full Xbox package
-# on Windows. The .msix and its signing certificate are uploaded as an
-# artifact you can install from the Xbox Device Portal.
+# ONYX 3DS CI. Azahar, Dozen and the app build in parallel so one run shows
+# every stage's errors; build trees are cached even when a job fails, so the
+# next run only recompiles what changed. The package job runs when all pass.
 name: build
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   shell-tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S shell -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
-      - name: Build
-        run: cmake --build build -j
-      - name: Test
-        run: ./build/onyx_shell_tests
+      - run: cmake -S shell -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+      - run: cmake --build build -j
+      - run: ./build/onyx_shell_tests
 
-  xbox-package:
+  azahar:
     runs-on: windows-2022
-    timeout-minutes: 360
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps/azahar
+            deps/build/azahar
+          key: azahar-${{ github.run_id }}
+          restore-keys: azahar-
+      - name: Build Azahar (UWP static core)
+        run: |
+          set -o pipefail
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/fetch-deps.ps1 -Only azahar; ./tools/build-azahar.ps1" 2>&1 | tee build.log
+      - if: failure()
+        run: tools/ci-report.sh build.log Azahar
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/azahar
+            deps/build/azahar
+          key: azahar-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azahar-lib
+          path: deps/lib/azahar_all.lib
+
+  dozen:
+    runs-on: windows-2022
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build tools for Mesa
-        run: |
+      - run: |
           pip install meson ninja mako pyyaml packaging
           choco install winflexbison3 -y --no-progress
-      - name: Cache sources
-        uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: |
-            deps/azahar
             deps/mesa
+            deps/build/mesa
             deps/bin/dxil.dll
-          key: deps-${{ hashFiles('patches/**') }}
-      - name: Build everything
-        shell: bash
+          key: dozen-${{ github.run_id }}
+          restore-keys: dozen-
+      - name: Build Dozen (Vulkan on D3D12, UWP)
         run: |
           set -o pipefail
-          pwsh -NoProfile -ExecutionPolicy Bypass -File tools/build-all.ps1 -Configuration Release 2>&1 | tee build.log
-      # Repeat the end of the log as an error annotation, so the failure is
-      # readable from the run summary (and the API) without opening the log.
-      - name: Report build errors
-        if: failure()
-        shell: bash
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/fetch-deps.ps1 -Only mesa,dxil; ./tools/build-dozen.ps1" 2>&1 | tee build.log
+      - if: failure()
+        run: tools/ci-report.sh build.log Dozen
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/mesa
+            deps/build/mesa
+            deps/bin/dxil.dll
+          key: dozen-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dozen-bin
+          path: deps/bin/*.dll
+
+  # Compiles the app and shell right away (linking needs the other jobs'
+  # libraries, so link errors here are expected until the package job).
+  app:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build shell libraries and compile the app
         run: |
-          {
-            echo "=== error lines ==="
-            # Compiler/linker/MSBuild errors first (deduplicated), then anything else.
-            grep -E "(: (fatal )?error [A-Z]+[0-9]+|error MSB[0-9]+|error LNK[0-9]+|CMake Error|Exception:)" build.log \
-              | sed -E 's/ \[[^]]*\.vcxproj\]$//' | awk '!seen[$0]++' | head -n 40
-            echo "=== last 60 lines ==="
-            tail -n 25 build.log
-          } > report.txt || true
-          msg=$(sed -e 's/%/%25/g' -e 's/\r//g' report.txt | awk 'BEGIN{ORS="%0A"} {print}')
-          echo "::error title=Build log tail::${msg}"
-      - name: Upload package
-        uses: actions/upload-artifact@v4
+          set -o pipefail
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/fetch-deps.ps1 -Only headers,nuget; ./tools/build-shell.ps1" 2>&1 | tee build.log
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/build-app.ps1" 2>&1 | tee app.log || true
+          # Only compile errors fail this job; missing-library link errors are expected here.
+          if grep -qE ": (fatal )?error C[0-9]+|error MSB4|XamlCompiler error|error MIDL" app.log; then cp app.log build.log; exit 1; fi
+      - if: failure()
+        run: tools/ci-report.sh build.log App
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shell-libs
+          path: |
+            deps/lib/onyx_shell.lib
+            deps/lib/rcheevos.lib
+
+  package:
+    needs: [azahar, dozen, app]
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: |
+          mkdir -p deps/lib deps/bin
+          cp artifacts/azahar-lib/*.lib artifacts/shell-libs/*.lib deps/lib/
+          cp artifacts/dozen-bin/*.dll deps/bin/
+      - name: Build and sign the Xbox package
+        run: |
+          set -o pipefail
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/fetch-deps.ps1 -Only headers,nuget; ./tools/build-app.ps1" 2>&1 | tee build.log
+      - if: failure()
+        run: tools/ci-report.sh build.log Package
+      - uses: actions/upload-artifact@v4
         with:
           name: ONYX3DS-xbox
           path: |

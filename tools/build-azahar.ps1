@@ -24,7 +24,7 @@ $cmakeArgs = @(
     # UWP only hands out W^X JIT memory (patches\dynarmic)
     "-DDYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=ON"
 )
-Invoke-Checked cmake @cmakeArgs
+if (!(Test-Path (Join-Path $build "CMakeCache.txt"))) { Invoke-Checked cmake @cmakeArgs } else { Invoke-Checked cmake $build }
 
 Write-Step "Building Azahar ($Configuration)"
 Invoke-Checked cmake --build $build --config $Configuration --target citra_libretro --parallel

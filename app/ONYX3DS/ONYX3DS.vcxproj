@@ -77,7 +77,7 @@
       <WarningLevel>Level4</WarningLevel>
       <AdditionalOptions>%(AdditionalOptions) /bigobj /utf-8 /permissive- /Zc:__cplusplus</AdditionalOptions>
       <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(ProjectDir)..\..\shell\include;$(ProjectDir)..\..\third_party;$(AzaharSrc)externals\vulkan-headers\include;$(AzaharSrc)externals\libretro-common\libretro-common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(ProjectDir)..\..\shell\include;$(ProjectDir)..\..\third_party;$(OnyxDeps)headers\Vulkan-Headers\include;$(OnyxDeps)headers\libretro-common\include;$(AzaharSrc)externals\vulkan-headers\include;$(AzaharSrc)externals\libretro-common\libretro-common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DisableSpecificWarnings>4100;4201;4324;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>

@@ -4,9 +4,12 @@
 #   deps\mesa     Mesa (for Dozen) at the pinned commit + patches\mesa
 #   deps\bin\dxil.dll   DXIL signer from the DirectX Shader Compiler release
 #   app\packages  C++/WinRT NuGet package
+# -Only lets CI jobs fetch just what they need: azahar, mesa, dxil, nuget.
+param([string[]]$Only = @("azahar", "mesa", "dxil", "nuget", "headers"))
 . "$PSScriptRoot\common.ps1"
 
 # --- Azahar -------------------------------------------------------------------
+if ($Only -contains "azahar") {
 $azahar = Join-Path $Deps "azahar"
 if (!(Test-Path "$azahar\.git")) {
     Write-Step "Cloning Azahar $AzaharCommit"
@@ -14,7 +17,7 @@ if (!(Test-Path "$azahar\.git")) {
 }
 Push-Location $azahar
 try {
-    if (!(Test-Path ".onyx-patched")) {
+    if (!(Test-Path "externals\dynarmic\.git")) {
         Invoke-Checked git checkout --quiet $AzaharCommit
         Write-Step "Fetching Azahar submodules (this takes a while the first time)"
         Invoke-Checked git submodule update --init --recursive --depth 1 --jobs 8
@@ -24,7 +27,9 @@ Write-Step "Patching Azahar"
 Apply-Patches $azahar (Join-Path $Root "patches\azahar")
 Apply-Patches (Join-Path $azahar "externals\dynarmic") (Join-Path $Root "patches\dynarmic")
 
+}
 # --- Mesa (Dozen) ---------------------------------------------------------------
+if ($Only -contains "mesa") {
 $mesa = Join-Path $Deps "mesa"
 if (!(Test-Path "$mesa\.git")) {
     Write-Step "Fetching Mesa $MesaCommit"
@@ -42,7 +47,9 @@ if (!(Test-Path "$mesa\.git")) {
 Write-Step "Patching Mesa"
 Apply-Patches $mesa (Join-Path $Root "patches\mesa")
 
+}
 # --- DXIL.dll -------------------------------------------------------------------
+if ($Only -contains "dxil") {
 $dxil = Join-Path $DepsBin "dxil.dll"
 if (!(Test-Path $dxil)) {
     Write-Step "Downloading DXIL.dll (DirectX Shader Compiler release)"
@@ -57,12 +64,25 @@ if (!(Test-Path $dxil)) {
     Copy-Item (Join-Path $out "bin\x64\dxil.dll") $dxil
 }
 
+}
 # --- NuGet / C++/WinRT ------------------------------------------------------------
+if ($Only -contains "nuget") {
 $nuget = Join-Path $Deps "nuget.exe"
 if (!(Test-Path $nuget)) {
     Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nuget
 }
 Write-Step "Restoring C++/WinRT"
 Invoke-Checked $nuget restore (Join-Path $Root "app\ONYX3DS\packages.config") -PackagesDirectory (Join-Path $Root "app\packages")
+
+}
+# --- Headers for the app (no full Azahar checkout needed) ---------------------
+if ($Only -contains "headers") {
+    $h = Join-Path $Deps "headers"
+    if (!(Test-Path "$h\Vulkan-Headers")) {
+        Write-Step "Fetching Vulkan and libretro headers"
+        Invoke-Checked git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$h\Vulkan-Headers"
+        Invoke-Checked git clone --depth 1 https://github.com/libretro/libretro-common.git "$h\libretro-common"
+    }
+}
 
 Write-Host "Dependencies ready in $Deps" -ForegroundColor Green

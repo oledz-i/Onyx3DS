@@ -44,13 +44,21 @@ function Use-VsDevShell {
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
 }
 
-# Applies a patch series once (a stamp file records it).
+# Applies a patch series. The stamp records which patches are applied; when the
+# series changes (a cached tree from an older run), only the files git sees as
+# modified are reset before re-applying, so incremental builds stay fast.
 function Apply-Patches($repoDir, $patchDir) {
+    $patches = @(Get-ChildItem $patchDir -Filter *.patch | Sort-Object Name)
+    $sig = ($patches | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }) -join ","
     $stamp = Join-Path $repoDir ".onyx-patched"
-    if (Test-Path $stamp) { return }
-    foreach ($p in Get-ChildItem $patchDir -Filter *.patch | Sort-Object Name) {
+    if ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $sig)) { return }
+    if (Test-Path $stamp) {
+        Write-Host "   patch series changed, resetting modified files in $repoDir"
+        Invoke-Checked git -C $repoDir checkout -- .
+    }
+    foreach ($p in $patches) {
         Write-Host "   applying $($p.Name)"
         Invoke-Checked git -C $repoDir apply --whitespace=nowarn $p.FullName
     }
-    Set-Content $stamp "patched"
+    Set-Content $stamp $sig
 }
