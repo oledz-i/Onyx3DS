@@ -89,6 +89,49 @@ void LogRaw(const char* text) {
     }
 }
 
+namespace {
+std::wstring g_stderr_path;
+long long g_stderr_read = 0;
+} // namespace
+
+void CaptureStderr(const std::wstring& path) {
+    g_stderr_path = path;
+    g_stderr_read = 0;
+    FILE* f = nullptr;
+    if (_wfreopen_s(&f, path.c_str(), L"w", stderr) == 0 && f) {
+        setvbuf(stderr, nullptr, _IONBF, 0); // unbuffered: survives a crash
+    } else {
+        g_stderr_path.clear();
+    }
+}
+
+void DrainStderrToLog() {
+    if (g_stderr_path.empty()) return;
+    fflush(stderr);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, g_stderr_path.c_str(), L"rb") != 0 || !f) return;
+    if (_fseeki64(f, g_stderr_read, SEEK_SET) == 0) {
+        std::string pending;
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+            pending.append(buf, n);
+            g_stderr_read += static_cast<long long>(n);
+            if (pending.size() > 64 * 1024) break; // a runaway driver log stays readable
+        }
+        size_t start = 0;
+        while (start < pending.size()) {
+            size_t end = pending.find('\n', start);
+            if (end == std::string::npos) end = pending.size();
+            std::string line = pending.substr(start, end - start);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) Log(LogLevel::Warning, "[driver] %s", line.c_str());
+            start = end + 1;
+        }
+    }
+    fclose(f);
+}
+
 std::vector<std::string> RecentLog(std::size_t max_lines) {
     std::lock_guard lock(g_mutex);
     const std::size_t start = g_ring.size() > max_lines ? g_ring.size() - max_lines : 0;

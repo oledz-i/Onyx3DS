@@ -131,6 +131,7 @@ private:
     // never called again in this process; the user restarts the app.
     std::atomic<bool> core_crashed_{false};
     std::atomic<bool> crashed_in_jit_{false};
+    int frames_since_drain_ = 0;
     std::mutex init_mutex_;
 
     SessionEvents events_;

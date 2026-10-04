@@ -1,0 +1,248 @@
+From 956e9b5d424838a18c6b150bc6107ceb9f055a80 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sun, 4 Oct 2026 08:35:41 -0400
+Subject: [PATCH] renderer_vulkan: survive pipelines the driver refuses to
+ build
+
+vulkan.hpp throws on error results, and Azahar treated any pipeline creation
+failure as unreachable. With Dozen (Vulkan on D3D12) on Xbox, the BlitHelper's
+D24S8 compute pipeline fails with VK_ERROR_OUT_OF_HOST_MEMORY during renderer
+start-up, which stopped the emulator before the first frame.
+
+- BlitHelper: compute, depth-stencil blit and filter pipelines that fail to
+  build become null; the conversion/filter that needs them is skipped.
+- GraphicsPipeline::Build catches failures (also on the worker thread, where
+  an escaping exception would terminate the process) and marks the pipeline
+  failed. BindPipeline waits for pending builds and skips draws whose
+  pipeline failed, including the non-accelerated draw path.
+---
+ .../renderer_vulkan/vk_blit_helper.cpp        | 66 +++++++++++++------
+ .../renderer_vulkan/vk_graphics_pipeline.cpp  | 25 +++++--
+ .../renderer_vulkan/vk_graphics_pipeline.h    |  7 ++
+ .../renderer_vulkan/vk_pipeline_cache.cpp     |  8 +++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  4 +-
+ 5 files changed, 80 insertions(+), 30 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_blit_helper.cpp b/src/video_core/renderer_vulkan/vk_blit_helper.cpp
+index 929a33d..9ff0d97 100644
+--- a/src/video_core/renderer_vulkan/vk_blit_helper.cpp
++++ b/src/video_core/renderer_vulkan/vk_blit_helper.cpp
+@@ -401,6 +401,9 @@ bool BlitHelper::BlitDepthStencil(Surface& source, Surface& dest,
+ 
+ bool BlitHelper::ConvertDS24S8ToRGBA8(Surface& source, Surface& dest,
+                                       const VideoCore::TextureCopy& copy) {
++    if (!d24s8_to_rgba8_pipeline) {
++        return false;
++    }
+     const auto descriptor_set = compute_provider.Commit();
+     update_queue.AddImageSampler(descriptor_set, 0, 0, source.DepthView(), VK_NULL_HANDLE,
+                                  vk::ImageLayout::eDepthStencilReadOnlyOptimal);
+@@ -512,6 +515,9 @@ bool BlitHelper::ConvertDS24S8ToRGBA8(Surface& source, Surface& dest,
+ 
+ bool BlitHelper::DepthToBuffer(Surface& source, vk::Buffer buffer,
+                                const VideoCore::BufferTextureCopy& copy) {
++    if (!depth_to_buffer_pipeline) {
++        return false;
++    }
+     const auto descriptor_set = compute_buffer_provider.Commit();
+     update_queue.AddImageSampler(descriptor_set, 0, 0, source.DepthView(), nearest_sampler,
+                                  vk::ImageLayout::eDepthStencilReadOnlyOptimal);
+@@ -591,13 +597,20 @@ vk::Pipeline BlitHelper::MakeComputePipeline(vk::ShaderModule shader, vk::Pipeli
+         .layout = layout,
+     };
+ 
+-    if (const auto result = device.createComputePipeline({}, compute_info);
+-        result.result == vk::Result::eSuccess) {
+-        return result.value;
+-    } else {
+-        LOG_CRITICAL(Render_Vulkan, "Compute pipeline creation failed!");
+-        UNREACHABLE();
++    // Drivers that cannot build this pipeline (Dozen on some D3D12 runtimes) only
++    // lose the depth/stencil conversions that use it; do not take the emulator down.
++    try {
++        if (const auto result = device.createComputePipeline({}, compute_info);
++            result.result == vk::Result::eSuccess) {
++            return result.value;
++        } else {
++            LOG_ERROR(Render_Vulkan, "Compute pipeline creation failed: {}",
++                      vk::to_string(result.result));
++        }
++    } catch (const vk::SystemError& e) {
++        LOG_ERROR(Render_Vulkan, "Compute pipeline creation failed: {}", e.what());
+     }
++    return VK_NULL_HANDLE;
+ }
+ 
+ vk::Pipeline BlitHelper::MakeDepthStencilBlitPipeline() {
+@@ -620,12 +633,14 @@ vk::Pipeline BlitHelper::MakeDepthStencilBlitPipeline() {
+         .renderPass = renderpass,
+     };
+ 
+-    if (const auto result = device.createGraphicsPipeline({}, depth_stencil_info);
+-        result.result == vk::Result::eSuccess) {
+-        return result.value;
+-    } else {
+-        LOG_CRITICAL(Render_Vulkan, "Depth stencil blit pipeline creation failed!");
+-        UNREACHABLE();
++    try {
++        if (const auto result = device.createGraphicsPipeline({}, depth_stencil_info);
++            result.result == vk::Result::eSuccess) {
++            return result.value;
++        }
++        LOG_ERROR(Render_Vulkan, "Depth stencil blit pipeline creation failed");
++    } catch (const vk::SystemError& e) {
++        LOG_ERROR(Render_Vulkan, "Depth stencil blit pipeline creation failed: {}", e.what());
+     }
+     return VK_NULL_HANDLE;
+ }
+@@ -728,19 +743,27 @@ vk::Pipeline BlitHelper::MakeFilterPipeline(vk::ShaderModule fragment_shader,
+         .renderPass = renderpass,
+     };
+ 
+-    if (const auto result = device.createGraphicsPipeline({}, pipeline_info);
+-        result.result == vk::Result::eSuccess) {
+-        const vk::Pipeline pipeline = result.value;
+-        filter_pipeline_cache.emplace(cache_key, pipeline);
+-        return pipeline;
+-    } else {
+-        LOG_CRITICAL(Render_Vulkan, "Filter pipeline creation failed!");
+-        UNREACHABLE();
++    vk::Pipeline pipeline{};
++    try {
++        if (const auto result = device.createGraphicsPipeline({}, pipeline_info);
++            result.result == vk::Result::eSuccess) {
++            pipeline = result.value;
++        } else {
++            LOG_ERROR(Render_Vulkan, "Filter pipeline creation failed");
++        }
++    } catch (const vk::SystemError& e) {
++        LOG_ERROR(Render_Vulkan, "Filter pipeline creation failed: {}", e.what());
+     }
++    // Cache failures too, so a broken filter is not rebuilt for every texture.
++    filter_pipeline_cache.emplace(cache_key, pipeline);
++    return pipeline;
+ }
+ 
+ void BlitHelper::FilterPass(Surface& surface, vk::Pipeline pipeline, vk::PipelineLayout layout,
+                             const VideoCore::TextureBlit& blit) {
++    if (!pipeline) {
++        return; // the driver could not build this filter; leave the texture unfiltered
++    }
+     const auto texture_descriptor_set = single_texture_provider.Commit();
+     update_queue.AddImageSampler(texture_descriptor_set, 0, 0,
+                                  surface.ImageView(ViewType::Sample, Type::Base), linear_sampler,
+@@ -819,6 +842,9 @@ void BlitHelper::FilterPass(Surface& surface, vk::Pipeline pipeline, vk::Pipelin
+ void BlitHelper::FilterPassThreeTextures(Surface& surface, vk::Pipeline pipeline,
+                                          vk::PipelineLayout layout,
+                                          const VideoCore::TextureBlit& blit) {
++    if (!pipeline) {
++        return; // the driver could not build this filter; leave the texture unfiltered
++    }
+     const auto texture_descriptor_set = three_textures_provider.Commit();
+ 
+     update_queue.AddImageSampler(texture_descriptor_set, 0, 0,
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+index 290b187..576affc 100644
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -282,13 +282,24 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
+         pipeline_info.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
+     }
+ 
+-    auto result = instance.GetDevice().createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+-    if (result.result == vk::Result::eSuccess) {
+-        pipeline = std::move(result.value);
+-    } else if (result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
+-        return false;
+-    } else {
+-        UNREACHABLE_MSG("Graphics pipeline creation failed!");
++    // vulkan.hpp throws for error results. This often runs on a worker thread, where
++    // an escaping exception would terminate the process, so a driver that cannot
++    // build a pipeline (Dozen on some D3D12 runtimes) only loses the draws using it.
++    try {
++        auto result =
++            instance.GetDevice().createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
++        if (result.result == vk::Result::eSuccess) {
++            pipeline = std::move(result.value);
++        } else if (result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
++            return false;
++        } else {
++            LOG_ERROR(Render_Vulkan, "Graphics pipeline creation failed: {}",
++                      vk::to_string(result.result));
++            failed = true;
++        }
++    } catch (const vk::SystemError& e) {
++        LOG_ERROR(Render_Vulkan, "Graphics pipeline creation failed: {}", e.what());
++        failed = true;
+     }
+ 
+     MarkDone();
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.h b/src/video_core/renderer_vulkan/vk_graphics_pipeline.h
+index 20e3e66..2d18f10 100644
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.h
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include "common/hash.h"
+ #include "common/thread_worker.h"
+ #include "video_core/pica/regs_pipeline.h"
+@@ -326,6 +327,11 @@ public:
+         return *pipeline;
+     }
+ 
++    /// The driver refused to build this pipeline; draws that use it are skipped.
++    [[nodiscard]] bool Failed() const noexcept {
++        return failed;
++    }
++
+ private:
+     const Instance& instance;
+     RenderManager& renderpass_cache;
+@@ -338,6 +344,7 @@ private:
+     PipelineInfo info;
+     std::array<Shader*, 3> stages;
+     bool is_pending{};
++    std::atomic<bool> failed{};
+ };
+ 
+ } // namespace Vulkan
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 53ffcc4..e7ded37 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -374,6 +374,14 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
+     if (!pipeline->IsDone() && !pipeline->TryBuild(wait_built)) {
+         return false;
+     }
++    // Finish a pending build here rather than on the render thread, so a pipeline
++    // the driver refused is caught before any draw is recorded with it.
++    if (!pipeline->IsDone()) {
++        pipeline->WaitDone();
++    }
++    if (pipeline->Failed()) {
++        return false;
++    }
+ 
+     const bool is_dirty = scheduler.IsStateDirty(StateFlags::Pipeline);
+     const bool pipeline_dirty = (current_pipeline != pipeline) || is_dirty;
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 64d9034..6bb38e7 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -612,9 +612,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
+     bool succeeded = true;
+     if (accelerate) {
+         succeeded = AccelerateDrawBatchInternal(is_indexed);
+-    } else {
+-        pipeline_cache.BindPipeline(pipeline_info, true);
+-
++    } else if (pipeline_cache.BindPipeline(pipeline_info, true)) {
+         const u32 vertex_count = static_cast<u32>(vertex_batch.size());
+         const u32 vertex_size = vertex_count * sizeof(HardwareVertex);
+         const auto [buffer, offset, _] = stream_buffer.Map(vertex_size, sizeof(HardwareVertex));
+-- 
+2.43.0
+

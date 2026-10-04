@@ -70,6 +70,8 @@ App::App() {
 void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     LogInit(Wide(Paths().log_file));
     InstallCrashHandler();
+    // Dozen and the DXIL validator explain rejected shaders on stderr.
+    CaptureStderr(Wide(onyx::JoinPath(Paths().local_state, "driver.log")));
     ONYX_INFO("ONYX 3DS starting");
     LogMemoryUsage("at launch"); // the limit shows whether Dev Home runs this as an App or a Game
 

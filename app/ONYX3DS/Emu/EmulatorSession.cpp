@@ -287,6 +287,7 @@ void EmulatorSession::EmulationThread(std::string rom_path) {
 }
 
 void EmulatorSession::OnCoreCrashed(const GuardedCrash& crash) {
+    DrainStderrToLog(); // the driver's own explanation, if it gave one
     core_crashed_ = true;
     crashed_in_jit_ = crash.in_jit;
     ONYX_ERROR("Emulator crashed: %s at %s%s", crash.what, crash.where,
@@ -371,6 +372,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         if (!reason.empty()) fail(reason);
     }
 
+    DrainStderrToLog();
     if (!fail_reason.empty()) {
         if (loaded) retro_unload_game();
         vulkan_->DestroyDevice();
@@ -424,6 +426,10 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         }
         retro_run();
         if (ra_ && ra_->GameLoaded()) ra_->DoFrame();
+        if (++frames_since_drain_ >= 120) { // ~2 s: surface driver warnings
+            frames_since_drain_ = 0;
+            DrainStderrToLog();
+        }
 
         // Frame pacing: 60 Hz (or the fast-forward multiple) on a precise timer.
         const int ff = ff_speed_.load();

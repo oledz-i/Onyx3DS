@@ -20,6 +20,14 @@ std::vector<std::string> RecentLog(std::size_t max_lines = 200);
 // lock. Only for crash handlers, which may run while another thread holds it.
 void LogRaw(const char* text);
 
+// Sends the C runtime's stderr to a file. Dozen (Mesa) and the DXIL validator
+// report why a shader or pipeline was rejected on stderr, which nothing
+// shows on Xbox. Shares the CRT with vulkan_dzn.dll (both use ucrtbase).
+void CaptureStderr(const std::wstring& path);
+
+// Copies new stderr output (since the last call) into onyx.log as [driver] lines.
+void DrainStderrToLog();
+
 #define ONYX_INFO(...) ::onyx::app::Log(::onyx::app::LogLevel::Info, __VA_ARGS__)
 #define ONYX_WARN(...) ::onyx::app::Log(::onyx::app::LogLevel::Warning, __VA_ARGS__)
 #define ONYX_ERROR(...) ::onyx::app::Log(::onyx::app::LogLevel::Error, __VA_ARGS__)
