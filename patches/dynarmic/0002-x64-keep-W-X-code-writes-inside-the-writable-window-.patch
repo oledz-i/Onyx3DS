@@ -1,0 +1,89 @@
+From eef1932b4e806396e6793a814c23aad7cd095933 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Sun, 4 Oct 2026 01:30:46 -0400
+Subject: [PATCH] x64: keep W^X code writes inside the writable window on
+ Windows
+
+With DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT the A32/A64 emitters called
+PreludeComplete() (which makes the code buffer read+execute) and only then
+SetFastmemCallback(), which stores the handler offset in the UNWIND_INFO
+inside that buffer. The write faults on the first JIT construction. Set the
+callback before PreludeComplete().
+
+EnsureMemoryCommitted() also re-committed the whole range from the start of
+the buffer with PAGE_READWRITE on Windows, which would turn already-emitted
+read+execute code back into non-executable memory. Commit only the new pages.
+---
+ src/dynarmic/backend/x64/a32_emit_x64.cpp  | 8 +++++---
+ src/dynarmic/backend/x64/a64_emit_x64.cpp  | 8 +++++---
+ src/dynarmic/backend/x64/block_of_code.cpp | 8 ++++++--
+ 3 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/src/dynarmic/backend/x64/a32_emit_x64.cpp b/src/dynarmic/backend/x64/a32_emit_x64.cpp
+index fc8e8ba..41b72fc 100644
+--- a/src/dynarmic/backend/x64/a32_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a32_emit_x64.cpp
+@@ -83,12 +83,14 @@ A32EmitX64::A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_in
+         : EmitX64(code), conf(std::move(conf)), jit_interface(jit_interface) {
+     GenFastmemFallbacks();
+     GenTerminalHandlers();
+-    code.PreludeComplete();
+-    ClearFastDispatchTable();
+-
++    // The callback is stored in the unwind data inside the code buffer, so set it
++    // while that buffer is still writable: PreludeComplete() makes it read+execute
++    // when W^X (DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT) is on.
+     exception_handler.SetFastmemCallback([this](u64 rip_) {
+         return FastmemCallback(rip_);
+     });
++    code.PreludeComplete();
++    ClearFastDispatchTable();
+ }
+ 
+ A32EmitX64::~A32EmitX64() = default;
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.cpp b/src/dynarmic/backend/x64/a64_emit_x64.cpp
+index cec7813..fa080b3 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a64_emit_x64.cpp
+@@ -54,12 +54,14 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
+     GenMemory128Accessors();
+     GenFastmemFallbacks();
+     GenTerminalHandlers();
+-    code.PreludeComplete();
+-    ClearFastDispatchTable();
+-
++    // The callback is stored in the unwind data inside the code buffer, so set it
++    // while that buffer is still writable: PreludeComplete() makes it read+execute
++    // when W^X (DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT) is on.
+     exception_handler.SetFastmemCallback([this](u64 rip_) {
+         return FastmemCallback(rip_);
+     });
++    code.PreludeComplete();
++    ClearFastDispatchTable();
+ }
+ 
+ A64EmitX64::~A64EmitX64() = default;
+diff --git a/src/dynarmic/backend/x64/block_of_code.cpp b/src/dynarmic/backend/x64/block_of_code.cpp
+index df38548..5be2af0 100644
+--- a/src/dynarmic/backend/x64/block_of_code.cpp
++++ b/src/dynarmic/backend/x64/block_of_code.cpp
+@@ -285,10 +285,14 @@ size_t BlockOfCode::SpaceRemaining() const {
+ void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
+ #ifdef _WIN32
+     if (committed_size < size_ + codesize) {
+-        committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
+ #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
+-        VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
++        // Commit only the new pages. Re-committing the whole range would reset
++        // pages that already hold code (read+execute) to read/write.
++        const size_t old_committed = committed_size;
++        committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
++        VirtualAlloc(top_ + old_committed, committed_size - old_committed, MEM_COMMIT, PAGE_READWRITE);
+ #    else
++        committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
+         VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+ #    endif
+     }
+-- 
+2.43.0
+
