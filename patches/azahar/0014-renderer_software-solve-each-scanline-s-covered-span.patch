@@ -1,0 +1,185 @@
+From f72400a2babb0becde1ca0d330d54f105851dca3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 12:52:28 -0400
+Subject: [PATCH] renderer_software: solve each scanline's covered span; hoist
+ per-pixel register reads; skip unused texture coordinates
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../renderer_software/sw_rasterizer.cpp       | 114 ++++++++++++++----
+ 1 file changed, 90 insertions(+), 24 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index 1f87717..bde2c07 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -305,20 +305,84 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+     // TODO: Not sure if looping through x first might be faster
+     // One scanline of the triangle. (Was queued as its own job per scanline;
+     // see the dispatch below.)
++    // The edge functions SignedArea(a, b, p) = (b - a) x (p - a) are linear in x, so
++    // each scanline's covered span is solved directly instead of testing every pixel
++    // of the bounding box (about half of it is outside a triangle).
++    struct Edge {
++        s32 ex, ey; // b - a
++        s32 ax, ay; // a
++    };
++    const auto make_edge = [](const Common::Vec3<Fix12P4>& a, const Common::Vec3<Fix12P4>& b) {
++        return Edge{static_cast<s32>(b.x) - static_cast<s32>(a.x),
++                    static_cast<s32>(b.y) - static_cast<s32>(a.y), static_cast<s32>(a.x),
++                    static_cast<s32>(a.y)};
++    };
++    const std::array<Edge, 3> edges = {make_edge(vtxpos[1], vtxpos[2]),
++                                       make_edge(vtxpos[2], vtxpos[0]),
++                                       make_edge(vtxpos[0], vtxpos[1])};
++    const std::array<s32, 3> biases = {bias0, bias1, bias2};
++    const s32 x_start = static_cast<s32>(min_x) + 8;
++    const s32 pixels_per_row =
++        static_cast<s32>(max_x) > x_start ? (static_cast<s32>(max_x) - x_start + 15) / 16 : 0;
++
++    // Per-triangle constants (were re-read from the registers for every pixel).
++    const float depth_scale = f24::FromRaw(regs.rasterizer.viewport_depth_range).ToFloat32();
++    const float depth_offset = f24::FromRaw(regs.rasterizer.viewport_depth_near_plane).ToFloat32();
++    const bool w_buffering =
++        regs.rasterizer.depthmap_enable == Pica::RasterizerRegs::DepthBuffering::WBuffering;
++    const bool lighting_enabled = !regs.lighting.disable;
++    const bool shadow_mode = regs.framebuffer.output_merger.fragment_operation_mode ==
++                             FramebufferRegs::FragmentOperationMode::Shadow;
++    const bool scissor_exclude =
++        regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Exclude;
++    const bool color_write = regs.framebuffer.framebuffer.allow_color_write != 0;
++    // Texture coordinate sets that some enabled unit actually reads.
++    const bool use_coord1_for_2 = regs.texturing.main_config.texture2_use_coord1 != 0;
++    const bool need_uv0 = textures[0].enabled;
++    const bool need_uv1 = textures[1].enabled || (textures[2].enabled && use_coord1_for_2);
++    const bool need_uv2 = textures[2].enabled && !use_coord1_for_2;
++
+     const auto process_scanline = [&](u16 y) {
+-            for (u16 x = min_x + 8; x < max_x; x += 0x10) {
++            // Edge function values at the first pixel of the row, and their step per pixel.
++            std::array<s64, 3> base;
++            std::array<s64, 3> step;
++            s64 k_lo = 0;
++            s64 k_hi = static_cast<s64>(pixels_per_row) - 1;
++            for (int i = 0; i < 3; ++i) {
++                const Edge& e = edges[i];
++                base[i] = static_cast<s64>(biases[i]) +
++                          static_cast<s64>(e.ex) * (static_cast<s64>(y) - e.ay) -
++                          static_cast<s64>(e.ey) * (static_cast<s64>(x_start) - e.ax);
++                step[i] = static_cast<s64>(e.ey) * 16;
++                if (step[i] == 0) {
++                    if (base[i] < 0) {
++                        k_hi = -1;
++                    }
++                } else if (step[i] > 0) {
++                    if (base[i] < 0) {
++                        k_hi = -1;
++                    } else {
++                        k_hi = std::min(k_hi, base[i] / step[i]);
++                    }
++                } else if (base[i] < 0) {
++                    const s64 n = -step[i];
++                    k_lo = std::max(k_lo, (-base[i] + n - 1) / n);
++                }
++            }
++            for (s64 k = k_lo; k <= k_hi; ++k) {
++                const u16 x = static_cast<u16>(x_start + 16 * k);
+                 // Do not process the pixel if it's inside the scissor box and the scissor mode is
+                 // set to Exclude.
+-                if (regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Exclude) {
++                if (scissor_exclude) {
+                     if (x >= scissor_x1 && x < scissor_x2 && y >= scissor_y1 && y < scissor_y2) {
+                         continue;
+                     }
+                 }
+ 
+-                // Calculate the barycentric coordinates w0, w1 and w2
+-                const s32 w0 = bias0 + SignedArea(vtxpos[1].xy(), vtxpos[2].xy(), {x, y});
+-                const s32 w1 = bias1 + SignedArea(vtxpos[2].xy(), vtxpos[0].xy(), {x, y});
+-                const s32 w2 = bias2 + SignedArea(vtxpos[0].xy(), vtxpos[1].xy(), {x, y});
++                // Barycentric coordinates w0, w1 and w2
++                const s32 w0 = static_cast<s32>(base[0] - step[0] * k);
++                const s32 w1 = static_cast<s32>(base[1] - step[1] * k);
++                const s32 w2 = static_cast<s32>(base[2] - step[2] * k);
+                 const s32 wsum = w0 + w1 + w2;
+ 
+                 // If current pixel is not covered by the current primitive
+@@ -340,15 +404,10 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+ 
+                 // Not fully accurate. About 3 bits in precision are missing.
+                 // Z-Buffer (z / w * scale + offset)
+-                const float depth_scale =
+-                    f24::FromRaw(regs.rasterizer.viewport_depth_range).ToFloat32();
+-                const float depth_offset =
+-                    f24::FromRaw(regs.rasterizer.viewport_depth_near_plane).ToFloat32();
+                 float depth = interpolated_z_over_w * depth_scale + depth_offset;
+ 
+                 // Potentially switch to W-Buffer
+-                if (regs.rasterizer.depthmap_enable ==
+-                    Pica::RasterizerRegs::DepthBuffering::WBuffering) {
++                if (w_buffering) {
+                     // W-Buffer (z * scale + w * offset = (z / w * scale + offset) * w)
+                     depth *= interpolated_w_inverse.ToFloat32() * wsum;
+                 }
+@@ -401,21 +460,30 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 };
+ 
+                 std::array<Common::Vec2<f24>, 3> uv;
+-                uv[0].u() = get_interpolated_attribute(v0.tc0.u(), v1.tc0.u(), v2.tc0.u());
+-                uv[0].v() = get_interpolated_attribute(v0.tc0.v(), v1.tc0.v(), v2.tc0.v());
+-                uv[1].u() = get_interpolated_attribute(v0.tc1.u(), v1.tc1.u(), v2.tc1.u());
+-                uv[1].v() = get_interpolated_attribute(v0.tc1.v(), v1.tc1.v(), v2.tc1.v());
+-                uv[2].u() = get_interpolated_attribute(v0.tc2.u(), v1.tc2.u(), v2.tc2.u());
+-                uv[2].v() = get_interpolated_attribute(v0.tc2.v(), v1.tc2.v(), v2.tc2.v());
++                // Only the coordinate sets an enabled texture unit reads.
++                if (need_uv0) {
++                    uv[0].u() = get_interpolated_attribute(v0.tc0.u(), v1.tc0.u(), v2.tc0.u());
++                    uv[0].v() = get_interpolated_attribute(v0.tc0.v(), v1.tc0.v(), v2.tc0.v());
++                }
++                if (need_uv1) {
++                    uv[1].u() = get_interpolated_attribute(v0.tc1.u(), v1.tc1.u(), v2.tc1.u());
++                    uv[1].v() = get_interpolated_attribute(v0.tc1.v(), v1.tc1.v(), v2.tc1.v());
++                }
++                if (need_uv2) {
++                    uv[2].u() = get_interpolated_attribute(v0.tc2.u(), v1.tc2.u(), v2.tc2.u());
++                    uv[2].v() = get_interpolated_attribute(v0.tc2.v(), v1.tc2.v(), v2.tc2.v());
++                }
+ 
+                 // Sample bound texture units.
+-                const f24 tc0_w = get_interpolated_attribute(v0.tc0_w, v1.tc0_w, v2.tc0_w);
++                const f24 tc0_w = need_uv0
++                                      ? get_interpolated_attribute(v0.tc0_w, v1.tc0_w, v2.tc0_w)
++                                      : f24::Zero();
+                 const auto texture_color = TextureColor(uv, textures, tc0_w);
+ 
+                 Common::Vec4<u8> primary_fragment_color = {0, 0, 0, 0};
+                 Common::Vec4<u8> secondary_fragment_color = {0, 0, 0, 0};
+ 
+-                if (!regs.lighting.disable) {
++                if (lighting_enabled) {
+                     const auto normquat =
+                         Common::Quaternion<f32>{
+                             {get_interpolated_attribute(v0.quat.x, v1.quat.x, v2.quat.x)
+@@ -443,9 +511,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                     WriteTevConfig(texture_color, tev_stages, primary_color, primary_fragment_color,
+                                    secondary_fragment_color);
+ 
+-                const auto& output_merger = regs.framebuffer.output_merger;
+-                if (output_merger.fragment_operation_mode ==
+-                    FramebufferRegs::FragmentOperationMode::Shadow) {
++                if (shadow_mode) {
+                     const u32 depth_int = static_cast<u32>(depth * 0xFFFFFF);
+                     // Use green color as the shadow intensity
+                     const u8 stencil = combiner_output.y;
+@@ -463,7 +529,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                     continue;
+                 }
+                 const auto result = PixelColor(x, y, combiner_output);
+-                if (regs.framebuffer.framebuffer.allow_color_write != 0) {
++                if (color_write) {
+                     fb.DrawPixel(x >> 4, y >> 4, result);
+                 }
+             }
+-- 
+2.43.0
+
