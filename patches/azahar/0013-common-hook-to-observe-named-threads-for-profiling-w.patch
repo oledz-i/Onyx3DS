@@ -1,0 +1,48 @@
+From fa53bed85b44be826db3c5aca86f78622247c869 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 12:36:04 -0400
+Subject: [PATCH] common: hook to observe named threads (for profiling worker
+ threads)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/common/thread.cpp | 5 +++++
+ src/common/thread.h   | 4 ++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/common/thread.cpp b/src/common/thread.cpp
+index 68004a6..01d3223 100644
+--- a/src/common/thread.cpp
++++ b/src/common/thread.cpp
+@@ -82,8 +82,13 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
+ 
+ #ifdef _MSC_VER
+ 
++void (*g_thread_name_hook)(const char*) = nullptr;
++
+ // Sets the debugger-visible name of the current thread.
+ void SetCurrentThreadName(const char* name) {
++    if (g_thread_name_hook) {
++        g_thread_name_hook(name);
++    }
+     SetThreadDescription(GetCurrentThread(), UTF8ToUTF16W(name).data());
+ }
+ 
+diff --git a/src/common/thread.h b/src/common/thread.h
+index 44d3703..a504c81 100644
+--- a/src/common/thread.h
++++ b/src/common/thread.h
+@@ -110,6 +110,10 @@ enum class ThreadPriority : u32 {
+ 
+ void SetCurrentThreadPriority(ThreadPriority new_priority);
+ 
++// Called with the name of every thread that names itself (MSVC builds). Lets a
++// frontend find the emulator's worker threads, e.g. to profile them.
++extern void (*g_thread_name_hook)(const char*);
++
+ void SetCurrentThreadName(const char* name);
+ 
+ } // namespace Common
+-- 
+2.43.0
+

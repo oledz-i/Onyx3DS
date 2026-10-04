@@ -171,6 +171,7 @@ private:
     Stats stats_{};
     uint32_t presents_in_window_ = 0;
     uint32_t frames_in_window_ = 0;
+    std::atomic<uint32_t> cpu_w_{0}, cpu_h_{0}; // size of the last software frame
     std::chrono::steady_clock::time_point window_start_{};
     LUID luid_{};
 };

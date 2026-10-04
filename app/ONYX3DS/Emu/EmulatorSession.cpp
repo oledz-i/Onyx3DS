@@ -284,6 +284,7 @@ void EmulatorSession::EmulationThread(std::string rom_path) {
         std::string error; // a C++ exception escaping the body
     } ctx{this, &rom_path, {}};
     GuardedCrash crash{};
+    ProfilerStart(); // before the core loads, so its worker threads are seen
     const bool ok = RunGuarded(
         [](void* p) {
             auto* c = static_cast<Ctx*>(p);
@@ -296,6 +297,7 @@ void EmulatorSession::EmulationThread(std::string rom_path) {
             }
         },
         &ctx, &crash);
+    ProfilerStop();
     if (!ok) {
         OnCoreCrashed(crash);
     } else if (!ctx.error.empty()) {
@@ -463,7 +465,6 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
 
     HighResTimer timer;
     auto deadline = std::chrono::steady_clock::now();
-    ProfilerStart();
     // Frame timing, logged every 5 s: how long retro_run took vs. time spent waiting.
     auto perf_start = std::chrono::steady_clock::now();
     double run_total_ms = 0, run_max_ms = 0;
@@ -522,7 +523,6 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         }
     }
 
-    ProfilerStop();
     state_ = SessionState::Stopping;
     RunCommands();
     if (write_auto_on_stop_) DoSaveState(0);

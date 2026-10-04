@@ -344,6 +344,8 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
                                   size_t pitch) {
     if (!data || width == 0 || height == 0 || !device_) return false;
     Mirror(data, width, height, pitch);
+    cpu_w_ = width;
+    cpu_h_ = height;
     if (cpu_view_.load()) {
         std::lock_guard lock(slot_mutex_);
         ++frames_in_window_; // still counts toward the game FPS shown in the overlay
@@ -558,6 +560,9 @@ void D3D12Presenter::RenderLoop() {
                 if (slot >= 0) {
                     stats_.frame_width = slots_[slot].width;
                     stats_.frame_height = slots_[slot].height;
+                } else if (cpu_w_.load() && cpu_h_.load()) {
+                    stats_.frame_width = cpu_w_.load();
+                    stats_.frame_height = cpu_h_.load();
                 }
             }
             presents_in_window_ = 0;

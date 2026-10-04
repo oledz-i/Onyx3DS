@@ -223,3 +223,33 @@ jobs:
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || notes=/dev/null
           gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "ONYX $TAG" --notes-file "$notes" --latest
+
+  # Keeps each main build's map file on a rolling "dev" pre-release, named by the
+  # link timestamp that ONYX writes to onyx.log ("Build stamp"), so offsets in a
+  # profile or crash log can be decoded for exactly that build.
+  dev-maps:
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ONYX3DS-xbox
+          path: pkg
+      - name: Upload the map
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ -f pkg/ONYX3DS.map ] || { echo "no map"; exit 0; }
+          stamp=$(grep -m1 -oP 'Timestamp is \K[0-9a-f]+' pkg/ONYX3DS.map)
+          cp pkg/ONYX3DS.map "ONYX3DS-$stamp.map"
+          gh release view dev >/dev/null 2>&1 || gh release create dev --prerelease --title "Dev build maps" \
+            --notes "Linker maps of development builds, for decoding offsets in logs. Not an install." 
+          gh release upload dev "ONYX3DS-$stamp.map" --clobber
+          # keep the newest 6
+          gh release view dev --json assets --jq '.assets|sort_by(.createdAt)|reverse|.[6:]|.[].name' |
+            while read -r n; do gh release delete-asset dev "$n" -y; done
