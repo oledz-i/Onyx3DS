@@ -142,6 +142,7 @@ private:
     // This game uses Azahar's software renderer: frames arrive as CPU pixels.
     std::atomic<bool> software_{true};
     int frames_since_drain_ = 0;
+    std::vector<uint32_t> sw_frame_; // reusable software frame (XRGB8888)
     std::mutex init_mutex_;
 
     SessionEvents events_;

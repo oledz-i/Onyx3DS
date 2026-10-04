@@ -26,7 +26,11 @@ public:
 
     // ---- settings ---------------------------------------------------------
     Settings& Config() { return settings_; }
+    // Writes settings.json on a background thread (latest write wins), so the
+    // UI never waits on the file system.
     void SaveSettings();
+    // Writes any pending settings now, on the calling thread (suspend/exit).
+    void FlushSettings();
     ConsoleModel Model() const { return model_; }
     PerfProfile EffectiveProfile() const;
 
@@ -95,6 +99,9 @@ private:
     std::vector<Theme> themes_;
     std::atomic<bool> scanning_{false};
     std::optional<GameEntry> selected_;
+    std::mutex save_mutex_;
+    std::string pending_settings_;
+    bool save_queued_ = false;
     SoundEffects sfx_;
     winrt::Windows::Media::Playback::MediaPlayer music_{nullptr};
     std::string music_path_;

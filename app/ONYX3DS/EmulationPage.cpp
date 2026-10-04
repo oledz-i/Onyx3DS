@@ -112,6 +112,7 @@ void EmulationPage::OnNavigatedFrom(NavigationEventArgs const&) {
     if (sw_timer_) sw_timer_.Stop();
     Emu().SetEvents({});
     Emu().Presenter().Detach();
+    Emu().Presenter().SetCpuView(false);
     Emu().Presenter().ClearMirror();
     sw_seq_ = 0;
 }
@@ -186,8 +187,8 @@ void EmulationPage::OnStarted() {
     // Two seconds of colour bars: proves the picture path works before the game's first frame.
     if (Emu().UsingSoftwareRenderer()) {
         SoftwareView().Visibility(Visibility::Visible);
+        Emu().Presenter().SetCpuView(true);
         sw_timer_.Start();
-        RunAsync([] { Emu().Presenter().ShowTestPattern(); });
     }
     auto& session = Emu();
     Svc().StoreCatalog(session.Catalog());
@@ -216,7 +217,10 @@ void EmulationPage::OnStopped(const std::string& reason) {
     fps_timer_.Stop();
     if (sw_timer_) sw_timer_.Stop();
     if (started_) {
-        Svc().Library().RecordSession(game_.path, Emu().SessionSeconds(), NowUnix());
+        // Writes library.json; keep the file system off the UI thread.
+        RunAsync([path = game_.path, secs = Emu().SessionSeconds(), now = NowUnix()] {
+            Svc().Library().RecordSession(path, secs, now);
+        });
     }
     auto weak = get_weak();
     auto leave = [weak] {

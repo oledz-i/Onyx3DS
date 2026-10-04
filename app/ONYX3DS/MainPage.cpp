@@ -292,7 +292,7 @@ Button MainPage::MakeTile(const GameEntry& game, double w, double h) {
     Border art;
     art.Margin(Thickness{w * 0.026, w * 0.026, w * 0.026, w * 0.026});
     art.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{r * 0.8, r * 0.8, r * 0.8, r * 0.8});
-    if (!game.grid_art.empty() && Svc().Fs().Exists(game.grid_art)) {
+    if (!game.grid_art.empty() && CachedExists(game.grid_art)) {
         ImageBrush brush;
         brush.ImageSource(ImageFromFile(game.grid_art, static_cast<int>(w * 1.3)));
         brush.Stretch(Stretch::UniformToFill);
@@ -317,7 +317,7 @@ Button MainPage::MakeTile(const GameEntry& game, double w, double h) {
             Image icon;
             icon.Width(h * 0.42);
             icon.Height(h * 0.42);
-            icon.Source(IconFromRgba(Svc().Fs().ReadAll(game.icon_path), 48, 48));
+            LoadIconInto(icon, game.icon_path, 48, 48);
             inner.Children().Append(icon);
         }
         auto title = kit::Text(game.DisplayTitle(), std::max(16.0, h * 0.11), true);

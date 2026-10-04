@@ -63,14 +63,16 @@ public:
     // copied into a slot through an upload buffer on this presenter's own
     // device. No Vulkan involved. Returns false if the frame was dropped.
     bool PushCpuFrame(const void* data, uint32_t width, uint32_t height, size_t pitch);
-    // Shows colour bars through the same upload path (start-up self-test).
-    void ShowTestPattern();
 
     // Software frames are also kept as BGRA pixels for the XAML image view,
     // which shows them without the D3D12 swap chain. Copies the newest frame
     // if it is newer than `seq` and returns true.
+    // Swaps the newest frame into `bgra` (no copy) if it is newer than `seq`.
     bool TakeMirror(std::vector<uint8_t>& bgra, uint32_t& width, uint32_t& height, uint64_t& seq);
     void ClearMirror();
+    // While the XAML view shows software frames, they are not also uploaded to
+    // the swap chain (which does not reach the screen on Xbox).
+    void SetCpuView(bool active) { cpu_view_.store(active); }
 
     // Generation counter: bumps when a slot's texture is recreated, so the
     // Vulkan side knows to re-import it.
@@ -119,6 +121,7 @@ private:
     std::vector<uint8_t> mirror_;
     uint32_t mirror_w_ = 0, mirror_h_ = 0;
     uint64_t mirror_seq_ = 0;
+    std::atomic<bool> cpu_view_{false};
     void Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch);
 
     // CPU frame uploads (software renderer).
@@ -157,8 +160,6 @@ private:
     std::atomic<float> scale_x_{1.0f}, scale_y_{1.0f};
     uint32_t sc_width_ = 0, sc_height_ = 0;
     HRESULT last_present_hr_ = S_OK;
-    // While set, newer frames wait so the self-test pattern stays visible.
-    std::chrono::steady_clock::time_point hold_until_{};
     int last_drawn_slot_ = -1;
 
     std::atomic<int> filter_{static_cast<int>(ScreenFilter::Smooth)};

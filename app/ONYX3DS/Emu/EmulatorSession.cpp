@@ -893,6 +893,18 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         return true;
     case RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT:
         return true;
+    case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: {
+        // One reusable frame buffer instead of the core allocating and freeing
+        // a multi-megabyte frame every time it presents.
+        auto* fb = static_cast<retro_framebuffer*>(data);
+        if (!software_ || !fb || fb->width == 0 || fb->height == 0) return false;
+        sw_frame_.resize(static_cast<size_t>(fb->width) * fb->height);
+        fb->data = sw_frame_.data();
+        fb->pitch = static_cast<size_t>(fb->width) * 4;
+        fb->format = RETRO_PIXEL_FORMAT_XRGB8888;
+        fb->memory_flags = RETRO_MEMORY_TYPE_CACHED;
+        return true;
+    }
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
         static_cast<retro_log_callback*>(data)->log = &CoreLogCb;
         return true;
@@ -982,7 +994,6 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_GET_MICROPHONE_INTERFACE:
     case RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK:
     case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK:
-    case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER:
     default:
         return false;
     }

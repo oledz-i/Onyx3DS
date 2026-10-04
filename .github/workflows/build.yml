@@ -162,3 +162,36 @@ jobs:
           lvl=warning; [ "${{ job.status }}" = success ] || lvl=error
           tools/ci-annotate.sh report-imports.txt Imports $lvl
           tools/ci-annotate.sh report-launch.txt Launch $lvl
+
+  # Pushing a tag like v2.0 publishes a GitHub Release with just what an
+  # install needs: the .msix and its x64 dependency (plus the map file for
+  # decoding crash logs).
+  release:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ONYX3DS-xbox
+          path: pkg
+      - name: Collect release files
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          msix=$(find pkg -name '*.msix' -o -name '*.appx' | grep -v Dependencies | head -1)
+          [ -n "$msix" ] || { echo "no package found"; exit 1; }
+          cp "$msix" "dist/ONYX3DS-${GITHUB_REF_NAME}.msix"
+          find pkg -path '*Dependencies/x64/*' -type f -exec cp {} dist/ \;
+          [ -f pkg/ONYX3DS.map ] && cp pkg/ONYX3DS.map "dist/ONYX3DS-${GITHUB_REF_NAME}.map" || true
+          ls -la dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          [ -f "$notes" ] || notes=/dev/null
+          gh release create "$GITHUB_REF_NAME" dist/* --title "ONYX ${GITHUB_REF_NAME}" --notes-file "$notes" --latest

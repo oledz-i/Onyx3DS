@@ -343,7 +343,12 @@ void D3D12Presenter::AbortWrite(int slot_index) {
 bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t height,
                                   size_t pitch) {
     if (!data || width == 0 || height == 0 || !device_) return false;
-    if (std::chrono::steady_clock::now() >= hold_until_) Mirror(data, width, height, pitch);
+    Mirror(data, width, height, pitch);
+    if (cpu_view_.load()) {
+        std::lock_guard lock(slot_mutex_);
+        ++frames_in_window_; // still counts toward the game FPS shown in the overlay
+        return true;
+    }
     std::lock_guard upload_lock(upload_mutex_);
     static int s_logged = 0;
     auto fail = [&](const char* what, HRESULT hr) {
@@ -481,7 +486,7 @@ bool D3D12Presenter::TakeMirror(std::vector<uint8_t>& bgra, uint32_t& width, uin
                                 uint64_t& seq) {
     std::lock_guard lock(mirror_mutex_);
     if (mirror_seq_ == seq || mirror_.empty()) return false;
-    bgra = mirror_;
+    bgra.swap(mirror_); // the caller's old buffer becomes the next frame's storage
     width = mirror_w_;
     height = mirror_h_;
     seq = mirror_seq_;
@@ -492,24 +497,6 @@ void D3D12Presenter::ClearMirror() {
     std::lock_guard lock(mirror_mutex_);
     mirror_.clear();
     mirror_w_ = mirror_h_ = 0;
-}
-
-void D3D12Presenter::ShowTestPattern() {
-    constexpr uint32_t w = 800, h = 480;
-    std::vector<uint32_t> px(static_cast<size_t>(w) * h);
-    const uint32_t bars[8] = {0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00,
-                              0xFF00FF, 0xFF0000, 0x0000FF, 0x101010}; // XRGB
-    for (uint32_t y = 0; y < h; ++y)
-        for (uint32_t x = 0; x < w; ++x)
-            px[static_cast<size_t>(y) * w + x] = bars[x * 8 / w];
-    const bool ok = PushCpuFrame(px.data(), w, h, w * 4);
-    if (ok) {
-        std::lock_guard lock(slot_mutex_);
-        displaying_ = latest_; // show it now, then hold it for two seconds
-        latest_ = -1;
-        hold_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    }
-    ONYX_INFO("Display self-test: colour bars %s", ok ? "sent to the screen" : "could NOT be uploaded");
 }
 
 uint32_t D3D12Presenter::SlotGeneration(int slot_index) const {
@@ -531,7 +518,7 @@ void D3D12Presenter::RenderLoop() {
         int slot;
         {
             std::lock_guard lock(slot_mutex_);
-            if (latest_ >= 0 && !paused_ && std::chrono::steady_clock::now() >= hold_until_) {
+            if (latest_ >= 0 && !paused_) {
                 displaying_ = latest_;
                 latest_ = -1;
             }
@@ -590,9 +577,7 @@ void D3D12Presenter::DrawFrame(int slot, UINT back) {
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(back) * rtv_stride_;
-    // Dark blue rather than black: around the picture it shows that the swap
-    // chain itself is reaching the screen.
-    const float clear[4] = {0.02f, 0.04f, 0.12f, 1.0f};
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     cmd_->ClearRenderTargetView(rtv, clear, 0, nullptr);
 
     uint64_t wait_value = 0;
@@ -656,6 +641,23 @@ D3D12Presenter::Stats D3D12Presenter::GetStats() const {
 }
 
 bool D3D12Presenter::CaptureLatest(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) {
+    if (cpu_view_.load()) {
+        // Software frames: take the newest one from the CPU copy.
+        std::lock_guard lock(mirror_mutex_);
+        if (!mirror_w_ || !mirror_h_ ||
+            mirror_.size() < static_cast<size_t>(mirror_w_) * mirror_h_ * 4)
+            return false;
+        width = mirror_w_;
+        height = mirror_h_;
+        rgba.resize(static_cast<size_t>(width) * height * 4);
+        for (size_t i = 0; i < rgba.size(); i += 4) { // BGRA -> RGBA, opaque
+            rgba[i + 0] = mirror_[i + 2];
+            rgba[i + 1] = mirror_[i + 1];
+            rgba[i + 2] = mirror_[i + 0];
+            rgba[i + 3] = 0xFF;
+        }
+        return true;
+    }
     int slot;
     uint64_t ready;
     winrt::com_ptr<ID3D12Resource> tex;

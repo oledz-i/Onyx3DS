@@ -2,6 +2,8 @@
 #include "pch.h"
 #include "Platform/Imaging.h"
 
+#include <unordered_map>
+
 #include "Platform/Log.h"
 #include "Platform/UwpPlatform.h"
 
@@ -48,9 +50,62 @@ ImageSource IconFromRgba(const Bytes& rgba, int width, int height) {
     return bmp;
 }
 
+namespace {
+// UI-thread caches. Bounded so a huge library cannot hold every image forever.
+std::unordered_map<std::string, ImageSource> g_images;
+std::unordered_map<std::string, ImageSource> g_icons;
+std::unordered_map<std::string, bool> g_exists;
+constexpr size_t kMaxCached = 400;
+
+template <typename Map> void Bound(Map& m) {
+    if (m.size() > kMaxCached) m.clear();
+}
+} // namespace
+
+bool CachedExists(const std::string& path) {
+    if (path.empty()) return false;
+    if (auto it = g_exists.find(path); it != g_exists.end()) return it->second;
+    Bound(g_exists);
+    const bool e = UwpFileSystem().Exists(path);
+    g_exists.emplace(path, e);
+    return e;
+}
+
+void LoadIconInto(winrt::Windows::UI::Xaml::Controls::Image const& target, const std::string& path,
+                  int width, int height) {
+    if (path.empty()) return;
+    if (auto it = g_icons.find(path); it != g_icons.end()) {
+        target.Source(it->second);
+        return;
+    }
+    auto dispatcher = target.Dispatcher();
+    winrt::agile_ref<winrt::Windows::UI::Xaml::Controls::Image> weak_target{target};
+    RunAsync([dispatcher, weak_target, path, width, height] {
+        auto data = std::make_shared<Bytes>(UwpFileSystem().ReadAll(path));
+        if (data->empty()) return;
+        dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low,
+                            [weak_target, path, data, width, height] {
+                                ImageSource src = nullptr;
+                                if (auto it = g_icons.find(path); it != g_icons.end()) {
+                                    src = it->second;
+                                } else {
+                                    src = IconFromRgba(*data, width, height);
+                                    if (!src) return;
+                                    Bound(g_icons);
+                                    g_icons.emplace(path, src);
+                                }
+                                if (auto img = weak_target.get()) img.Source(src);
+                            });
+    });
+}
+
 ImageSource ImageFromFile(const std::string& path, int decode_width) {
     if (path.empty()) return nullptr;
+    const std::string key = path + "|" + std::to_string(decode_width);
+    if (auto it = g_images.find(key); it != g_images.end()) return it->second;
+    Bound(g_images);
     BitmapImage img;
+    g_images.emplace(key, img);
     if (decode_width > 0) img.DecodePixelWidth(decode_width);
     if (path.rfind("ms-appx:", 0) == 0) {
         img.UriSource(winrt::Windows::Foundation::Uri(Wide(path)));

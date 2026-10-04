@@ -136,7 +136,7 @@ void App::OnSuspending(IInspectable const&, SuspendingEventArgs const& e) {
     auto deferral = e.SuspendingOperation().GetDeferral();
     auto& session = EmulatorSession::Get();
     if (session.State() == SessionState::Running) session.SetPaused(true);
-    AppServices::Get().SaveSettings();
+    AppServices::Get().FlushSettings();
     deferral.Complete();
 }
 

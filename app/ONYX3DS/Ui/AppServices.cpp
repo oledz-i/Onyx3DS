@@ -63,7 +63,34 @@ void AppServices::Initialize() {
 }
 
 void AppServices::SaveSettings() {
-    fs_.WriteText(Paths().settings_file, settings_.ToJson());
+    std::string text = settings_.ToJson(); // snapshot on the caller's thread
+    {
+        std::lock_guard lock(save_mutex_);
+        pending_settings_ = std::move(text);
+        if (save_queued_) return; // the queued writer picks up the newest text
+        save_queued_ = true;
+    }
+    RunAsync([this] {
+        for (;;) {
+            std::string t;
+            {
+                std::lock_guard lock(save_mutex_);
+                if (pending_settings_.empty()) {
+                    save_queued_ = false;
+                    return;
+                }
+                t.swap(pending_settings_);
+            }
+            fs_.WriteText(Paths().settings_file, t);
+        }
+    });
+}
+
+void AppServices::FlushSettings() {
+    std::string text = settings_.ToJson();
+    std::lock_guard lock(save_mutex_);
+    pending_settings_.clear();
+    fs_.WriteText(Paths().settings_file, text);
 }
 
 PerfProfile AppServices::EffectiveProfile() const {
