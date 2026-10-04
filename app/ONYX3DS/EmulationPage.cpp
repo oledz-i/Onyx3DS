@@ -176,41 +176,51 @@ void EmulationPage::UpdateSoftwareView() {
 
 void EmulationPage::OnStarted() {
     started_ = true;
-    // No system cursor over the game: the controller goes to the 3DS.
-    Application::Current().RequiresPointerMode(ApplicationRequiresPointerMode::WhenRequested);
-    try {
-        winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().PointerCursor(nullptr);
-    } catch (...) {
-    }
+    // Picture first: nothing below may stop the game from being shown.
     LoadingOverlay().Visibility(Visibility::Collapsed);
     ONYX_INFO("Game started; loading screen hidden");
-    // Two seconds of colour bars: proves the picture path works before the game's first frame.
+    // Software frames are shown by the XAML image view.
     if (Emu().UsingSoftwareRenderer()) {
         SoftwareView().Visibility(Visibility::Visible);
         Emu().Presenter().SetCpuView(true);
         sw_timer_.Start();
     }
-    auto& session = Emu();
-    Svc().StoreCatalog(session.Catalog());
+    // No system cursor over the game. (Mouse mode itself is turned off once, in
+    // the App constructor; changing RequiresPointerMode later throws.)
+    try {
+        winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().PointerCursor(nullptr);
+    } catch (...) {
+    }
+    // Extras (save state on launch, cheats, remembering the game) must never take
+    // the running game down with them.
+    try {
+        auto& session = Emu();
+        Svc().StoreCatalog(session.Catalog());
 
-    // Launch modes from the channel preview.
-    const auto& cfg = Svc().Config();
-    if (launch_mode_ == "resume" || (launch_mode_.empty() && cfg.qol.auto_load_state && session.HasState(0))) {
-        session.LoadState(0);
-    } else if (launch_mode_.rfind("slot:", 0) == 0) {
-        session.LoadState(std::atoi(launch_mode_.c_str() + 5));
-    }
-    // Cheats switched on in the cheats file go live through the core.
-    const CheatFile cheats = CheatFile::Parse(Svc().Fs().ReadText(Svc().CheatFilePath(game_.title_id)));
-    for (const auto& c : cheats.cheats) {
-        if (c.enabled) {
-            session.ApplyCheats(cheats);
-            break;
+        // Launch modes from the channel preview.
+        const auto& cfg = Svc().Config();
+        if (launch_mode_ == "resume" || (launch_mode_.empty() && cfg.qol.auto_load_state && session.HasState(0))) {
+            session.LoadState(0);
+        } else if (launch_mode_.rfind("slot:", 0) == 0) {
+            session.LoadState(std::atoi(launch_mode_.c_str() + 5));
         }
+        // Cheats switched on in the cheats file go live through the core.
+        const CheatFile cheats = CheatFile::Parse(Svc().Fs().ReadText(Svc().CheatFilePath(game_.title_id)));
+        for (const auto& c : cheats.cheats) {
+            if (c.enabled) {
+                session.ApplyCheats(cheats);
+                break;
+            }
+        }
+        auto& c = Svc().Config();
+        c.last_played_path = game_.path;
+        Svc().SaveSettings();
+    } catch (hresult_error const& e) {
+        ONYX_ERROR("Game start extras failed: 0x%08X %s", static_cast<unsigned>(e.code()),
+                   Utf8(e.message()).c_str());
+    } catch (std::exception const& e) {
+        ONYX_ERROR("Game start extras failed: %s", e.what());
     }
-    auto& c = Svc().Config();
-    c.last_played_path = game_.path;
-    Svc().SaveSettings();
 }
 
 void EmulationPage::OnStopped(const std::string& reason) {

@@ -65,7 +65,8 @@ App::App() {
     // Never vanish back to Dev Home: log it, keep running, and say so on
     // screen so there is something to report.
     UnhandledException([](IInspectable const&, UnhandledExceptionEventArgs const& e) {
-        ONYX_ERROR("Unhandled exception: %s", Utf8(e.Message()).c_str());
+        ONYX_ERROR("Unhandled exception 0x%08X: %s", static_cast<unsigned>(e.Exception().value),
+                   Utf8(e.Message()).c_str());
         e.Handled(true);
         ShowFatal(L"Unexpected error: " + std::wstring(e.Message()));
     });
