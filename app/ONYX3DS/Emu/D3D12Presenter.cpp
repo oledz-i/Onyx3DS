@@ -342,6 +342,15 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
                                   size_t pitch) {
     if (!data || width == 0 || height == 0 || !device_) return false;
     std::lock_guard upload_lock(upload_mutex_);
+    static int s_logged = 0;
+    auto fail = [&](const char* what, HRESULT hr) {
+        if (s_logged < 8) {
+            ++s_logged;
+            ONYX_ERROR("Software frame %ux%u dropped: %s (0x%08X)", width, height, what,
+                       static_cast<unsigned>(hr));
+        }
+        return false;
+    };
     try {
         if (!upload_cmd_) {
             winrt::check_hresult(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -357,7 +366,7 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
 
         int s = -1;
         SharedSlot* slot = BeginWrite(width, height, s);
-        if (!slot) return false;
+        if (!slot) return fail("no frame slot", device_->GetDeviceRemovedReason());
 
         const D3D12_RESOURCE_DESC desc = slot->texture->GetDesc();
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
@@ -378,14 +387,16 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
             bd.MipLevels = 1;
             bd.SampleDesc.Count = 1;
             bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            if (FAILED(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
-                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                        IID_PPV_ARGS(upload_buffer_.put()))) ||
-                FAILED(upload_buffer_->Map(0, nullptr, reinterpret_cast<void**>(&upload_mapped_)))) {
+            HRESULT hr = device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                                                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                          IID_PPV_ARGS(upload_buffer_.put()));
+            if (SUCCEEDED(hr))
+                hr = upload_buffer_->Map(0, nullptr, reinterpret_cast<void**>(&upload_mapped_));
+            if (FAILED(hr)) {
                 upload_buffer_ = nullptr;
                 upload_mapped_ = nullptr;
                 AbortWrite(s);
-                return false;
+                return fail("upload buffer", hr);
             }
             upload_size_ = total;
         }
@@ -420,12 +431,21 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         queue_->Signal(upload_fence_.get(), v);
         if (upload_fence_->GetCompletedValue() < v) {
             upload_fence_->SetEventOnCompletion(v, upload_event_);
-            WaitForSingleObject(upload_event_, 1000);
+            if (WaitForSingleObject(upload_event_, 1000) != WAIT_OBJECT_0) {
+                AbortWrite(s);
+                return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
+            }
         }
         EndWrite(s, 0); // already complete on the GPU
+        static uint64_t s_frames = 0;
+        if (++s_frames == 1 || s_frames % 600 == 0)
+            ONYX_INFO("Software frame %llu shown (%ux%u)", static_cast<unsigned long long>(s_frames),
+                      width, height);
         return true;
+    } catch (winrt::hresult_error const& e) {
+        return fail("D3D12 error", e.code());
     } catch (...) {
-        return false;
+        return fail("unexpected error", E_FAIL);
     }
 }
 

@@ -713,8 +713,17 @@ bool EmulatorSession::InstallCia(const std::string& path, const std::function<vo
 void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned height,
                                    size_t pitch) {
     if (software_) {
-        if (data && data != RETRO_HW_FRAME_BUFFER_VALID)
+        static uint64_t s_calls = 0, s_null = 0;
+        ++s_calls;
+        if (data && data != RETRO_HW_FRAME_BUFFER_VALID) {
             presenter_.PushCpuFrame(data, width, height, pitch);
+        } else {
+            ++s_null;
+        }
+        if (s_calls == 1 || s_calls == 60 || s_calls % 1800 == 0)
+            ONYX_INFO("Video callback %llu: %u x %u, pitch %zu, %llu without pixels",
+                      static_cast<unsigned long long>(s_calls), width, height, pitch,
+                      static_cast<unsigned long long>(s_null));
         return;
     }
     if (data == RETRO_HW_FRAME_BUFFER_VALID && vulkan_) vulkan_->OnFrame(width, height);
