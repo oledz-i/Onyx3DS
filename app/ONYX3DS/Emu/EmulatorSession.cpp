@@ -6,6 +6,7 @@
 
 #include "Emu/AzaharBridge.h"
 #include "Platform/CrashHandler.h"
+#include "Platform/Profiler.h"
 #include "Platform/Imaging.h"
 #include "Platform/Log.h"
 #include "Platform/UwpPlatform.h"
@@ -462,6 +463,11 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
 
     HighResTimer timer;
     auto deadline = std::chrono::steady_clock::now();
+    ProfilerStart();
+    // Frame timing, logged every 5 s: how long retro_run took vs. time spent waiting.
+    auto perf_start = std::chrono::steady_clock::now();
+    double run_total_ms = 0, run_max_ms = 0;
+    int perf_frames = 0;
     while (!stop_requested_) {
         RunCommands();
         if (pause_requested_) {
@@ -476,7 +482,20 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             state_ = SessionState::Running;
             presenter_.SetPaused(false);
         }
+        const auto run_begin = std::chrono::steady_clock::now();
         retro_run();
+        const double run_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - run_begin).count();
+        run_total_ms += run_ms;
+        run_max_ms = std::max(run_max_ms, run_ms);
+        if (++perf_frames >= 60 ||
+            std::chrono::steady_clock::now() - perf_start > std::chrono::seconds(5)) {
+            ONYX_INFO("Perf: %d frames, retro_run avg %.1f ms (max %.1f ms)", perf_frames,
+                      run_total_ms / perf_frames, run_max_ms);
+            perf_start = std::chrono::steady_clock::now();
+            run_total_ms = run_max_ms = 0;
+            perf_frames = 0;
+        }
         if (ra_ && ra_->GameLoaded()) ra_->DoFrame();
         if (++frames_since_drain_ >= 120) { // ~2 s: surface driver warnings
             frames_since_drain_ = 0;
@@ -503,6 +522,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         }
     }
 
+    ProfilerStop();
     state_ = SessionState::Stopping;
     RunCommands();
     if (write_auto_on_stop_) DoSaveState(0);
