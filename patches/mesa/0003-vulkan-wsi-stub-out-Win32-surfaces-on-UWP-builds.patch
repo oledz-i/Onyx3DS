@@ -1,0 +1,99 @@
+From b608855aba5de78be41ce33b77938464e9c8aeb5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:52:55 +0000
+Subject: [PATCH] vulkan/wsi: stub out Win32 surfaces on UWP builds
+
+---
+ src/vulkan/wsi/meson.build            |  7 ++-
+ src/vulkan/wsi/wsi_common_win32_uwp.c | 61 +++++++++++++++++++++++++++
+ 2 files changed, 67 insertions(+), 1 deletion(-)
+ create mode 100644 src/vulkan/wsi/wsi_common_win32_uwp.c
+
+diff --git a/src/vulkan/wsi/meson.build b/src/vulkan/wsi/meson.build
+index 80925d1..8d26013 100644
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -27,7 +27,12 @@ if with_platform_wayland
+   files_vulkan_wsi += wp_files['color-management-v1']
+ endif
+ 
+-if with_platform_windows
++# UWP (Xbox Dev Mode) has no desktop window surfaces: build a stub instead.
++with_uwp_wsi_stub = with_platform_windows and get_option('c_args').contains('-DMESA_UWP=1')
++if with_uwp_wsi_stub
++  files_vulkan_wsi += files('wsi_common_win32_uwp.c')
++  platform_deps += dep_dxheaders
++elif with_platform_windows
+   files_vulkan_wsi += files('wsi_common_win32.cpp')
+   platform_deps += dep_dxheaders
+ else
+diff --git a/src/vulkan/wsi/wsi_common_win32_uwp.c b/src/vulkan/wsi/wsi_common_win32_uwp.c
+new file mode 100644
+index 0000000..14a1ab3
+--- /dev/null
++++ b/src/vulkan/wsi/wsi_common_win32_uwp.c
+@@ -0,0 +1,61 @@
++/*
++ * Copyright © 2026 ONYX 3DS contributors
++ * SPDX-License-Identifier: MIT
++ *
++ * Window-system integration stub for Universal Windows Platform builds
++ * (MESA_UWP). UWP apps have no HWND/GDI/DirectComposition desktop surfaces;
++ * the host presents frames itself (for example by sharing a D3D12 texture),
++ * so Win32 surfaces and swapchains are simply not offered.
++ */
++
++#include "wsi_common_private.h"
++#include "vk_alloc.h"
++#include "vk_instance.h"
++
++VkResult
++wsi_win32_init_wsi(struct wsi_device *wsi_device,
++                   const VkAllocationCallbacks *alloc,
++                   VkPhysicalDevice physical_device)
++{
++   (void)wsi_device;
++   (void)alloc;
++   (void)physical_device;
++   return VK_SUCCESS;
++}
++
++void
++wsi_win32_finish_wsi(struct wsi_device *wsi_device,
++                     const VkAllocationCallbacks *alloc)
++{
++   (void)wsi_device;
++   (void)alloc;
++}
++
++void
++wsi_win32_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
++                          const VkAllocationCallbacks *pAllocator)
++{
++   VK_FROM_HANDLE(vk_instance, instance, _instance);
++   vk_free2(&instance->alloc, pAllocator, icd_surface);
++}
++
++enum wsi_swapchain_blit_type
++wsi_dxgi_image_needs_blit(const struct wsi_device *wsi,
++                          const struct wsi_dxgi_image_params *params,
++                          VkDevice device)
++{
++   (void)wsi;
++   (void)params;
++   (void)device;
++   return WSI_SWAPCHAIN_NO_BLIT;
++}
++
++VkResult
++wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
++                         const VkSwapchainCreateInfoKHR *pCreateInfo,
++                         const struct wsi_dxgi_image_params *params,
++                         struct wsi_image_info *info)
++{
++   (void)params;
++   return wsi_configure_image(chain, pCreateInfo, 0, info);
++}
+-- 
+2.43.0
+

@@ -1,0 +1,28 @@
+From ef135261774fbb788f2c60f013ea3e2aa7eefd96 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 00:53:21 +0000
+Subject: [PATCH 2/2] serialization: silence C4996 for strerror under MSVC /sdl
+
+---
+ libs/serialization/src/basic_xml_grammar.ipp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/libs/serialization/src/basic_xml_grammar.ipp b/libs/serialization/src/basic_xml_grammar.ipp
+index 5e426ff..581e213 100644
+--- a/libs/serialization/src/basic_xml_grammar.ipp
++++ b/libs/serialization/src/basic_xml_grammar.ipp
+@@ -12,6 +12,11 @@
+ #  pragma warning (disable : 4786) // too long name, harmless warning
+ #endif
+ 
++#if defined(_MSC_VER)
++// std::strerror is flagged as deprecated (C4996), which /sdl turns into an
++// error in Windows Store builds. Its use here is harmless.
++# pragma warning(disable : 4996)
++#endif
+ #include <istream>
+ #include <algorithm>
+ #include <boost/config.hpp> // typename
+-- 
+2.43.0
+

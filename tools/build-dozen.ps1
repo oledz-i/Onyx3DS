@@ -11,12 +11,15 @@ $uwp = "-DMESA_UWP=1 -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00"
 # Dozen links D3D12/DXGI directly on UWP (patches\mesa replaces LoadLibrary).
 $link = "/APPCONTAINER WindowsApp.lib d3d12.lib dxgi.lib"
 
-if (!(Test-Path (Join-Path $build "build.ninja"))) {
+# Always (re)configure so option changes reach a cached build directory.
+$reconfigure = @()
+if (Test-Path (Join-Path $build "build.ninja")) { $reconfigure = @("--reconfigure") }
+if ($true) {
     Write-Step "Configuring Mesa (Dozen only, UWP)"
     $env:CC = "cl"
     $env:CXX = "cl"
     $mesonArgs = @(
-        "setup", $build, $src, "--backend=ninja", "--buildtype=release", "-Db_vscrt=md",
+        "setup", $build, $src, "--backend=ninja", "--buildtype=release", "-Db_vscrt=md", "-Db_ndebug=true",
         "-Dplatforms=windows", "-Dmin-windows-version=10",
         "-Dvulkan-drivers=microsoft-experimental", "-Dgallium-drivers=",
         "-Dopengl=false", "-Dgles1=disabled", "-Dgles2=disabled", "-Degl=disabled", "-Dglx=disabled",
@@ -28,7 +31,7 @@ if (!(Test-Path (Join-Path $build "build.ninja"))) {
         "-Dc_args=$uwp", "-Dcpp_args=$uwp",
         "-Dc_link_args=$link", "-Dcpp_link_args=$link"
     )
-    Invoke-Checked meson @mesonArgs
+    Invoke-Checked meson @mesonArgs @reconfigure
 }
 
 Write-Step "Building vulkan_dzn.dll"

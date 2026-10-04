@@ -1,7 +1,7 @@
 From f6aba5d42c06e91b8743613944537b58e5f8e209 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 4 Oct 2026 00:35:34 +0000
-Subject: [PATCH] iostreams: open files with CreateFile2FromAppW on UWP
+Subject: [PATCH 1/2] iostreams: open files with CreateFile2FromAppW on UWP
 
 ---
  libs/iostreams/src/file_descriptor.cpp | 39 ++++++++++++++++++++++++++
