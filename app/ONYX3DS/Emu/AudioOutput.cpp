@@ -112,7 +112,8 @@ void AudioOutput::EndFrame() {
 
     if (!stretching_) {
         // Behind real time and the queue has run dry: start stretching.
-        if (want > in * 1.15 && queued < rate_ * 3 / 100) {
+        // Even a few percent slow (e.g. 57 fps) drains the queue and crackles.
+        if (want > in * 1.02 && queued < rate_ * 3 / 100) {
             stretching_ = true;
             fast_frames_ = 0;
             if (!stretcher_) stretcher_ = std::make_unique<AudioCore::TimeStretcher>();
@@ -138,7 +139,7 @@ void AudioOutput::EndFrame() {
     frame_in_.clear();
 
     // Back at full speed for ~2 s: stop stretching (flush what the stretcher holds).
-    fast_frames_ = want <= in * 1.05 ? fast_frames_ + 1 : 0;
+    fast_frames_ = want <= in * 1.01 ? fast_frames_ + 1 : 0;
     if (fast_frames_ >= 120) {
         stretching_ = false;
         stretcher_->Flush();

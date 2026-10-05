@@ -1,0 +1,40 @@
+From fdc65734c36935369091d696ae53831cf0354db1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 21:52:22 -0400
+Subject: [PATCH] dzn: cap descriptor-pool sampler heaps at 2048 (larger ones
+ remove the device on Xbox)
+
+---
+ src/microsoft/vulkan/dzn_descriptor_set.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index 36770f6..22ab100 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -1825,6 +1825,22 @@ dzn_descriptor_pool_create(struct dzn_device *device,
+          ID3D12Resource_Map(pool->bindless.buf, 0, NULL, (void **)&pool->bindless.map);
+       }
+    } else {
++      /* ONYX: Xbox's D3D12 removes the device (DXGI_ERROR_INVALID_CALL) when a sampler
++       * descriptor heap -- even a CPU-only one -- has more than 2048 entries. A smaller
++       * pool just reports VK_ERROR_OUT_OF_POOL_MEMORY sooner, and the app creates
++       * another pool. */
++      if (pool->desc_count[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER] >
++          D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE) {
++         static bool logged = false;
++         if (!logged) {
++            logged = true;
++            mesa_logi("dzn: capping descriptor pool sampler heaps at %u (asked for %u)",
++                      (unsigned)D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE,
++                      pool->desc_count[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER]);
++         }
++         pool->desc_count[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER] =
++            D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
++      }
+       dzn_foreach_pool_type(type) {
+          if (!pool->desc_count[type])
+             continue;
+-- 
+2.43.0
+

@@ -516,7 +516,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             const double speed = ffw ? ff / 100.0 : 1.0;
             deadline += std::chrono::nanoseconds(static_cast<long long>(1e9 / kCoreFps / speed));
             const auto now = std::chrono::steady_clock::now();
-            if (now > deadline + std::chrono::milliseconds(50)) deadline = now; // too far behind
+            // Frame limiter: a late frame never makes the next ones rush to catch up
+            // (that burst above 60 fps is what showed as hitches), so pacing stays even.
+            if (now >= deadline) deadline = now;
             else timer.SleepUntil(deadline);
         }
         if (!ffw) audio_.EndFrame();
