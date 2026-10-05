@@ -29,6 +29,12 @@ ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core 
 > and missing features while it grows. Bug reports with logs are very welcome (see
 > [Reporting a bug](#reporting-a-bug)).
 
+> [!IMPORTANT]
+> **Only install ONYX from [Releases](https://github.com/oledz-i/Onyx3DS/releases/latest)** (numbered versions such as v2.1).
+> Builds you may find in the **Actions** tab (named `DEV-BUILD-UNTESTED-…`) and the
+> *Developer debug files* pre-release are **developer test builds**: untested, often
+> broken, and replaced several times a day. They are not releases and are not supported.
+
 ## Features
 
 - **Game library**: scans your ROM folder, reads titles and icons from the games themselves, and pulls box art from SteamGridDB.
@@ -71,7 +77,7 @@ Encrypted dumps are detected and flagged in the library. ONYX cannot decrypt the
 
 The short version:
 
-1. Download the latest release from [Releases](https://github.com/oledz-i/Onyx3DS/releases/latest): the `.msix` and the dependency `.appx`. (Development builds are on [Actions](https://github.com/oledz-i/Onyx3DS/actions/workflows/build.yml).)
+1. Download the latest release from [Releases](https://github.com/oledz-i/Onyx3DS/releases/latest): the `.msix` and the dependency `.appx`. Don't use builds from the Actions tab: those are untested developer builds.
 2. Open the **Xbox Device Portal** in a browser on your PC and install two things: the ONYX `.msix` and the dependency in `Dependencies\x64`. Nothing else in the download is needed.
 3. In **Dev Home**, highlight ONYX, press **Menu → View details**, and set **App type** to **Game**. This matters: as an *App*, Xbox gives it too little memory to emulate anything.
 4. Launch ONYX, choose your ROM folder, and pick a game.

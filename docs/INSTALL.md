@@ -13,11 +13,12 @@ This guide takes you from a console in retail mode to a game library in ONYX.
 
 ## 2. Download ONYX
 
-- **Recommended:** from [Releases](https://github.com/oledz-i/Onyx3DS/releases/latest), download
+- From [Releases](https://github.com/oledz-i/Onyx3DS/releases/latest), download
   the ONYX `.msix` and the dependency `.appx`. That's everything; skip the next point.
-- **Development builds:** from [Actions](https://github.com/oledz-i/Onyx3DS/actions/workflows/build.yml),
-  open the latest successful run and download the **`ONYX3DS-xbox`** artifact (needs a GitHub login).
-- Unzip it on your PC. Inside `AppPackages\...` you'll find the ONYX `.msix` and a
+- **Developer test builds (not for players):** the Actions tab holds untested builds named
+  **`DEV-BUILD-UNTESTED-ONYX3DS`**. They are for the developer's own testing, are often broken,
+  and get no support. If you use one anyway: open the run, download that artifact (needs a
+  GitHub login) and unzip it on your PC. Inside `AppPackages\...` you'll find the ONYX `.msix` and a
   `Dependencies` folder. You only need the `.msix` and what's in `Dependencies\x64`;
   everything else (other architectures, the certificate, `.map` and symbol files) can be ignored.
 

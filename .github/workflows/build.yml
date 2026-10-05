@@ -52,6 +52,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: azahar-lib
+          retention-days: 3
           path: deps/lib/azahar_all.lib
 
   dozen:
@@ -90,6 +91,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dozen-bin
+          retention-days: 3
           path: deps/bin/*.dll
 
   # Compiles the app and shell right away (linking needs the other jobs'
@@ -113,6 +115,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: shell-libs
+          retention-days: 3
           path: |
             deps/lib/onyx_shell.lib
             deps/lib/rcheevos.lib
@@ -138,12 +141,14 @@ jobs:
         run: tools/ci-report.sh build.log Package
       - uses: actions/upload-artifact@v4
         with:
-          name: ONYX3DS-xbox
+          # Developer test build: not a release. Players install from Releases.
+          name: DEV-BUILD-UNTESTED-ONYX3DS
           path: |
             out/AppPackages/**
             out/ONYX3DS.cer
             out/ONYX3DS.map
           if-no-files-found: error
+          retention-days: 14
 
   verify:
     needs: package
@@ -153,7 +158,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: ONYX3DS-xbox
+          name: DEV-BUILD-UNTESTED-ONYX3DS
           path: artifacts/ONYX3DS-xbox
       - name: Import scan and launch test
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File tools/verify-package.ps1
@@ -199,7 +204,7 @@ jobs:
       - if: steps.tag.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: ONYX3DS-xbox
+          name: DEV-BUILD-UNTESTED-ONYX3DS
           path: pkg
       - name: Collect release files
         if: steps.tag.outputs.publish == 'true'
@@ -236,7 +241,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: ONYX3DS-xbox
+          name: DEV-BUILD-UNTESTED-ONYX3DS
           path: pkg
       - name: Upload the map
         env:
@@ -247,8 +252,10 @@ jobs:
           [ -f pkg/ONYX3DS.map ] || { echo "no map"; exit 0; }
           stamp=$(grep -m1 -oP 'Timestamp is \K[0-9a-f]+' pkg/ONYX3DS.map)
           cp pkg/ONYX3DS.map "ONYX3DS-$stamp.map"
-          gh release view dev >/dev/null 2>&1 || gh release create dev --prerelease --title "Dev build maps" \
-            --notes "Linker maps of development builds, for decoding offsets in logs. Not an install." 
+          notes="Developer debug files (linker maps for decoding logs). This is NOT a game build and there is nothing to install here. Players: install ONYX only from the latest numbered release (v2.x)."
+          gh release view dev >/dev/null 2>&1 || gh release create dev --prerelease \
+            --title "Developer debug files (not an install)" --notes "$notes"
+          gh release edit dev --prerelease --title "Developer debug files (not an install)" --notes "$notes" 
           gh release upload dev "ONYX3DS-$stamp.map" --clobber
           # keep the newest 6
           gh release view dev --json assets --jq '.assets|sort_by(.createdAt)|reverse|.[6:]|.[].name' |
