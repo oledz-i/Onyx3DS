@@ -38,7 +38,7 @@ ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core 
 ## Features
 
 - **Game library**: scans your ROM folder, reads titles and icons from the games themselves, and pulls box art from SteamGridDB.
-- **Controller-first UI**: built for the TV and a gamepad, with five themes and optional menu music.
+- **Controller-first UI**: built for the TV and a gamepad, with a rounded console-style font, six themes (including an optional 3DS-style one) and optional menu music.
 - **Save states**: multiple slots with thumbnails, plus an auto-save slot when you quit.
 - **Per-game settings**: change resolution, CPU clock and more for one game without touching the rest.
 - **Cheats**: downloads the cheat database for each game; toggle codes from the in-game menu.

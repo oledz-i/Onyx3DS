@@ -219,7 +219,7 @@ void AppServices::SetLaunchArguments(const std::wstring& args) {
 void AppServices::RestartApp(const std::string& game_path) {
     ONYX_INFO("Restarting ONYX%s", game_path.empty() ? "" : " to reopen the game");
     FlushSettings();
-    const std::wstring args = game_path.empty() ? L"" : L"resume=" + winrt::to_hstring(game_path);
+    const std::wstring args = game_path.empty() ? std::wstring() : L"resume=" + std::wstring(winrt::to_hstring(game_path));
     try {
         auto op = winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(args);
         op.Completed([](auto const& async, winrt::Windows::Foundation::AsyncStatus status) {

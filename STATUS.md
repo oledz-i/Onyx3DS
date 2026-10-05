@@ -43,3 +43,17 @@
 1. Re-run the page syntax checks; fix what remains.
 2. Push to GitHub and let `.github/workflows/build.yml` build on Windows; fix MSVC errors.
 3. Install the .msix via Device Portal, set App type to Game, open Settings > System check.
+
+## v2.1.0 (Oct 5, 2026 checkpoint)
+- Software renderer: banded parallel rasterizer, texture cache, auto frame skip,
+  TEV decoded once per triangle, opaque pixels skip the framebuffer read.
+  Measured on Series S before the last two changes: NSMB2 menus at full speed with
+  frame skip, gameplay at about 20–28 fps; Shakedown Hawaii at 60 fps.
+- Hardware renderer: still crashes on Series S as of build #62 (D3D12 device removed
+  with DXGI_ERROR_INVALID_CALL during Azahar's renderer start-up). The leading
+  suspect, an R32_UINT view of a mutable RGBA8 image that the Xbox can't cast
+  (no relaxed format casting without the Agility SDK), now becomes a null
+  descriptor (patches/mesa/0011). patches/mesa/0010 logs the exact D3D12 call after
+  which the device was removed. Not yet confirmed on hardware.
+- UI: bundled Rounded M+ 1c font, Dual Screen (3DS-style) theme, new menu music,
+  Restart ONYX after a crash (reopens the game).

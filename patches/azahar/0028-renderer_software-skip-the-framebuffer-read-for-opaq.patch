@@ -1,0 +1,56 @@
+From 7c420ab77dd6d1359166ab9b923b031cb5b95bc5 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 06:38:40 -0400
+Subject: [PATCH] renderer_software: skip the framebuffer read for opaque
+ pixels
+
+Without blending, with logic op Copy and every channel enabled, the
+output colour doesn't depend on the framebuffer, so don't decode it. Also
+build the blend constant once per pixel instead of once per factor.
+---
+ .../renderer_software/sw_rasterizer.cpp       | 21 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index 2917e7a..f7f4e0e 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -982,21 +982,28 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+ 
+ Common::Vec4<u8> RasterizerSoftware::PixelColor(u16 x, u16 y,
+                                                 Common::Vec4<u8> combiner_output) const {
++    const auto& output_merger = regs.framebuffer.output_merger;
++    // Opaque drawing (no blending, logic op Copy, every channel written) is the
++    // common case and doesn't depend on the framebuffer: skip reading it back.
++    if (!output_merger.alphablend_enable &&
++        output_merger.logic_op == FramebufferRegs::LogicOp::Copy && output_merger.red_enable &&
++        output_merger.green_enable && output_merger.blue_enable && output_merger.alpha_enable) {
++        return combiner_output;
++    }
++
+     const auto dest = fb.GetPixel(x >> 4, y >> 4);
+     Common::Vec4<u8> blend_output = combiner_output;
+ 
+-    const auto& output_merger = regs.framebuffer.output_merger;
+     if (output_merger.alphablend_enable) {
+         const auto params = output_merger.alpha_blending;
++        const Common::Vec4<u8> blend_const =
++            Common::MakeVec(
++                output_merger.blend_const.r.Value(), output_merger.blend_const.g.Value(),
++                output_merger.blend_const.b.Value(), output_merger.blend_const.a.Value())
++                .Cast<u8>();
+         const auto lookup_factor = [&](u32 channel, FramebufferRegs::BlendFactor factor) -> u8 {
+             DEBUG_ASSERT(channel < 4);
+ 
+-            const Common::Vec4<u8> blend_const =
+-                Common::MakeVec(
+-                    output_merger.blend_const.r.Value(), output_merger.blend_const.g.Value(),
+-                    output_merger.blend_const.b.Value(), output_merger.blend_const.a.Value())
+-                    .Cast<u8>();
+-
+             switch (factor) {
+             case FramebufferRegs::BlendFactor::Zero:
+                 return 0;
+-- 
+2.43.0
+
