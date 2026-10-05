@@ -29,7 +29,7 @@ using GetCtxFn = BOOL(WINAPI*)(HANDLE, LPCONTEXT);
 
 struct Target {
     HANDLE handle;
-    int group; // 0 = emulation thread, 1 = software renderer workers
+    int group; // 0 = emulation thread, 1 = software renderer workers, 2 = Vulkan worker
 };
 
 struct Sampler {
@@ -41,13 +41,17 @@ struct Sampler {
 Sampler g_sampler;
 
 void OnThreadNamed(const char* name) {
-    if (!name || std::strcmp(name, "SwRenderer workers") != 0) return;
+    if (!name) return;
+    int group;
+    if (std::strcmp(name, "SwRenderer workers") == 0) group = 1;
+    else if (std::strcmp(name, "VulkanWorker") == 0) group = 2; // hardware renderer recording
+    else return;
     HANDLE real = nullptr;
     if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &real,
                          THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, 0))
         return;
     std::lock_guard lock(g_sampler.mutex);
-    g_sampler.targets.push_back({real, 1});
+    g_sampler.targets.push_back({real, group});
 }
 
 // Copies a few words from the (suspended) target thread's stack. Guarded: near the
@@ -139,7 +143,7 @@ void SampleLoop() {
         if (HMODULE h = GetModuleHandleW(m))
             known.emplace_back(reinterpret_cast<std::uintptr_t>(h), Utf8(std::wstring(m)));
     }
-    Group groups[2];
+    Group groups[3];
     int failed = 0;
     auto last_report = std::chrono::steady_clock::now();
 
@@ -199,8 +203,10 @@ void SampleLoop() {
             last_report = now;
             Report("main", groups[0], failed);
             Report("workers", groups[1], failed);
+            Report("vkworker", groups[2], failed);
             groups[0].Clear();
             groups[1].Clear();
+            groups[2].Clear();
             failed = 0;
         }
     }

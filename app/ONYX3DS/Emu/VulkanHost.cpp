@@ -307,6 +307,9 @@ bool VulkanHost::CreateInstance(VulkanProbe& probe, std::string& error) {
     if (!readback_ && (!has_external_semaphore_ || !has_timeline_))
         probe.notes.push_back("No shared fence support: falling back to CPU frame sync (slower)");
     ONYX_INFO("Vulkan GPU: %s (%s)", probe.device_name.c_str(), probe.driver_info.c_str());
+    // Sign shaders the DXIL validator refuses for the self-test too, so its compute
+    // step checks that signed shaders really run on this console.
+    _putenv_s("ONYX_DXIL_SELFSIGN", "1");
     // A failure here leaves the hardware renderer unavailable, so the session runs games
     // with the software renderer instead of starting the core on a broken driver.
     if (!RunSelfTest(error)) {
@@ -1240,6 +1243,7 @@ private:
     VkResult SetUpDevice();
     VkResult StepEmptySubmit();
     VkResult StepFillBuffer();
+    VkResult StepGpuReadsHostMemory();
     VkResult StepClearColorImage();
     VkResult StepComputeDispatch();
     VkResult StepClearDepthStencil();
@@ -1312,6 +1316,7 @@ private:
     ST_FN(InvalidateMappedMemoryRanges)
     ST_FN(CmdPipelineBarrier)
     ST_FN(CmdFillBuffer)
+    ST_FN(CmdCopyBuffer)
     ST_FN(CmdClearColorImage)
     ST_FN(CmdClearDepthStencilImage)
     ST_FN(CmdBindPipeline)
@@ -1336,6 +1341,7 @@ const char* const kSelfTestStepNames[] = {
     "create device",
     "empty submit",
     "vkCmdFillBuffer",
+    "GPU reads CPU-written memory",
     "vkCmdClearColorImage (64x64 RGBA8)",
     "compute dispatch",
     "vkCmdClearDepthStencilImage",
@@ -1354,14 +1360,15 @@ bool VulkanSelfTest::Run(std::string& error) {
         case 0: r = SetUpDevice(); break;
         case 1: r = StepEmptySubmit(); break;
         case 2: r = StepFillBuffer(); break;
-        case 3: r = StepClearColorImage(); break;
-        case 4: r = StepComputeDispatch(); break;
-        case 5: r = StepClearDepthStencil(); break;
-        case 6:
+        case 3: r = StepGpuReadsHostMemory(); break;
+        case 4: r = StepClearColorImage(); break;
+        case 5: r = StepComputeDispatch(); break;
+        case 6: r = StepClearDepthStencil(); break;
+        case 7:
             r = StepAzaharPipeline(kAzaharDepthToBufferComp, sizeof(kAzaharDepthToBufferComp),
                                    false);
             break;
-        case 7:
+        case 8:
             r = StepAzaharPipeline(kAzaharD24S8ToRgba8Comp, sizeof(kAzaharD24S8ToRgba8Comp),
                                    true);
             break;
@@ -1480,6 +1487,7 @@ VkResult VulkanSelfTest::SetUpDevice() {
     ST_LOAD(InvalidateMappedMemoryRanges)
     ST_LOAD(CmdPipelineBarrier)
     ST_LOAD(CmdFillBuffer)
+    ST_LOAD(CmdCopyBuffer)
     ST_LOAD(CmdClearColorImage)
     ST_LOAD(CmdClearDepthStencilImage)
     ST_LOAD(CmdBindPipeline)
@@ -1711,6 +1719,100 @@ VkResult VulkanSelfTest::StepFillBuffer() {
         return VK_ERROR_UNKNOWN;
     }
     return VK_SUCCESS;
+}
+
+// The hardware renderer streams vertices, uniforms and textures through memory the
+// CPU writes and the GPU reads. Checks that for both host-visible memory kinds
+// (plain and CPU-cached): the CPU writes a pattern, the GPU copies it, the CPU checks.
+VkResult VulkanSelfTest::StepGpuReadsHostMemory() {
+    constexpr VkDeviceSize kSize = 64 * 1024;
+    const uint32_t words = static_cast<uint32_t>(kSize / 4);
+    std::string report;
+    bool all_ok = true;
+    for (int kind = 0; kind < 2; ++kind) {
+        const bool cached = kind == 1;
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = kSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkBuffer src = VK_NULL_HANDLE;
+        VkResult r = CreateBuffer(device_, &bci, nullptr, &src);
+        if (r != VK_SUCCESS) { detail_ = "vkCreateBuffer"; return r; }
+        buffers_.push_back(src);
+        VkMemoryRequirements req{};
+        GetBufferMemoryRequirements(device_, src, &req);
+        uint32_t type = UINT32_MAX;
+        for (uint32_t i = 0; i < memory_.memoryTypeCount; ++i) {
+            const VkMemoryPropertyFlags fl = memory_.memoryTypes[i].propertyFlags;
+            if (!(req.memoryTypeBits & (1u << i)) || !(fl & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                continue;
+            if (((fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0) == cached) { type = i; break; }
+        }
+        if (type == UINT32_MAX) {
+            report += cached ? "cached: no such type; " : "plain: no such type; ";
+            continue;
+        }
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = type;
+        VkDeviceMemory src_mem = VK_NULL_HANDLE;
+        if ((r = AllocateMemory(device_, &mai, nullptr, &src_mem)) != VK_SUCCESS) {
+            detail_ = "vkAllocateMemory";
+            return r;
+        }
+        memories_.push_back(src_mem);
+        if ((r = BindBufferMemory(device_, src, src_mem, 0)) != VK_SUCCESS) {
+            detail_ = "vkBindBufferMemory";
+            return r;
+        }
+        void* mapped = nullptr;
+        if ((r = MapMemory(device_, src_mem, 0, VK_WHOLE_SIZE, 0, &mapped)) != VK_SUCCESS || !mapped) {
+            detail_ = "vkMapMemory";
+            return r != VK_SUCCESS ? r : VK_ERROR_MEMORY_MAP_FAILED;
+        }
+        auto* w = static_cast<uint32_t*>(mapped);
+        for (uint32_t i = 0; i < words; ++i) w[i] = i * 0x9E3779B1u + 0x1234567u * (kind + 1);
+        UnmapMemory(device_, src_mem);
+
+        VkBuffer dst = VK_NULL_HANDLE;
+        VkDeviceMemory dst_mem = VK_NULL_HANDLE;
+        if ((r = MakeBuffer(kSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, dst, dst_mem)) != VK_SUCCESS)
+            return r;
+        if ((r = Begin()) != VK_SUCCESS) return r;
+        const VkBufferCopy region{0, 0, kSize};
+        CmdCopyBuffer(cmd_, src, dst, 1, &region);
+        VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.buffer = dst;
+        b.size = VK_WHOLE_SIZE;
+        CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+                           nullptr, 1, &b, 0, nullptr);
+        if ((r = SubmitAndWait()) != VK_SUCCESS) return r;
+        void* out = nullptr;
+        if ((r = MapMemory(device_, dst_mem, 0, VK_WHOLE_SIZE, 0, &out)) != VK_SUCCESS || !out) {
+            detail_ = "vkMapMemory (result)";
+            return r != VK_SUCCESS ? r : VK_ERROR_MEMORY_MAP_FAILED;
+        }
+        const auto* o = static_cast<const uint32_t*>(out);
+        uint32_t bad = 0, zero = 0;
+        for (uint32_t i = 0; i < words; ++i) {
+            if (o[i] != i * 0x9E3779B1u + 0x1234567u * (kind + 1)) {
+                ++bad;
+                if (o[i] == 0) ++zero;
+            }
+        }
+        UnmapMemory(device_, dst_mem);
+        char text[128];
+        std::snprintf(text, sizeof(text), "%s (type %u): %u of %u words wrong (%u zero); ",
+                      cached ? "cached" : "plain", type, bad, words, zero);
+        report += text;
+        if (bad) all_ok = false;
+    }
+    detail_ = report;
+    return all_ok ? VK_SUCCESS : VK_ERROR_UNKNOWN;
 }
 
 VkResult VulkanSelfTest::StepClearColorImage() {

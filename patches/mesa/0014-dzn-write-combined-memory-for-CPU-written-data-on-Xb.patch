@@ -1,0 +1,128 @@
+From c00b8f9f83f7b9b9834069adf8f3f0928eda511e Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 18:55:27 -0400
+Subject: [PATCH] dzn: write-combined memory for CPU-written data on Xbox;
+ image size fallback; variant timing
+
+- Host-visible, non-cached memory types use WRITE_COMBINE even on
+  cache-coherent UMA. On Xbox Series CPU writes through WRITE_BACK
+  mappings did not reach the GPU (every hardware frame came out black).
+  The explicitly cached type stays WRITE_BACK for GPU -> CPU readback.
+- When the runtime reports no allocation size for an image, log the
+  description and retry without UNORDERED_ACCESS.
+- Log the first pipeline variants and any slow variant compile, with the
+  state that forced it.
+---
+ src/microsoft/vulkan/dzn_device.c   |  9 +++++++--
+ src/microsoft/vulkan/dzn_image.c    | 31 +++++++++++++++++++++++++++++
+ src/microsoft/vulkan/dzn_pipeline.c | 21 +++++++++++++++++++
+ 3 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index 46f1b3a..e911ea5 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -2666,8 +2666,13 @@ deduce_heap_properties_from_memory(struct dzn_physical_device *pdevice,
+       ((mem_type->propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+        !pdevice->architecture.UMA) ?
+       D3D12_MEMORY_POOL_L1 : D3D12_MEMORY_POOL_L0;
+-   if ((mem_type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ||
+-       ((mem_type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && pdevice->architecture.CacheCoherentUMA)) {
++   /* ONYX: on Xbox Series the GPU doesn't see CPU writes that are still sitting in
++    * CPU caches, even though the adapter reports cache-coherent UMA: vertex data,
++    * uniforms and texture uploads written through WRITE_BACK mappings reach the GPU
++    * as zeros and every frame comes out black. Only the explicitly cached memory
++    * type (used for GPU -> CPU readback) stays WRITE_BACK; everything else the CPU
++    * writes goes through WRITE_COMBINE, which bypasses the caches. */
++   if (mem_type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
+       properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+    } else if (mem_type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+       properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index dce5354..2eb7ebf 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -908,6 +908,37 @@ dzn_GetImageMemoryRequirements2(VkDevice _device,
+       info = dzn_ID3D12Device4_GetResourceAllocationInfo(device->dev, 0, 1, &image->desc);
+    }
+ 
++   /* ONYX: the Xbox runtime reports size 0 (or ~0) for descriptions it doesn't
++    * support, and the app then fails to allocate. Log it and retry without the
++    * flags that are most often unsupported; the resource is created from
++    * image->desc later, so the change sticks. */
++   if (info.SizeInBytes == 0 || info.SizeInBytes == UINT64_MAX) {
++      const D3D12_RESOURCE_DESC orig = image->desc;
++      mesa_loge("dzn: no allocation size for image %llux%u, %u mips, %u layers, format %d, "
++                "flags 0x%x, samples %u",
++                (unsigned long long)orig.Width, orig.Height, orig.MipLevels,
++                orig.DepthOrArraySize, (int)orig.Format, (unsigned)orig.Flags,
++                orig.SampleDesc.Count);
++      const D3D12_RESOURCE_FLAGS drop[] = {
++         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
++         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
++      };
++      for (unsigned i = 0; i < ARRAY_SIZE(drop) && (info.SizeInBytes == 0 || info.SizeInBytes == UINT64_MAX); i++) {
++         if (!(orig.Flags & drop[i]))
++            continue;
++         image->desc.Flags = orig.Flags & ~drop[i];
++         info = dzn_ID3D12Device4_GetResourceAllocationInfo(device->dev, 0, 1, &image->desc);
++      }
++      if (info.SizeInBytes == 0 || info.SizeInBytes == UINT64_MAX) {
++         image->desc = orig;
++         mesa_loge("dzn:   no supported variant found");
++      } else {
++         mesa_loge("dzn:   works with flags 0x%x, %u mips (%llu bytes)",
++                   (unsigned)image->desc.Flags, image->desc.MipLevels,
++                   (unsigned long long)info.SizeInBytes);
++      }
++   }
++
+    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
+       .size = info.SizeInBytes,
+       .alignment = info.Alignment,
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 9a879c3..9880b2e 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include "dzn_private.h"
++#include "util/os_time.h"
+ #include "dxil_nir_lower_int_samplers.h"
+ 
+ #include "spirv/nir_spirv.h"
+@@ -2286,10 +2287,30 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+ 
+       update_stencil_state(pdev, pipeline, stream_buf, &masked_key);
+ 
++      const int64_t onyx_t0 = os_time_get_nano();
+       ASSERTED HRESULT hres = DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
+                                                                 &IID_ID3D12PipelineState,
+                                                                 (void**)(&variant->state)));
+       assert(!FAILED(hres));
++      /* ONYX: variants are compiled while commands are recorded, so a slow one
++       * stalls the frame. Log what forced each one. */
++      {
++         static unsigned onyx_variants, onyx_logged;
++         const unsigned n = ++onyx_variants;
++         const double ms = (os_time_get_nano() - onyx_t0) / 1e6;
++         if (onyx_logged < 60 && (n <= 20 || ms > 30.0)) {
++            onyx_logged++;
++            mesa_logw("dzn: pipeline variant #%u compiled in %.0f ms (strip cut %d, depth bias "
++                      "%d/%.3f/%.3f, stencil ref %u/%u cmp %x/%x write %x/%x)",
++                      n, ms, (int)masked_key.ib_strip_cut, masked_key.depth_bias.constant_factor,
++                      masked_key.depth_bias.slope_factor, masked_key.depth_bias.clamp,
++                      masked_key.stencil_test.front.ref, masked_key.stencil_test.back.ref,
++                      masked_key.stencil_test.front.compare_mask,
++                      masked_key.stencil_test.back.compare_mask,
++                      masked_key.stencil_test.front.write_mask,
++                      masked_key.stencil_test.back.write_mask);
++         }
++      }
+       he = _mesa_hash_table_insert(pipeline->variants, &variant->key, variant);
+       assert(he);
+    } else {
+-- 
+2.43.0
+
