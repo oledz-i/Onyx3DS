@@ -1,0 +1,211 @@
+From 8d59d57b64626d474c8e2e509c1edd7977742c29 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 23:07:19 -0400
+Subject: [PATCH 11/11] dzn: avoid invalid calls the Xbox runtime removes the
+ device for
+
+- Without relaxed format casting, views outside the resource's typeless
+  family (Azahar binds an R32_UINT storage view of a mutable RGBA8 image)
+  are invalid; write a null descriptor of the same shape instead.
+- Lower sampling of integer textures to texel fetches (D3D12 can't sample
+  them; the validator refuses it and signing it is undefined behaviour).
+- Convert integer border colours to floats when CreateSampler2 is missing.
+- Don't put DENY_SHADER_RESOURCE on the buffer used to map memory.
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c     |  4 +-
+ src/microsoft/vulkan/dzn_descriptor_set.c | 88 ++++++++++++++++++++++-
+ src/microsoft/vulkan/dzn_device.c         |  3 +-
+ src/microsoft/vulkan/dzn_pipeline.c       | 20 ++++++
+ src/microsoft/vulkan/dzn_private.h        |  4 ++
+ 5 files changed, 114 insertions(+), 5 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index 90080b7..f16f8bf 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -1722,7 +1722,9 @@ dzn_cmd_buffer_get_rtv(struct dzn_cmd_buffer *cmdbuf,
+       rtve->key = key;
+       dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
+       rtve->handle = dzn_descriptor_heap_get_cpu_handle(heap, slot);
+-      { ID3D12Device1_CreateRenderTargetView(device->dev, image->res, desc, rtve->handle); DZN_TRACE("CreateRenderTargetView"); }
++      ID3D12Resource *rt_res =
++         dzn_view_format_allowed(device, image, desc->Format, "RTV") ? image->res : NULL;
++      { ID3D12Device1_CreateRenderTargetView(device->dev, rt_res, desc, rtve->handle); DZN_TRACE("CreateRenderTargetView"); }
+       he = _mesa_hash_table_insert(cmdbuf->rtvs.ht, &rtve->key, rtve);
+    } else {
+       rtve = he->data;
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index 143496d..ba9124f 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -995,9 +995,78 @@ dzn_descriptor_heap_write_sampler_desc(struct dzn_device *device,
+    if (device->dev11 && pdev->options14.AdvancedTextureOpsSupported)
+       { ID3D12Device11_CreateSampler2(device->dev11, &sampler->desc,
+                                     dzn_descriptor_heap_get_cpu_handle(heap, desc_offset)); DZN_TRACE("CreateSampler2"); }
+-   else
+-      { ID3D12Device1_CreateSampler(device->dev, (D3D12_SAMPLER_DESC *)&sampler->desc,
++   else {
++      /* ONYX: the plain call has no flags field, so an integer border colour
++       * would be read as floats (alpha 1 -> a denormal). Convert it. */
++      D3D12_SAMPLER_DESC desc;
++      memcpy(&desc, &sampler->desc, sizeof(desc));
++      if (sampler->desc.Flags & D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR) {
++         for (unsigned i = 0; i < 4; i++)
++            desc.BorderColor[i] = (float)sampler->desc.UintBorderColor[i];
++      }
++      { ID3D12Device1_CreateSampler(device->dev, &desc,
+                                   dzn_descriptor_heap_get_cpu_handle(heap, desc_offset)); DZN_TRACE("CreateSampler"); }
++   }
++}
++
++/* ONYX: without relaxed format casting (no Agility SDK on Xbox), D3D12 only
++ * allows views in the resource's own typeless family. A mutable RGBA8 image
++ * viewed as R32_UINT (Azahar's shadow storage view) is an invalid call, and
++ * the Xbox runtime removes the whole device for it. Detect that and write a
++ * null descriptor of the same shape instead. */
++static bool
++dzn_is_known_typeless_family(DXGI_FORMAT fmt)
++{
++   switch (fmt) {
++   case DXGI_FORMAT_R32G32B32A32_TYPELESS:
++   case DXGI_FORMAT_R32G32B32_TYPELESS:
++   case DXGI_FORMAT_R16G16B16A16_TYPELESS:
++   case DXGI_FORMAT_R32G32_TYPELESS:
++   case DXGI_FORMAT_R32G8X24_TYPELESS:
++   case DXGI_FORMAT_R10G10B10A2_TYPELESS:
++   case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++   case DXGI_FORMAT_R16G16_TYPELESS:
++   case DXGI_FORMAT_R32_TYPELESS:
++   case DXGI_FORMAT_R24G8_TYPELESS:
++   case DXGI_FORMAT_R8G8_TYPELESS:
++   case DXGI_FORMAT_R16_TYPELESS:
++   case DXGI_FORMAT_R8_TYPELESS:
++   case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++   case DXGI_FORMAT_B8G8R8X8_TYPELESS:
++      return true;
++   default:
++      return false;
++   }
++}
++
++bool
++dzn_view_format_allowed(const struct dzn_device *device, const struct dzn_image *image,
++                        DXGI_FORMAT view_format, const char *what)
++{
++   const struct dzn_physical_device *pdev =
++      container_of(device->vk.physical, struct dzn_physical_device, vk);
++   if (pdev->options12.RelaxedFormatCastingSupported || !image->res)
++      return true;
++
++   DXGI_FORMAT res_format = image->desc.Format;
++   if (view_format == DXGI_FORMAT_UNKNOWN || view_format == res_format)
++      return true;
++
++   DXGI_FORMAT res_family = dzn_get_typeless_dxgi_format(res_format);
++   DXGI_FORMAT view_family = dzn_get_typeless_dxgi_format(view_format);
++   if (!dzn_is_known_typeless_family(res_family) ||
++       !dzn_is_known_typeless_family(view_family) ||
++       res_family == view_family)
++      return true;
++
++   static unsigned warned;
++   if (warned < 4) {
++      warned++;
++      mesa_logw("dzn: %s view format %d can't be cast from resource format %d on this "
++                "GPU; using a null descriptor instead of an invalid call",
++                what, (int)view_format, (int)res_format);
++   }
++   return false;
+ }
+ 
+ void
+@@ -1012,7 +1081,20 @@ dzn_descriptor_heap_write_image_view_desc(struct dzn_device *device,
+    struct dzn_image *image = container_of(iview->vk.image, struct dzn_image, vk);
+ 
+    if (writeable) {
+-      { ID3D12Device1_CreateUnorderedAccessView(device->dev, image->res, NULL, &iview->uav_desc, view_handle); DZN_TRACE("CreateUnorderedAccessView"); }
++      ID3D12Resource *res =
++         dzn_view_format_allowed(device, image, iview->uav_desc.Format, "UAV") ? image->res : NULL;
++      { ID3D12Device1_CreateUnorderedAccessView(device->dev, res, NULL, &iview->uav_desc, view_handle); DZN_TRACE("CreateUnorderedAccessView"); }
++   } else if (!dzn_view_format_allowed(device, image, iview->srv_desc.Format, "SRV")) {
++      D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = iview->srv_desc;
++      if (cube_as_2darray &&
++          (srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBEARRAY ||
++           srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE)) {
++         memset(&srv_desc.Texture2DArray, 0, sizeof(srv_desc.Texture2DArray));
++         srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
++         srv_desc.Texture2DArray.MipLevels = 1;
++         srv_desc.Texture2DArray.ArraySize = 6;
++      }
++      { ID3D12Device1_CreateShaderResourceView(device->dev, NULL, &srv_desc, view_handle); DZN_TRACE("CreateShaderResourceView(null)"); }
+    } else if (cube_as_2darray &&
+               (iview->srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBEARRAY ||
+                iview->srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE)) {
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index ac67bfd..46f1b3a 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -2977,7 +2977,8 @@ dzn_device_memory_create(struct dzn_device *device,
+          res_desc.MipLevels = 1;
+          res_desc.SampleDesc.Count = 1;
+          res_desc.SampleDesc.Quality = 0;
+-         res_desc.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
++         /* ONYX: DENY_SHADER_RESOURCE is only valid with ALLOW_DEPTH_STENCIL. */
++         res_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+          res_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+          HRESULT hr = DZN_HR(device->dev, "CreatePlacedResource", ID3D12Device1_CreatePlacedResource(device->dev, mem->heap, 0, &res_desc,
+                                                          D3D12_RESOURCE_STATE_COMMON,
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 6449191..9a879c3 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include "dzn_private.h"
++#include "dxil_nir_lower_int_samplers.h"
+ 
+ #include "spirv/nir_spirv.h"
+ 
+@@ -273,6 +274,25 @@ dzn_pipeline_get_nir_shader(struct dzn_device *device,
+ 
+    dxil_spirv_nir_passes(*nir, &conf, metadata);
+ 
++   /* ONYX: D3D12 can't sample integer textures (the validator refuses
++    * sample_* returning ints, and the result is undefined if signed anyway).
++    * Turn them into texel fetches, clamped to the edge, at LOD 0. */
++   {
++      static dxil_wrap_sampler_state int_wrap[64];
++      static bool int_wrap_init;
++      if (!int_wrap_init) {
++         for (unsigned i = 0; i < ARRAY_SIZE(int_wrap); i++) {
++            int_wrap[i].max_lod = 1000.0f;
++            int_wrap[i].wrap[0] = int_wrap[i].wrap[1] = int_wrap[i].wrap[2] =
++               DXIL_TEX_WRAP_CLAMP_TO_EDGE;
++            int_wrap[i].is_int_sampler = 1;
++         }
++         int_wrap_init = true;
++      }
++      NIR_PASS(_, *nir, dxil_lower_sample_to_txf_for_integer_tex,
++               ARRAY_SIZE(int_wrap), int_wrap, NULL, 0.0f);
++   }
++
+    if (stage == MESA_SHADER_VERTEX) {
+       bool needs_conv = false;
+       for (uint32_t i = 0; i < MAX_VERTEX_GENERIC_ATTRIBS; i++) {
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index 6c91faf..46153e9 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -1374,4 +1374,8 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(dzn_pipeline_layout, vk.base, VkPipelineLayout, V
+ VK_DEFINE_NONDISP_HANDLE_CASTS(dzn_query_pool, base, VkQueryPool, VK_OBJECT_TYPE_QUERY_POOL)
+ VK_DEFINE_NONDISP_HANDLE_CASTS(dzn_sampler, base, VkSampler, VK_OBJECT_TYPE_SAMPLER)
+ 
++bool
++dzn_view_format_allowed(const struct dzn_device *device, const struct dzn_image *image,
++                        DXGI_FORMAT view_format, const char *what);
++
+ #endif /* DZN_PRIVATE_H */
+-- 
+2.43.0
+

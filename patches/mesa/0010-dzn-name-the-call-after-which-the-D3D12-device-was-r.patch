@@ -1,0 +1,987 @@
+From c1db8862e2be9d3796c87a9a58895d71b08495a4 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 23:05:57 -0400
+Subject: [PATCH 10/11] dzn: name the call after which the D3D12 device was
+ removed
+
+Xbox removes the device for invalid calls that return void or S_OK, so the
+first failing call is far from the culprit. Every void D3D12 call, every
+DZN_HR call and the start of most non-command entrypoints now check the
+removed reason (each call while a game starts, then every 16th) and log the
+call plus the 15 before it.
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c     | 27 +++++-----
+ src/microsoft/vulkan/dzn_descriptor_set.c | 40 +++++++++------
+ src/microsoft/vulkan/dzn_device.c         | 53 ++++++++++++++++++--
+ src/microsoft/vulkan/dzn_image.c          |  9 ++++
+ src/microsoft/vulkan/dzn_pipeline.c       |  3 ++
+ src/microsoft/vulkan/dzn_private.h        |  9 ++++
+ src/microsoft/vulkan/dzn_query.c          |  6 ++-
+ src/microsoft/vulkan/dzn_util.c           | 61 +++++++++++++++++++++++
+ 8 files changed, 177 insertions(+), 31 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index 8cf1d50..90080b7 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -691,6 +691,7 @@ dzn_AllocateCommandBuffers(VkDevice device,
+                            const VkCommandBufferAllocateInfo *pAllocateInfo,
+                            VkCommandBuffer *pCommandBuffers)
+ {
++   DZN_TRACE("vkAllocateCommandBuffers");
+    VK_FROM_HANDLE(dzn_device, dev, device);
+    VkResult result = VK_SUCCESS;
+    uint32_t i;
+@@ -716,6 +717,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+                        const VkCommandBufferBeginInfo *info)
+ {
++   DZN_TRACE("vkBeginCommandBuffer");
+    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+    vk_command_buffer_begin(&cmdbuf->vk, info);
+    if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+@@ -1072,6 +1074,7 @@ dzn_cmd_buffer_gather_queries(struct dzn_cmd_buffer *cmdbuf)
+ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_EndCommandBuffer(VkCommandBuffer commandBuffer)
+ {
++   DZN_TRACE("vkEndCommandBuffer");
+    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+ 
+    if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
+@@ -1690,7 +1693,7 @@ dzn_cmd_buffer_get_dsv(struct dzn_cmd_buffer *cmdbuf,
+       dsve->key = key;
+       dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->dsvs.pool, device, 1, &heap, &slot);
+       dsve->handle = dzn_descriptor_heap_get_cpu_handle(heap, slot);
+-      ID3D12Device1_CreateDepthStencilView(device->dev, image->res, desc, dsve->handle);
++      { ID3D12Device1_CreateDepthStencilView(device->dev, image->res, desc, dsve->handle); DZN_TRACE("CreateDepthStencilView"); }
+       _mesa_hash_table_insert(cmdbuf->dsvs.ht, &dsve->key, dsve);
+    } else {
+       dsve = he->data;
+@@ -1719,7 +1722,7 @@ dzn_cmd_buffer_get_rtv(struct dzn_cmd_buffer *cmdbuf,
+       rtve->key = key;
+       dzn_descriptor_heap_pool_alloc_slots(&cmdbuf->rtvs.pool, device, 1, &heap, &slot);
+       rtve->handle = dzn_descriptor_heap_get_cpu_handle(heap, slot);
+-      ID3D12Device1_CreateRenderTargetView(device->dev, image->res, desc, rtve->handle);
++      { ID3D12Device1_CreateRenderTargetView(device->dev, image->res, desc, rtve->handle); DZN_TRACE("CreateRenderTargetView"); }
+       he = _mesa_hash_table_insert(cmdbuf->rtvs.ht, &rtve->key, rtve);
+    } else {
+       rtve = he->data;
+@@ -1745,7 +1748,7 @@ dzn_cmd_buffer_get_null_rtv(struct dzn_cmd_buffer *cmdbuf)
+       desc.Texture2D.MipSlice = 0;
+       desc.Texture2D.PlaneSlice = 0;
+ 
+-      ID3D12Device1_CreateRenderTargetView(device->dev, NULL, &desc, cmdbuf->null_rtv);
++      { ID3D12Device1_CreateRenderTargetView(device->dev, NULL, &desc, cmdbuf->null_rtv); DZN_TRACE("CreateRenderTargetView"); }
+    }
+ 
+    return cmdbuf->null_rtv;
+@@ -1893,7 +1896,7 @@ dzn_cmd_buffer_clear_rects_with_copy(struct dzn_cmd_buffer *cmdbuf,
+    for (uint32_t i = 0; i < res_size; i += fill_step)
+       memcpy(&cpu_ptr[i], buf, fill_step);
+ 
+-   ID3D12Resource_Unmap(src_res, 0, NULL);
++   { ID3D12Resource_Unmap(src_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    D3D12_TEXTURE_COPY_LOCATION src_loc = {
+       .pResource = src_res,
+@@ -2042,7 +2045,7 @@ dzn_cmd_buffer_clear_ranges_with_copy(struct dzn_cmd_buffer *cmdbuf,
+    for (uint32_t i = 0; i < res_size; i += fill_step)
+       memcpy(&cpu_ptr[i], buf, fill_step);
+ 
+-   ID3D12Resource_Unmap(src_res, 0, NULL);
++   { ID3D12Resource_Unmap(src_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    D3D12_TEXTURE_COPY_LOCATION src_loc = {
+       .pResource = src_res,
+@@ -3419,7 +3422,7 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+             }
+          }
+ 
+-         ID3D12Resource_Unmap(dynamic_buffer_buf, 0, NULL);
++         { ID3D12Resource_Unmap(dynamic_buffer_buf, 0, NULL); DZN_TRACE("Unmap"); }
+          if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+             ID3D12GraphicsCommandList1_SetGraphicsRootShaderResourceView(cmdbuf->cmdlist,
+                                                                          pipeline->root.dynamic_buffer_bindless_param_idx,
+@@ -4357,8 +4360,8 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+          .MinLOD = 0,
+          .MaxLOD = D3D12_FLOAT32_MAX,
+       };
+-      ID3D12Device4_CreateSampler(device->dev, &sampler_desc,
+-         dzn_descriptor_heap_get_cpu_handle(*sampler_heap, *sampler_heap_slot));
++      { ID3D12Device4_CreateSampler(device->dev, &sampler_desc,
++         dzn_descriptor_heap_get_cpu_handle(*sampler_heap, *sampler_heap_slot)); DZN_TRACE("CreateSampler"); }
+    }
+ 
+    if (*view_heap != cmdbuf->state.heaps[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV] ||
+@@ -4532,7 +4535,7 @@ dzn_CmdFillBuffer(VkCommandBuffer commandBuffer,
+    for (uint32_t i = 0; i < size / 4; i++)
+       cpu_ptr[i] = data;
+ 
+-   ID3D12Resource_Unmap(src_res, 0, NULL);
++   { ID3D12Resource_Unmap(src_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset, src_res, src_offset, size);
+ }
+@@ -4571,8 +4574,8 @@ dzn_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
+ 
+    void *cpu_ptr;
+    ID3D12Resource_Map(src_res, 0, NULL, &cpu_ptr);
+-   memcpy((uint8_t *)cpu_ptr + src_offset, data, size),
+-   ID3D12Resource_Unmap(src_res, 0, NULL);
++   memcpy((uint8_t *)cpu_ptr + src_offset, data, size);
++   { ID3D12Resource_Unmap(src_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset, src_res, src_offset, size);
+ }
+@@ -5370,7 +5373,7 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
+       ID3D12Resource_Map(draw_buf, 0, NULL, &cpu_ptr);
+       memcpy((uint8_t *)cpu_ptr + offset, &params, sizeof(params));
+ 
+-      ID3D12Resource_Unmap(draw_buf, 0, NULL);
++      { ID3D12Resource_Unmap(draw_buf, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+       dzn_cmd_buffer_indirect_draw(cmdbuf, draw_buf, offset, NULL, 0, 1, sizeof(params), true);
+       return;
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index fc25dde..143496d 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -507,6 +507,7 @@ dzn_CreateDescriptorSetLayout(VkDevice device,
+                               const VkAllocationCallbacks *pAllocator,
+                               VkDescriptorSetLayout *pSetLayout)
+ {
++   DZN_TRACE("vkCreateDescriptorSetLayout");
+    return dzn_descriptor_set_layout_create(dzn_device_from_handle(device),
+                                            pCreateInfo, pAllocator, pSetLayout);
+ }
+@@ -516,6 +517,7 @@ dzn_GetDescriptorSetLayoutSupport(VkDevice _device,
+                                   const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+                                   VkDescriptorSetLayoutSupport *pSupport)
+ {
++   DZN_TRACE("vkGetDescriptorSetLayoutSupport");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    const VkDescriptorSetLayoutBinding *bindings = pCreateInfo->pBindings;
+    uint32_t sampler_count = 0, other_desc_count = 0;
+@@ -912,6 +914,7 @@ dzn_CreatePipelineLayout(VkDevice device,
+                          const VkAllocationCallbacks *pAllocator,
+                          VkPipelineLayout *pPipelineLayout)
+ {
++   DZN_TRACE("vkCreatePipelineLayout");
+    return dzn_pipeline_layout_create(dzn_device_from_handle(device),
+                                      pCreateInfo, pAllocator, pPipelineLayout);
+ }
+@@ -990,11 +993,11 @@ dzn_descriptor_heap_write_sampler_desc(struct dzn_device *device,
+ {
+    struct dzn_physical_device *pdev = container_of(device->vk.physical, struct dzn_physical_device, vk);
+    if (device->dev11 && pdev->options14.AdvancedTextureOpsSupported)
+-      ID3D12Device11_CreateSampler2(device->dev11, &sampler->desc,
+-                                    dzn_descriptor_heap_get_cpu_handle(heap, desc_offset));
++      { ID3D12Device11_CreateSampler2(device->dev11, &sampler->desc,
++                                    dzn_descriptor_heap_get_cpu_handle(heap, desc_offset)); DZN_TRACE("CreateSampler2"); }
+    else
+-      ID3D12Device1_CreateSampler(device->dev, (D3D12_SAMPLER_DESC *)&sampler->desc,
+-                                  dzn_descriptor_heap_get_cpu_handle(heap, desc_offset));
++      { ID3D12Device1_CreateSampler(device->dev, (D3D12_SAMPLER_DESC *)&sampler->desc,
++                                  dzn_descriptor_heap_get_cpu_handle(heap, desc_offset)); DZN_TRACE("CreateSampler"); }
+ }
+ 
+ void
+@@ -1009,7 +1012,7 @@ dzn_descriptor_heap_write_image_view_desc(struct dzn_device *device,
+    struct dzn_image *image = container_of(iview->vk.image, struct dzn_image, vk);
+ 
+    if (writeable) {
+-      ID3D12Device1_CreateUnorderedAccessView(device->dev, image->res, NULL, &iview->uav_desc, view_handle);
++      { ID3D12Device1_CreateUnorderedAccessView(device->dev, image->res, NULL, &iview->uav_desc, view_handle); DZN_TRACE("CreateUnorderedAccessView"); }
+    } else if (cube_as_2darray &&
+               (iview->srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBEARRAY ||
+                iview->srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE)) {
+@@ -1035,9 +1038,9 @@ dzn_descriptor_heap_write_image_view_desc(struct dzn_device *device,
+          srv_desc.Texture2DArray.ArraySize = 6;
+       }
+ 
+-      ID3D12Device1_CreateShaderResourceView(device->dev, image->res, &srv_desc, view_handle);
++      { ID3D12Device1_CreateShaderResourceView(device->dev, image->res, &srv_desc, view_handle); DZN_TRACE("CreateShaderResourceView"); }
+    } else {
+-      ID3D12Device1_CreateShaderResourceView(device->dev, image->res, &iview->srv_desc, view_handle);
++      { ID3D12Device1_CreateShaderResourceView(device->dev, image->res, &iview->srv_desc, view_handle); DZN_TRACE("CreateShaderResourceView"); }
+    }
+ }
+ 
+@@ -1052,9 +1055,9 @@ dzn_descriptor_heap_write_buffer_view_desc(struct dzn_device *device,
+       dzn_descriptor_heap_get_cpu_handle(heap, desc_offset);
+ 
+    if (writeable)
+-      ID3D12Device1_CreateUnorderedAccessView(device->dev, bview->buffer->res, NULL, &bview->uav_desc, view_handle);
++      { ID3D12Device1_CreateUnorderedAccessView(device->dev, bview->buffer->res, NULL, &bview->uav_desc, view_handle); DZN_TRACE("CreateUnorderedAccessView"); }
+    else
+-      ID3D12Device1_CreateShaderResourceView(device->dev, bview->buffer->res, &bview->srv_desc, view_handle);
++      { ID3D12Device1_CreateShaderResourceView(device->dev, bview->buffer->res, &bview->srv_desc, view_handle); DZN_TRACE("CreateShaderResourceView"); }
+ }
+ 
+ void
+@@ -1079,7 +1082,7 @@ dzn_descriptor_heap_write_buffer_desc(struct dzn_device *device,
+          .BufferLocation = info->buffer->gpuva + info->offset,
+          .SizeInBytes = MIN2(ALIGN_POT(size, 256), D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 4 * sizeof(float)),
+       };
+-      ID3D12Device1_CreateConstantBufferView(device->dev, &cbv_desc, view_handle);
++      { ID3D12Device1_CreateConstantBufferView(device->dev, &cbv_desc, view_handle); DZN_TRACE("CreateConstantBufferView"); }
+    } else if (writeable) {
+       D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {
+          .Format = DXGI_FORMAT_R32_TYPELESS,
+@@ -1090,7 +1093,7 @@ dzn_descriptor_heap_write_buffer_desc(struct dzn_device *device,
+             .Flags = D3D12_BUFFER_UAV_FLAG_RAW,
+          },
+       };
+-      ID3D12Device1_CreateUnorderedAccessView(device->dev, info->buffer->res, NULL, &uav_desc, view_handle);
++      { ID3D12Device1_CreateUnorderedAccessView(device->dev, info->buffer->res, NULL, &uav_desc, view_handle); DZN_TRACE("CreateUnorderedAccessView"); }
+    } else {
+       D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {
+          .Format = DXGI_FORMAT_R32_TYPELESS,
+@@ -1102,7 +1105,7 @@ dzn_descriptor_heap_write_buffer_desc(struct dzn_device *device,
+             .Flags = D3D12_BUFFER_SRV_FLAG_RAW,
+          },
+       };
+-      ID3D12Device1_CreateShaderResourceView(device->dev, info->buffer->res, &srv_desc, view_handle);
++      { ID3D12Device1_CreateShaderResourceView(device->dev, info->buffer->res, &srv_desc, view_handle); DZN_TRACE("CreateShaderResourceView"); }
+    }
+ }
+ 
+@@ -1323,10 +1326,10 @@ dzn_descriptor_heap_copy(struct dzn_device *device,
+    D3D12_CPU_DESCRIPTOR_HANDLE src_handle =
+       dzn_descriptor_heap_get_cpu_handle(src_heap, src_offset);
+ 
+-   ID3D12Device1_CopyDescriptorsSimple(device->dev, desc_count,
++   { ID3D12Device1_CopyDescriptorsSimple(device->dev, desc_count,
+                                        dst_handle,
+                                        src_handle,
+-                                       type);
++                                       type); DZN_TRACE("CopyDescriptorsSimple"); }
+ }
+ 
+ struct dzn_descriptor_set_ptr {
+@@ -1873,6 +1876,7 @@ dzn_CreateDescriptorPool(VkDevice device,
+                          const VkAllocationCallbacks *pAllocator,
+                          VkDescriptorPool *pDescriptorPool)
+ {
++   DZN_TRACE("vkCreateDescriptorPool");
+    return dzn_descriptor_pool_create(dzn_device_from_handle(device),
+                                      pCreateInfo, pAllocator, pDescriptorPool);
+ }
+@@ -1882,6 +1886,7 @@ dzn_DestroyDescriptorPool(VkDevice device,
+                           VkDescriptorPool descriptorPool,
+                           const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyDescriptorPool");
+    dzn_descriptor_pool_destroy(dzn_descriptor_pool_from_handle(descriptorPool),
+                                pAllocator);
+ }
+@@ -1891,6 +1896,7 @@ dzn_ResetDescriptorPool(VkDevice device,
+                         VkDescriptorPool descriptorPool,
+                         VkDescriptorPoolResetFlags flags)
+ {
++   DZN_TRACE("vkResetDescriptorPool");
+    VK_FROM_HANDLE(dzn_descriptor_pool, pool, descriptorPool);
+ 
+    for (uint32_t s = 0; s < pool->set_count; s++)
+@@ -2014,6 +2020,7 @@ dzn_AllocateDescriptorSets(VkDevice dev,
+                            const VkDescriptorSetAllocateInfo *pAllocateInfo,
+                            VkDescriptorSet *pDescriptorSets)
+ {
++   DZN_TRACE("vkAllocateDescriptorSets");
+    VK_FROM_HANDLE(dzn_descriptor_pool, pool, pAllocateInfo->descriptorPool);
+    VK_FROM_HANDLE(dzn_device, device, dev);
+ 
+@@ -2100,6 +2107,7 @@ dzn_FreeDescriptorSets(VkDevice dev,
+                        uint32_t count,
+                        const VkDescriptorSet *pDescriptorSets)
+ {
++   DZN_TRACE("vkFreeDescriptorSets");
+    VK_FROM_HANDLE(dzn_descriptor_pool, pool, descriptorPool);
+ 
+    for (uint32_t s = 0; s < count; s++) {
+@@ -2364,6 +2372,7 @@ dzn_UpdateDescriptorSets(VkDevice _device,
+                          uint32_t descriptorCopyCount,
+                          const VkCopyDescriptorSet *pDescriptorCopies)
+ {
++   DZN_TRACE("vkUpdateDescriptorSets");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    for (unsigned i = 0; i < descriptorWriteCount; i++)
+       dzn_descriptor_set_write(device, &pDescriptorWrites[i]);
+@@ -2495,6 +2504,7 @@ dzn_CreateDescriptorUpdateTemplate(VkDevice device,
+                                    const VkAllocationCallbacks *pAllocator,
+                                    VkDescriptorUpdateTemplate *pDescriptorUpdateTemplate)
+ {
++   DZN_TRACE("vkCreateDescriptorUpdateTemplate");
+    return dzn_descriptor_update_template_create(dzn_device_from_handle(device),
+                                                 pCreateInfo, pAllocator,
+                                                 pDescriptorUpdateTemplate);
+@@ -2505,6 +2515,7 @@ dzn_DestroyDescriptorUpdateTemplate(VkDevice device,
+                                     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+                                     const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyDescriptorUpdateTemplate");
+    dzn_descriptor_update_template_destroy(dzn_descriptor_update_template_from_handle(descriptorUpdateTemplate),
+                                           pAllocator);
+ }
+@@ -2525,6 +2536,7 @@ dzn_UpdateDescriptorSetWithTemplate(VkDevice _device,
+                                     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+                                     const void *pData)
+ {
++   DZN_TRACE("vkUpdateDescriptorSetWithTemplate");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    VK_FROM_HANDLE(dzn_descriptor_set, set, descriptorSet);
+    VK_FROM_HANDLE(dzn_descriptor_update_template, templ, descriptorUpdateTemplate);
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index ee9a3a4..ac67bfd 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -350,6 +350,7 @@ VKAPI_ATTR void VKAPI_CALL
+ dzn_DestroyInstance(VkInstance instance,
+                     const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyInstance");
+    dzn_instance_destroy(dzn_instance_from_handle(instance), pAllocator);
+ }
+ 
+@@ -1634,6 +1635,7 @@ dzn_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
+                                        VkFormat format,
+                                        VkFormatProperties2 *pFormatProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceFormatProperties2");
+    VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
+ 
+    dzn_physical_device_get_format_properties(pdev, format, pFormatProperties);
+@@ -1644,6 +1646,7 @@ dzn_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
+                                             const VkPhysicalDeviceImageFormatInfo2 *info,
+                                             VkImageFormatProperties2 *props)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceImageFormatProperties2");
+    VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
+ 
+    return dzn_physical_device_get_image_format_properties(pdev, info, props);
+@@ -1658,6 +1661,7 @@ dzn_GetPhysicalDeviceImageFormatProperties(VkPhysicalDevice physicalDevice,
+                                            VkImageCreateFlags createFlags,
+                                            VkImageFormatProperties *pImageFormatProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceImageFormatProperties");
+    const VkPhysicalDeviceImageFormatInfo2 info = {
+       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+       .format = format,
+@@ -1686,6 +1690,7 @@ dzn_GetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice physicalDevice
+                                                  uint32_t *pPropertyCount,
+                                                  VkSparseImageFormatProperties *pProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceSparseImageFormatProperties");
+    *pPropertyCount = 0;
+ }
+ 
+@@ -1695,6 +1700,7 @@ dzn_GetPhysicalDeviceSparseImageFormatProperties2(VkPhysicalDevice physicalDevic
+                                                   uint32_t *pPropertyCount,
+                                                   VkSparseImageFormatProperties2 *pProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceSparseImageFormatProperties2");
+    *pPropertyCount = 0;
+ }
+ 
+@@ -1703,6 +1709,7 @@ dzn_GetPhysicalDeviceExternalBufferProperties(VkPhysicalDevice physicalDevice,
+                                               const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
+                                               VkExternalBufferProperties *pExternalBufferProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceExternalBufferProperties");
+ #if defined(_WIN32)
+    VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
+ #endif
+@@ -1895,6 +1902,7 @@ dzn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+                    const VkAllocationCallbacks *pAllocator,
+                    VkInstance *pInstance)
+ {
++   DZN_TRACE("vkCreateInstance");
+    return dzn_instance_create(pCreateInfo, pAllocator, pInstance);
+ }
+ 
+@@ -1948,6 +1956,7 @@ dzn_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
+                                             uint32_t *pQueueFamilyPropertyCount,
+                                             VkQueueFamilyProperties2 *pQueueFamilyProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceQueueFamilyProperties2");
+    VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
+    VK_OUTARRAY_MAKE_TYPED(VkQueueFamilyProperties2, out,
+                           pQueueFamilyProperties, pQueueFamilyPropertyCount);
+@@ -1967,6 +1976,7 @@ VKAPI_ATTR void VKAPI_CALL
+ dzn_GetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice,
+                                       VkPhysicalDeviceMemoryProperties *pMemoryProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceMemoryProperties");
+    VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
+ 
+    *pMemoryProperties = pdev->memory;
+@@ -1976,6 +1986,7 @@ VKAPI_ATTR void VKAPI_CALL
+ dzn_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
+                                        VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
+ {
++   DZN_TRACE("vkGetPhysicalDeviceMemoryProperties2");
+    dzn_GetPhysicalDeviceMemoryProperties(physicalDevice,
+                                          &pMemoryProperties->memoryProperties);
+ 
+@@ -2113,7 +2124,7 @@ dzn_queue_submit(struct vk_queue *q,
+       }
+    }
+ 
+-   ID3D12CommandQueue_ExecuteCommandLists(queue->cmdqueue, info->command_buffer_count, cmdlists);
++   { ID3D12CommandQueue_ExecuteCommandLists(queue->cmdqueue, info->command_buffer_count, cmdlists); DZN_TRACE("ExecuteCommandLists"); }
+ 
+    static uint32_t submission_count;
+    uint32_t submission = p_atomic_inc_return(&submission_count);
+@@ -2242,7 +2253,7 @@ dzn_device_query_init(struct dzn_device *device)
+ 
+    memset(queries_ref + DZN_QUERY_REFS_ALL_ONES_OFFSET, 0xff, DZN_QUERY_REFS_SECTION_SIZE);
+    memset(queries_ref + DZN_QUERY_REFS_ALL_ZEROS_OFFSET, 0x0, DZN_QUERY_REFS_SECTION_SIZE);
+-   ID3D12Resource_Unmap(device->queries.refs, 0, NULL);
++   { ID3D12Resource_Unmap(device->queries.refs, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    return VK_SUCCESS;
+ }
+@@ -2381,6 +2392,7 @@ dzn_device_create(struct dzn_physical_device *pdev,
+    device->dev = pdev->dev;
+ 
+    ID3D12Device1_AddRef(device->dev);
++   dzn_trace_set_device(device->dev);
+ 
+    if (pdev->dev10) {
+       device->dev10 = pdev->dev10;
+@@ -2575,6 +2587,7 @@ dzn_CreateDevice(VkPhysicalDevice physicalDevice,
+                  const VkAllocationCallbacks *pAllocator,
+                  VkDevice *pDevice)
+ {
++   DZN_TRACE("vkCreateDevice");
+    VK_FROM_HANDLE(dzn_physical_device, physical_device, physicalDevice);
+    VkResult result;
+ 
+@@ -2603,6 +2616,7 @@ VKAPI_ATTR void VKAPI_CALL
+ dzn_DestroyDevice(VkDevice dev,
+                   const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyDevice");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+ 
+    device->vk.dispatch_table.DeviceWaitIdle(dev);
+@@ -2620,7 +2634,7 @@ dzn_device_memory_destroy(struct dzn_device_memory *mem,
+    struct dzn_device *device = container_of(mem->base.device, struct dzn_device, vk);
+ 
+    if (mem->map && mem->map_res)
+-      ID3D12Resource_Unmap(mem->map_res, 0, NULL);
++      { ID3D12Resource_Unmap(mem->map_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    if (mem->map_res)
+       ID3D12Resource_Release(mem->map_res);
+@@ -3009,6 +3023,7 @@ dzn_AllocateMemory(VkDevice device,
+                    const VkAllocationCallbacks *pAllocator,
+                    VkDeviceMemory *pMem)
+ {
++   DZN_TRACE("vkAllocateMemory");
+    return dzn_device_memory_create(dzn_device_from_handle(device),
+                                    pAllocateInfo, pAllocator, pMem);
+ }
+@@ -3018,6 +3033,7 @@ dzn_FreeMemory(VkDevice device,
+                VkDeviceMemory mem,
+                const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkFreeMemory");
+    dzn_device_memory_destroy(dzn_device_memory_from_handle(mem), pAllocator);
+ }
+ 
+@@ -3029,6 +3045,7 @@ dzn_MapMemory(VkDevice _device,
+               VkMemoryMapFlags flags,
+               void **ppData)
+ {
++   DZN_TRACE("vkMapMemory");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    VK_FROM_HANDLE(dzn_device_memory, mem, _memory);
+ 
+@@ -3075,6 +3092,7 @@ VKAPI_ATTR void VKAPI_CALL
+ dzn_UnmapMemory(VkDevice _device,
+                 VkDeviceMemory _memory)
+ {
++   DZN_TRACE("vkUnmapMemory");
+    VK_FROM_HANDLE(dzn_device_memory, mem, _memory);
+ 
+    if (mem == NULL)
+@@ -3083,7 +3101,7 @@ dzn_UnmapMemory(VkDevice _device,
+    if (!mem->map_res)
+       return;
+ 
+-   ID3D12Resource_Unmap(mem->map_res, 0, NULL);
++   { ID3D12Resource_Unmap(mem->map_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    mem->map = NULL;
+    mem->map_size = 0;
+@@ -3094,6 +3112,7 @@ dzn_FlushMappedMemoryRanges(VkDevice _device,
+                             uint32_t memoryRangeCount,
+                             const VkMappedMemoryRange *pMemoryRanges)
+ {
++   DZN_TRACE("vkFlushMappedMemoryRanges");
+    return VK_SUCCESS;
+ }
+ 
+@@ -3102,6 +3121,7 @@ dzn_InvalidateMappedMemoryRanges(VkDevice _device,
+                                  uint32_t memoryRangeCount,
+                                  const VkMappedMemoryRange *pMemoryRanges)
+ {
++   DZN_TRACE("vkInvalidateMappedMemoryRanges");
+    return VK_SUCCESS;
+ }
+ 
+@@ -3327,6 +3347,7 @@ dzn_CreateBuffer(VkDevice device,
+                  const VkAllocationCallbacks *pAllocator,
+                  VkBuffer *pBuffer)
+ {
++   DZN_TRACE("vkCreateBuffer");
+    return dzn_buffer_create(dzn_device_from_handle(device),
+                             pCreateInfo, pAllocator, pBuffer);
+ }
+@@ -3336,6 +3357,7 @@ dzn_DestroyBuffer(VkDevice device,
+                   VkBuffer buffer,
+                   const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyBuffer");
+    dzn_buffer_destroy(dzn_buffer_from_handle(buffer), pAllocator);
+ }
+ 
+@@ -3344,6 +3366,7 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
+                                  const VkBufferMemoryRequirementsInfo2 *pInfo,
+                                  VkMemoryRequirements2 *pMemoryRequirements)
+ {
++   DZN_TRACE("vkGetBufferMemoryRequirements2");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+    VK_FROM_HANDLE(dzn_buffer, buffer, pInfo->buffer);
+    struct dzn_physical_device *pdev =
+@@ -3384,6 +3407,7 @@ dzn_BindBufferMemory2(VkDevice _device,
+                       uint32_t bindInfoCount,
+                       const VkBindBufferMemoryInfo *pBindInfos)
+ {
++   DZN_TRACE("vkBindBufferMemory2");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+ 
+    for (uint32_t i = 0; i < bindInfoCount; i++) {
+@@ -3488,6 +3512,7 @@ dzn_CreateEvent(VkDevice device,
+                 const VkAllocationCallbacks *pAllocator,
+                 VkEvent *pEvent)
+ {
++   DZN_TRACE("vkCreateEvent");
+    return dzn_event_create(dzn_device_from_handle(device),
+                            pCreateInfo, pAllocator, pEvent);
+ }
+@@ -3497,6 +3522,7 @@ dzn_DestroyEvent(VkDevice device,
+                  VkEvent event,
+                  const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyEvent");
+    dzn_event_destroy(dzn_event_from_handle(event), pAllocator);
+ }
+ 
+@@ -3504,6 +3530,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_ResetEvent(VkDevice dev,
+                VkEvent evt)
+ {
++   DZN_TRACE("vkResetEvent");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+    VK_FROM_HANDLE(dzn_event, event, evt);
+ 
+@@ -3517,6 +3544,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_SetEvent(VkDevice dev,
+              VkEvent evt)
+ {
++   DZN_TRACE("vkSetEvent");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+    VK_FROM_HANDLE(dzn_event, event, evt);
+ 
+@@ -3530,6 +3558,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_GetEventStatus(VkDevice device,
+                    VkEvent evt)
+ {
++   DZN_TRACE("vkGetEventStatus");
+    VK_FROM_HANDLE(dzn_event, event, evt);
+ 
+    return ID3D12Fence_GetCompletedValue(event->fence) == 0 ?
+@@ -3541,6 +3570,7 @@ dzn_GetDeviceMemoryCommitment(VkDevice device,
+                               VkDeviceMemory memory,
+                               VkDeviceSize *pCommittedMemoryInBytes)
+ {
++   DZN_TRACE("vkGetDeviceMemoryCommitment");
+    VK_FROM_HANDLE(dzn_device_memory, mem, memory);
+ 
+    // TODO: find if there's a way to query/track actual heap residency
+@@ -3553,6 +3583,7 @@ dzn_QueueBindSparse(VkQueue queue,
+                     const VkBindSparseInfo *pBindInfo,
+                     VkFence fence)
+ {
++   DZN_TRACE("vkQueueBindSparse");
+    // FIXME: add proper implem
+    dzn_stub();
+    return VK_SUCCESS;
+@@ -3706,6 +3737,7 @@ dzn_CreateSampler(VkDevice device,
+                   const VkAllocationCallbacks *pAllocator,
+                   VkSampler *pSampler)
+ {
++   DZN_TRACE("vkCreateSampler");
+    return dzn_sampler_create(dzn_device_from_handle(device),
+                              pCreateInfo, pAllocator, pSampler);
+ }
+@@ -3715,6 +3747,7 @@ dzn_DestroySampler(VkDevice device,
+                    VkSampler sampler,
+                    const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroySampler");
+    dzn_sampler_destroy(dzn_sampler_from_handle(sampler), pAllocator);
+ }
+ 
+@@ -3758,6 +3791,7 @@ dzn_GetDeviceGroupPeerMemoryFeatures(VkDevice device,
+                                      uint32_t remoteDeviceIndex,
+                                      VkPeerMemoryFeatureFlags *pPeerMemoryFeatures)
+ {
++   DZN_TRACE("vkGetDeviceGroupPeerMemoryFeatures");
+    *pPeerMemoryFeatures = 0;
+ }
+ 
+@@ -3767,6 +3801,7 @@ dzn_GetImageSparseMemoryRequirements2(VkDevice device,
+                                       uint32_t *pSparseMemoryRequirementCount,
+                                       VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
+ {
++   DZN_TRACE("vkGetImageSparseMemoryRequirements2");
+    *pSparseMemoryRequirementCount = 0;
+ }
+ 
+@@ -3776,6 +3811,7 @@ dzn_CreateSamplerYcbcrConversion(VkDevice device,
+                                  const VkAllocationCallbacks *pAllocator,
+                                  VkSamplerYcbcrConversion *pYcbcrConversion)
+ {
++   DZN_TRACE("vkCreateSamplerYcbcrConversion");
+    UNREACHABLE("Ycbcr sampler conversion is not supported");
+    return VK_SUCCESS;
+ }
+@@ -3785,6 +3821,7 @@ dzn_DestroySamplerYcbcrConversion(VkDevice device,
+                                   VkSamplerYcbcrConversion YcbcrConversion,
+                                   const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroySamplerYcbcrConversion");
+    UNREACHABLE("Ycbcr sampler conversion is not supported");
+ }
+ 
+@@ -3792,6 +3829,7 @@ VKAPI_ATTR VkDeviceAddress VKAPI_CALL
+ dzn_GetBufferDeviceAddress(VkDevice device,
+                            const VkBufferDeviceAddressInfo* pInfo)
+ {
++   DZN_TRACE("vkGetBufferDeviceAddress");
+    struct dzn_buffer *buffer = dzn_buffer_from_handle(pInfo->buffer);
+ 
+    /* Insert a pointer tag so we never return null */
+@@ -3802,6 +3840,7 @@ VKAPI_ATTR uint64_t VKAPI_CALL
+ dzn_GetBufferOpaqueCaptureAddress(VkDevice device,
+                                   const VkBufferDeviceAddressInfo *pInfo)
+ {
++   DZN_TRACE("vkGetBufferOpaqueCaptureAddress");
+    return 0;
+ }
+ 
+@@ -3809,6 +3848,7 @@ VKAPI_ATTR uint64_t VKAPI_CALL
+ dzn_GetDeviceMemoryOpaqueCaptureAddress(VkDevice device,
+                                         const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo)
+ {
++   DZN_TRACE("vkGetDeviceMemoryOpaqueCaptureAddress");
+    return 0;
+ }
+ 
+@@ -3818,6 +3858,7 @@ dzn_GetMemoryWin32HandleKHR(VkDevice device,
+                             const VkMemoryGetWin32HandleInfoKHR *pGetWin32HandleInfo,
+                             HANDLE *pHandle)
+ {
++   DZN_TRACE("vkGetMemoryWin32HandleKHR");
+    VK_FROM_HANDLE(dzn_device_memory, mem, pGetWin32HandleInfo->memory);
+    if (!mem->export_handle)
+       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+@@ -3841,6 +3882,7 @@ dzn_GetMemoryFdKHR(VkDevice device,
+                    const VkMemoryGetFdInfoKHR *pGetFdInfo,
+                    int *pFd)
+ {
++   DZN_TRACE("vkGetMemoryFdKHR");
+    VK_FROM_HANDLE(dzn_device_memory, mem, pGetFdInfo->memory);
+    if (!mem->export_handle)
+       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+@@ -3865,6 +3907,7 @@ dzn_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
+                                       HANDLE handle,
+                                       VkMemoryWin32HandlePropertiesKHR *pProperties)
+ {
++   DZN_TRACE("vkGetMemoryWin32HandlePropertiesKHR");
+ #else
+ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_GetMemoryFdPropertiesKHR(VkDevice _device,
+@@ -3872,6 +3915,7 @@ dzn_GetMemoryFdPropertiesKHR(VkDevice _device,
+                              int fd,
+                              VkMemoryFdPropertiesKHR *pProperties)
+ {
++   DZN_TRACE("vkGetMemoryFdPropertiesKHR");
+    HANDLE handle = (HANDLE)(intptr_t)fd;
+ #endif
+    VK_FROM_HANDLE(dzn_device, device, _device);
+@@ -3942,6 +3986,7 @@ dzn_GetMemoryHostPointerPropertiesEXT(VkDevice _device,
+                                       const void *pHostPointer,
+                                       VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
+ {
++   DZN_TRACE("vkGetMemoryHostPointerPropertiesEXT");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+ 
+    if (!device->dev13)
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index 7e1d683..dce5354 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -780,6 +780,7 @@ dzn_CreateImage(VkDevice device,
+                 const VkAllocationCallbacks *pAllocator,
+                 VkImage *pImage)
+ {
++   DZN_TRACE("vkCreateImage");
+    return dzn_image_create(dzn_device_from_handle(device),
+                            pCreateInfo, pAllocator, pImage);
+ }
+@@ -788,6 +789,7 @@ VKAPI_ATTR void VKAPI_CALL
+ dzn_DestroyImage(VkDevice device, VkImage image,
+                  const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyImage");
+    dzn_image_destroy(dzn_image_from_handle(image), pAllocator);
+ }
+ 
+@@ -796,6 +798,7 @@ dzn_BindImageMemory2(VkDevice dev,
+                      uint32_t bindInfoCount,
+                      const VkBindImageMemoryInfo *pBindInfos)
+ {
++   DZN_TRACE("vkBindImageMemory2");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+ 
+    for (uint32_t i = 0; i < bindInfoCount; i++) {
+@@ -865,6 +868,7 @@ dzn_GetImageMemoryRequirements2(VkDevice _device,
+                                 const VkImageMemoryRequirementsInfo2 *pInfo,
+                                 VkMemoryRequirements2 *pMemoryRequirements)
+ {
++   DZN_TRACE("vkGetImageMemoryRequirements2");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    VK_FROM_HANDLE(dzn_image, image, pInfo->image);
+    struct dzn_physical_device *pdev =
+@@ -931,6 +935,7 @@ dzn_GetImageSubresourceLayout(VkDevice _device,
+                               const VkImageSubresource *subresource,
+                               VkSubresourceLayout *layout)
+ {
++   DZN_TRACE("vkGetImageSubresourceLayout");
+    VK_FROM_HANDLE(dzn_device, device, _device);
+    VK_FROM_HANDLE(dzn_image, image, _image);
+ 
+@@ -1452,6 +1457,7 @@ dzn_CreateImageView(VkDevice device,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkImageView *pView)
+ {
++   DZN_TRACE("vkCreateImageView");
+    return dzn_image_view_create(dzn_device_from_handle(device), pCreateInfo,
+                                 pAllocator, pView);
+ }
+@@ -1461,6 +1467,7 @@ dzn_DestroyImageView(VkDevice device,
+                      VkImageView imageView,
+                      const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyImageView");
+    dzn_image_view_destroy(dzn_image_view_from_handle(imageView), pAllocator);
+ }
+ 
+@@ -1562,6 +1569,7 @@ dzn_CreateBufferView(VkDevice device,
+                      const VkAllocationCallbacks *pAllocator,
+                      VkBufferView *pView)
+ {
++   DZN_TRACE("vkCreateBufferView");
+    return dzn_buffer_view_create(dzn_device_from_handle(device),
+                                  pCreateInfo, pAllocator, pView);
+ }
+@@ -1571,5 +1579,6 @@ dzn_DestroyBufferView(VkDevice device,
+                       VkBufferView bufferView,
+                       const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyBufferView");
+    dzn_buffer_view_destroy(dzn_buffer_view_from_handle(bufferView), pAllocator);
+ }
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 0759078..6449191 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2401,6 +2401,7 @@ dzn_CreateGraphicsPipelines(VkDevice dev,
+                             const VkAllocationCallbacks *pAllocator,
+                             VkPipeline *pPipelines)
+ {
++   DZN_TRACE("vkCreateGraphicsPipelines");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+    VkResult result = VK_SUCCESS;
+ 
+@@ -2706,6 +2707,7 @@ dzn_CreateComputePipelines(VkDevice dev,
+                            const VkAllocationCallbacks *pAllocator,
+                            VkPipeline *pPipelines)
+ {
++   DZN_TRACE("vkCreateComputePipelines");
+    VK_FROM_HANDLE(dzn_device, device, dev);
+    VkResult result = VK_SUCCESS;
+ 
+@@ -2741,6 +2743,7 @@ dzn_DestroyPipeline(VkDevice device,
+                     VkPipeline pipeline,
+                     const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyPipeline");
+    VK_FROM_HANDLE(dzn_pipeline, pipe, pipeline);
+ 
+    if (!pipe)
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index 9fa06c2..6c91faf 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -269,6 +269,15 @@ dzn_log_hresult(ID3D12Device4 *dev, HRESULT hr, const char *what,
+ HRESULT
+ dzn_check_device_removed(ID3D12Device4 *dev, const char *context, uint64_t index);
+ 
++/* ONYX: Xbox removes the device for invalid calls that return no error. Every
++ * traced call checks the removed reason, so the log names the exact call. */
++extern ID3D12Device4 *dzn_trace_dev;
++void
++dzn_trace_set_device(ID3D12Device4 *dev);
++void
++dzn_trace_call(const char *what, const char *file, int line);
++#define DZN_TRACE(what) dzn_trace_call((what), __FILE__, __LINE__)
++
+ struct dzn_queue {
+    struct vk_queue vk;
+ 
+diff --git a/src/microsoft/vulkan/dzn_query.c b/src/microsoft/vulkan/dzn_query.c
+index f51d809..edc4c9e 100644
+--- a/src/microsoft/vulkan/dzn_query.c
++++ b/src/microsoft/vulkan/dzn_query.c
+@@ -65,7 +65,7 @@ dzn_query_pool_destroy(struct dzn_query_pool *qpool,
+    struct dzn_device *device = container_of(qpool->base.device, struct dzn_device, vk);
+ 
+    if (qpool->collect_map)
+-      ID3D12Resource_Unmap(qpool->collect_buffer, 0, NULL);
++      { ID3D12Resource_Unmap(qpool->collect_buffer, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+    if (qpool->collect_buffer)
+       ID3D12Resource_Release(qpool->collect_buffer);
+@@ -210,6 +210,7 @@ dzn_CreateQueryPool(VkDevice device,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkQueryPool *pQueryPool)
+ {
++   DZN_TRACE("vkCreateQueryPool");
+    return dzn_query_pool_create(dzn_device_from_handle(device),
+                                 pCreateInfo, pAllocator, pQueryPool);
+ }
+@@ -219,6 +220,7 @@ dzn_DestroyQueryPool(VkDevice device,
+                      VkQueryPool queryPool,
+                      const VkAllocationCallbacks *pAllocator)
+ {
++   DZN_TRACE("vkDestroyQueryPool");
+    dzn_query_pool_destroy(dzn_query_pool_from_handle(queryPool), pAllocator);
+ }
+ 
+@@ -228,6 +230,7 @@ dzn_ResetQueryPool(VkDevice device,
+                    uint32_t firstQuery,
+                    uint32_t queryCount)
+ {
++   DZN_TRACE("vkResetQueryPool");
+    VK_FROM_HANDLE(dzn_query_pool, qpool, queryPool);
+ 
+    mtx_lock(&qpool->queries_lock);
+@@ -258,6 +261,7 @@ dzn_GetQueryPoolResults(VkDevice device,
+                         VkDeviceSize stride,
+                         VkQueryResultFlags flags)
+ {
++   DZN_TRACE("vkGetQueryPoolResults");
+    VK_FROM_HANDLE(dzn_query_pool, qpool, queryPool);
+ 
+    uint32_t step = (flags & VK_QUERY_RESULT_64_BIT) ?
+diff --git a/src/microsoft/vulkan/dzn_util.c b/src/microsoft/vulkan/dzn_util.c
+index 6c14d12..f68aa91 100644
+--- a/src/microsoft/vulkan/dzn_util.c
++++ b/src/microsoft/vulkan/dzn_util.c
+@@ -25,6 +25,7 @@
+ 
+ #include "util/format/u_format.h"
+ #include "util/log.h"
++#include "util/u_atomic.h"
+ 
+ #include <util/u_dl.h>
+ 
+@@ -61,10 +62,70 @@ dzn_check_device_removed(ID3D12Device4 *dev, const char *context, uint64_t index
+    return reason;
+ }
+ 
++ID3D12Device4 *dzn_trace_dev;
++
++void
++dzn_trace_set_device(ID3D12Device4 *dev)
++{
++   /* Keep our own reference, so a destroyed VkDevice never leaves a dangling
++    * pointer here. */
++   if (dev == dzn_trace_dev)
++      return;
++   if (dev)
++      ID3D12Device4_AddRef(dev);
++   ID3D12Device4 *old = dzn_trace_dev;
++   dzn_trace_dev = dev;
++   if (old)
++      ID3D12Device4_Release(old);
++}
++
++#define DZN_TRACE_RING 16
++
++void
++dzn_trace_call(const char *what, const char *file, int line)
++{
++   /* Last calls before the removal, for context. Races between threads only
++    * blur this history, which is fine for a diagnostic. */
++   static const char *recent_what[DZN_TRACE_RING];
++   static const char *recent_file[DZN_TRACE_RING];
++   static int recent_line[DZN_TRACE_RING];
++   static unsigned recent_count;
++   static bool reported;
++
++   ID3D12Device4 *dev = dzn_trace_dev;
++   if (reported || !dev)
++      return;
++   unsigned n = p_atomic_inc_return(&recent_count);
++   recent_what[(n - 1) % DZN_TRACE_RING] = what;
++   recent_file[(n - 1) % DZN_TRACE_RING] = file;
++   recent_line[(n - 1) % DZN_TRACE_RING] = line;
++
++   /* Check every call while a game starts (where the Xbox crash happens),
++    * then every 16th call so gameplay doesn't pay for it. */
++   if (n > 300000 && (n & 15))
++      return;
++
++   HRESULT reason = ID3D12Device4_GetDeviceRemovedReason(dev);
++   if (SUCCEEDED(reason))
++      return;
++   reported = true;
++   mesa_loge("dzn: D3D12 device removed (reason 0x%08lx) right after %s at %s:%d (call #%u)",
++             (unsigned long)reason, what ? what : "?", dzn_log_basename(file), line, n);
++   for (unsigned i = n > DZN_TRACE_RING ? n - DZN_TRACE_RING : 0; i + 1 < n; i++) {
++      unsigned k = i % DZN_TRACE_RING;
++      mesa_loge("dzn:   earlier call #%u: %s (%s:%d)", i + 1,
++                recent_what[k] ? recent_what[k] : "?",
++                recent_file[k] ? dzn_log_basename(recent_file[k]) : "?", recent_line[k]);
++   }
++}
++
+ HRESULT
+ dzn_log_hresult(ID3D12Device4 *dev, HRESULT hr, const char *what,
+                 const char *file, int line)
+ {
++   if (!dzn_trace_dev && dev)
++      dzn_trace_set_device(dev);
++   dzn_trace_call(what, file, line);
+    if (SUCCEEDED(hr))
+       return hr;
+ 
+-- 
+2.43.0
+

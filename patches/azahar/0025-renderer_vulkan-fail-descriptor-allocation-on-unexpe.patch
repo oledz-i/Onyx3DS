@@ -1,0 +1,40 @@
+From f10e14cc09eb7c8cddfefe0c517eebeccfccca15 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 23:08:30 -0400
+Subject: [PATCH] renderer_vulkan: fail descriptor allocation on unexpected
+ errors instead of spinning
+
+DescriptorHeap::Allocate retried forever on any error other than an
+exhausted or fragmented pool, so a lost device pinned a CPU core at 100%.
+---
+ src/video_core/renderer_vulkan/vk_resource_pool.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_resource_pool.cpp b/src/video_core/renderer_vulkan/vk_resource_pool.cpp
+index 2143471..414e248 100644
+--- a/src/video_core/renderer_vulkan/vk_resource_pool.cpp
++++ b/src/video_core/renderer_vulkan/vk_resource_pool.cpp
+@@ -6,6 +6,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <stdexcept>
+ #include <cstddef>
+ #include <optional>
+ #include <unordered_map>
+@@ -174,7 +175,12 @@ void DescriptorHeap::Allocate(std::size_t begin, std::size_t end) {
+                 AppendDescriptorPool();
+             }
+             alloc_info.descriptorPool = *pools[current_pool];
++            continue;
+         }
++        // Any other error (device lost, out of memory) would make this loop spin forever at
++        // full CPU; report it like the other Vulkan failures instead.
++        LOG_CRITICAL(Render_Vulkan, "vkAllocateDescriptorSets failed: {}", vk::to_string(result));
++        throw std::runtime_error("vk::Device::allocateDescriptorSets: " + vk::to_string(result));
+     }
+ }
+ 
+-- 
+2.43.0
+
