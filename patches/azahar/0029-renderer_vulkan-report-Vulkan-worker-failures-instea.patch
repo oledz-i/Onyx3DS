@@ -1,0 +1,218 @@
+From 44ad8f7e71e20b0111a29515e605199ba9507ffe Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 07:44:09 -0400
+Subject: [PATCH] renderer_vulkan: report Vulkan worker failures instead of
+ aborting; no triangle fans on Dozen
+
+A Vulkan error on the scheduler's worker thread (e.g. vkEndCommandBuffer
+failing) escaped the thread and aborted the whole app. Keep the error,
+release every waiter on the master semaphore, and rethrow it on the
+emulation thread at its next scheduler call, where the frontend reports it.
+On Dozen, fans use the software vertex path instead of Dozen's
+compute + ExecuteIndirect emulation.
+---
+ src/citra_libretro/libretro_vk.cpp            |  7 ++++
+ .../renderer_vulkan/vk_master_semaphore.cpp   | 12 +++++-
+ .../renderer_vulkan/vk_master_semaphore.h     | 10 +++++
+ .../renderer_vulkan/vk_scheduler.cpp          | 38 ++++++++++++++++---
+ src/video_core/renderer_vulkan/vk_scheduler.h |  8 ++++
+ 5 files changed, 69 insertions(+), 6 deletions(-)
+
+diff --git a/src/citra_libretro/libretro_vk.cpp b/src/citra_libretro/libretro_vk.cpp
+index 1e60e1e..c4e6798 100644
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -344,6 +344,13 @@ LibRetroVKInstance::LibRetroVKInstance(Frontend::EmuWindow& window,
+         }
+     }
+ 
++    // Dozen (Vulkan on Direct3D 12, used on Xbox) emulates triangle fans with a compute
++    // pass plus ExecuteIndirect. Let Azahar's own vertex path turn fans into lists instead.
++    if (static_cast<u32>(driver_id) == 23u /* VK_DRIVER_ID_MESA_DOZEN */) {
++        triangle_fan_supported = false;
++        LOG_INFO(Render_Vulkan, "Dozen: triangle fans go through the software vertex path");
++    }
++
+     // Initialize subsystems
+     CreateAllocator();
+     CreateFormatTable();
+diff --git a/src/video_core/renderer_vulkan/vk_master_semaphore.cpp b/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
+index cae51d2..c923272 100644
+--- a/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
++++ b/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
+@@ -119,6 +119,14 @@ MasterSemaphoreFence::~MasterSemaphoreFence() {
+ 
+ void MasterSemaphoreFence::Refresh() {}
+ 
++void MasterSemaphoreFence::Abandon() {
++    {
++        std::scoped_lock lock{free_mutex};
++        MasterSemaphore::Abandon();
++    }
++    free_cv.notify_all();
++}
++
+ void MasterSemaphoreFence::Wait(u64 tick) {
+     std::unique_lock lk{free_mutex};
+     free_cv.wait(lk, [&] { return gpu_tick.load(std::memory_order_relaxed) >= tick; });
+@@ -182,7 +190,9 @@ void MasterSemaphoreFence::WaitThread(std::stop_token token) {
+         } catch (const vk::SystemError& e) {
+             LOG_ERROR(Render_Vulkan, "Fence wait failed: {}", e.what());
+         }
+-        gpu_tick.store(signal_value);
++        if (!abandoned.load(std::memory_order_acquire)) {
++            gpu_tick.store(signal_value);
++        }
+ 
+         std::scoped_lock lock{free_mutex};
+         free_queue.push_back(fence);
+diff --git a/src/video_core/renderer_vulkan/vk_master_semaphore.h b/src/video_core/renderer_vulkan/vk_master_semaphore.h
+index f147128..721f7da 100644
+--- a/src/video_core/renderer_vulkan/vk_master_semaphore.h
++++ b/src/video_core/renderer_vulkan/vk_master_semaphore.h
+@@ -45,7 +45,15 @@ public:
+     virtual void SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wait, vk::Semaphore signal,
+                             u64 signal_value) = 0;
+ 
++    /// Recording or submission failed for good: release every waiter, now and later, so
++    /// the emulation thread can report the error instead of waiting forever.
++    virtual void Abandon() {
++        abandoned.store(true, std::memory_order_release);
++        gpu_tick.store(~u64{0}, std::memory_order_release);
++    }
++
+ protected:
++    std::atomic<bool> abandoned{false};
+     std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
+     std::atomic<u64> current_tick{1}; ///< Current logical tick.
+ };
+@@ -85,6 +93,8 @@ public:
+     void SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wait, vk::Semaphore signal,
+                     u64 signal_value) override;
+ 
++    void Abandon() override;
++
+ private:
+     void WaitThread(std::stop_token token);
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_scheduler.cpp b/src/video_core/renderer_vulkan/vk_scheduler.cpp
+index 709a1bd..54845b0 100644
+--- a/src/video_core/renderer_vulkan/vk_scheduler.cpp
++++ b/src/video_core/renderer_vulkan/vk_scheduler.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <stdexcept>
+ #include <mutex>
+ #include <utility>
+ #include "common/microprofile.h"
+@@ -59,6 +60,12 @@ Scheduler::Scheduler(const Instance& instance)
+ 
+ Scheduler::~Scheduler() = default;
+ 
++void Scheduler::ThrowIfWorkerFailed() const {
++    if (worker_failed.load(std::memory_order_acquire)) {
++        throw std::runtime_error("Vulkan driver error: " + worker_error);
++    }
++}
++
+ void Scheduler::Flush(vk::Semaphore signal, vk::Semaphore wait) {
+     // When flushing, we only send data to the worker thread; no waiting is necessary.
+     SubmitExecution(signal, wait);
+@@ -69,6 +76,8 @@ void Scheduler::Finish(vk::Semaphore signal, vk::Semaphore wait) {
+     const u64 presubmit_tick = CurrentTick();
+     SubmitExecution(signal, wait);
+     Wait(presubmit_tick);
++    // The worker may have failed while we waited (the wait is released then).
++    ThrowIfWorkerFailed();
+ }
+ 
+ void Scheduler::WaitWorker() {
+@@ -77,6 +86,7 @@ void Scheduler::WaitWorker() {
+     }
+ 
+     MICROPROFILE_SCOPE(Vulkan_WaitForWorker);
++    ThrowIfWorkerFailed();
+     DispatchWork();
+ 
+     // Ensure the queue is drained.
+@@ -91,6 +101,7 @@ void Scheduler::WaitWorker() {
+ }
+ 
+ void Scheduler::Wait(u64 tick) {
++    ThrowIfWorkerFailed();
+     if (tick >= master_semaphore->CurrentTick()) {
+         // Make sure we are not waiting for the current tick without signalling
+         Flush();
+@@ -99,6 +110,7 @@ void Scheduler::Wait(u64 tick) {
+ }
+ 
+ void Scheduler::DispatchWork() {
++    ThrowIfWorkerFailed();
+     if (!use_worker_thread || chunk->Empty()) {
+         return;
+     }
+@@ -150,11 +162,27 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
+             // Perform the work, tracking whether the chunk was a submission
+             // before executing.
+             const bool has_submit = work->HasSubmit();
+-            work->ExecuteAll(current_cmdbuf);
+-
+-            // If the chunk was a submission, reallocate the command buffer.
+-            if (has_submit) {
+-                AllocateWorkerCommandBuffers();
++            if (!worker_failed.load(std::memory_order_acquire)) {
++                // An exception here used to escape the thread and abort the whole app.
++                // Keep it, release any waiter, and let the emulation thread report it.
++                try {
++                    work->ExecuteAll(current_cmdbuf);
++
++                    // If the chunk was a submission, reallocate the command buffer.
++                    if (has_submit) {
++                        AllocateWorkerCommandBuffers();
++                    }
++                } catch (const std::exception& e) {
++                    worker_error = e.what();
++                    LOG_CRITICAL(Render_Vulkan, "Vulkan worker failed: {}", worker_error);
++                    worker_failed.store(true, std::memory_order_release);
++                    master_semaphore->Abandon();
++                } catch (...) {
++                    worker_error = "unknown error";
++                    LOG_CRITICAL(Render_Vulkan, "Vulkan worker failed with an unknown error");
++                    worker_failed.store(true, std::memory_order_release);
++                    master_semaphore->Abandon();
++                }
+             }
+         }
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_scheduler.h b/src/video_core/renderer_vulkan/vk_scheduler.h
+index 96fd3bb..0d20b2a 100644
+--- a/src/video_core/renderer_vulkan/vk_scheduler.h
++++ b/src/video_core/renderer_vulkan/vk_scheduler.h
+@@ -4,7 +4,9 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <functional>
++#include <string>
+ #include <memory>
+ #include <utility>
+ #include "common/alignment.h"
+@@ -208,6 +210,12 @@ private:
+     std::condition_variable_any event_cv;
+     std::jthread worker_thread;
+     bool use_worker_thread;
++    /// Set when recording or submitting on the worker thread threw; the emulation
++    /// thread rethrows it at its next scheduler call.
++    std::atomic<bool> worker_failed{false};
++    std::string worker_error;
++
++    void ThrowIfWorkerFailed() const;
+ };
+ 
+ } // namespace Vulkan
+-- 
+2.43.0
+

@@ -1,0 +1,1051 @@
+From eb25cba63e066c0d464b89939cab87b955a630c6 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 07:45:02 -0400
+Subject: [PATCH] dzn: name what a command list held when Close fails; check
+ Reset results
+
+Records the name of every D3D12 command-list call per command buffer (a
+64-entry ring) and logs it when ID3D12GraphicsCommandList::Close fails.
+Logs failed allocator/list Resets (a failed list Reset leaves it closed, so
+the next Close fails with E_FAIL).
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c | 307 +++++++++++++++-----------
+ src/microsoft/vulkan/dzn_private.h    |  15 ++
+ 2 files changed, 193 insertions(+), 129 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index f16f8bf..987d787 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -43,7 +43,7 @@ dzn_cmd_buffer_exec_transition_barriers(struct dzn_cmd_buffer *cmdbuf,
+       /* some layouts map to the same states, and NOP-barriers are illegal */
+       if (barriers[b].Transition.StateBefore == barriers[b].Transition.StateAfter) {
+          if (flush_count) {
+-            ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, flush_count,
++            ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), flush_count,
+                                                        &barriers[b - flush_count]);
+             flush_count = 0;
+          }
+@@ -53,7 +53,7 @@ dzn_cmd_buffer_exec_transition_barriers(struct dzn_cmd_buffer *cmdbuf,
+    }
+ 
+    if (flush_count)
+-      ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, flush_count,
++      ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), flush_count,
+                                                  &barriers[barrier_count - flush_count]);
+ 
+    /* Set Before = After so we don't execute the same barrier twice. */
+@@ -269,7 +269,7 @@ dzn_cmd_buffer_global_barrier(struct dzn_cmd_buffer *cmdbuf,
+       .NumBarriers = 1,
+       .pGlobalBarriers = &global,
+    };
+-   ID3D12GraphicsCommandList8_Barrier(cmdbuf->cmdlist8, 1, &group);
++   ID3D12GraphicsCommandList8_Barrier((dzn_cmd_note(cmdbuf, "Barrier"), cmdbuf->cmdlist8), 1, &group);
+ }
+ 
+ static void
+@@ -295,7 +295,7 @@ dzn_cmd_buffer_buffer_barrier(struct dzn_cmd_buffer *cmdbuf,
+       .NumBarriers = 1,
+       .pBufferBarriers = &buffer,
+    };
+-   ID3D12GraphicsCommandList8_Barrier(cmdbuf->cmdlist8, 1, &group);
++   ID3D12GraphicsCommandList8_Barrier((dzn_cmd_note(cmdbuf, "Barrier"), cmdbuf->cmdlist8), 1, &group);
+ }
+ 
+ static void
+@@ -332,7 +332,7 @@ dzn_cmd_buffer_image_barrier(struct dzn_cmd_buffer *cmdbuf,
+       .NumBarriers = 1,
+       .pTextureBarriers = &texture,
+    };
+-   ID3D12GraphicsCommandList8_Barrier(cmdbuf->cmdlist8, 1, &group);
++   ID3D12GraphicsCommandList8_Barrier((dzn_cmd_note(cmdbuf, "Barrier"), cmdbuf->cmdlist8), 1, &group);
+ }
+ 
+ static D3D12_BARRIER_LAYOUT
+@@ -508,8 +508,46 @@ dzn_cmd_buffer_reset(struct vk_command_buffer *cbuf, VkCommandBufferResetFlags f
+ 
+    vk_command_buffer_reset(&cmdbuf->vk);
+ 
+-   if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+-      ID3D12CommandAllocator_Reset(cmdbuf->cmdalloc);
++   if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
++      struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
++      DZN_HR(device->dev, "ID3D12CommandAllocator::Reset (GPU may still be using it)",
++             ID3D12CommandAllocator_Reset(cmdbuf->cmdalloc));
++   }
++   cmdbuf->onyx_note_count = 0;
++}
++
++void
++dzn_cmd_dump_notes(struct dzn_cmd_buffer *cmdbuf, const char *why)
++{
++   const uint32_t n = cmdbuf->onyx_note_count;
++   const uint32_t first = n > DZN_CMD_NOTE_RING ? n - DZN_CMD_NOTE_RING : 0;
++   mesa_loge("dzn: %s: the command list held %u D3D12 calls; the last %u, oldest first:",
++             why, n, n - first);
++   char line[512];
++   size_t len = 0;
++   line[0] = 0;
++   for (uint32_t i = first; i < n;) {
++      const char *what = cmdbuf->onyx_notes[i % DZN_CMD_NOTE_RING];
++      uint32_t repeat = 1;
++      while (i + repeat < n && cmdbuf->onyx_notes[(i + repeat) % DZN_CMD_NOTE_RING] == what)
++         repeat++;
++      char item[96];
++      if (repeat > 1)
++         snprintf(item, sizeof(item), "%s x%u, ", what ? what : "?", repeat);
++      else
++         snprintf(item, sizeof(item), "%s, ", what ? what : "?");
++      const size_t il = strlen(item);
++      if (len + il >= sizeof(line) - 1) {
++         mesa_loge("dzn:   %s", line);
++         len = 0;
++         line[0] = 0;
++      }
++      memcpy(line + len, item, il + 1);
++      len += il;
++      i += repeat;
++   }
++   if (len)
++      mesa_loge("dzn:   %s", line);
+ }
+ 
+ static uint32_t
+@@ -720,8 +758,15 @@ dzn_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+    DZN_TRACE("vkBeginCommandBuffer");
+    VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+    vk_command_buffer_begin(&cmdbuf->vk, info);
+-   if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+-      ID3D12GraphicsCommandList1_Reset(cmdbuf->cmdlist, cmdbuf->cmdalloc, NULL);
++   cmdbuf->onyx_note_count = 0;
++   if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
++      struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
++      /* ONYX: a failed Reset leaves the list closed, and everything recorded
++       * after it fails at Close with E_FAIL. */
++      if (FAILED(DZN_HR(device->dev, "ID3D12GraphicsCommandList::Reset",
++                        ID3D12GraphicsCommandList1_Reset(cmdbuf->cmdlist, cmdbuf->cmdalloc, NULL))))
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++   }
+    return vk_command_buffer_get_record_result(&cmdbuf->vk);
+ }
+ 
+@@ -927,7 +972,7 @@ dzn_cmd_buffer_collect_queries(struct dzn_cmd_buffer *cmdbuf,
+         __bitset_next_range(&start, &end, collect, nbits_collect);
+         start < nbits_collect;
+         __bitset_next_range(&start, &end, collect, nbits_collect)) {
+-      ID3D12GraphicsCommandList1_ResolveQueryData(cmdbuf->cmdlist,
++      ID3D12GraphicsCommandList1_ResolveQueryData((dzn_cmd_note(cmdbuf, "ResolveQueryData"), cmdbuf->cmdlist),
+                                                   qpool->heap,
+                                                   qpool->queries[start].type,
+                                                   start, end - start,
+@@ -950,7 +995,7 @@ dzn_cmd_buffer_collect_queries(struct dzn_cmd_buffer *cmdbuf,
+       for (unsigned i = 0; i < count; i += step) {
+          uint32_t sub_count = MIN2(step, count - i);
+ 
+-         ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist,
++         ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist),
+                                                      qpool->resolve_buffer,
+                                                      dzn_query_pool_get_result_offset(qpool, start + i),
+                                                      device->queries.refs,
+@@ -975,7 +1020,7 @@ dzn_cmd_buffer_collect_queries(struct dzn_cmd_buffer *cmdbuf,
+                                                DZN_QUEUE_TRANSITION_FLUSH);
+    }
+ 
+-   ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist,
++   ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist),
+                                                qpool->collect_buffer, offset,
+                                                qpool->resolve_buffer, offset,
+                                                size);
+@@ -1001,7 +1046,7 @@ dzn_cmd_buffer_collect_queries(struct dzn_cmd_buffer *cmdbuf,
+          for (unsigned i = 0; i < count; i += step) {
+             uint32_t sub_count = MIN2(step, count - i);
+ 
+-            ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist,
++            ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist),
+                                                         qpool->collect_buffer,
+                                                         dzn_query_pool_get_availability_offset(qpool, start + i),
+                                                         device->queries.refs,
+@@ -1083,8 +1128,12 @@ dzn_EndCommandBuffer(VkCommandBuffer commandBuffer)
+       struct dzn_device *device = container_of(cmdbuf->vk.base.device, struct dzn_device, vk);
+       HRESULT hres = DZN_HR(device->dev, "ID3D12GraphicsCommandList::Close",
+                             ID3D12GraphicsCommandList1_Close(cmdbuf->cmdlist));
+-      if (FAILED(hres))
++      if (FAILED(hres)) {
++         static unsigned dumps;
++         if (dumps++ < 3)
++            dzn_cmd_dump_notes(cmdbuf, "Close failed");
+          vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      }
+    }
+ 
+    return vk_command_buffer_end(&cmdbuf->vk);
+@@ -1112,7 +1161,7 @@ dzn_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+          .UAV = { .pResource = NULL },
+       };
+ 
+-      ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &barrier);
++      ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), 1, &barrier);
+    }
+ 
+    /* Global memory barriers can be emulated with NULL UAV/Aliasing barriers.
+@@ -1129,7 +1178,7 @@ dzn_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+       barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+       barriers[1].Aliasing.pResourceBefore = NULL;
+       barriers[1].Aliasing.pResourceAfter = NULL;
+-      ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 2, barriers);
++      ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), 2, barriers);
+    }
+ 
+    for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; i++) {
+@@ -1143,7 +1192,7 @@ dzn_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+       barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+       barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+       barrier.UAV.pResource = buf->res;
+-      ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &barrier);
++      ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), 1, &barrier);
+    }
+ 
+    for (uint32_t i = 0; i < info->imageMemoryBarrierCount; i++) {
+@@ -1668,7 +1717,7 @@ dzn_CmdPipelineBarrier2_enhanced(VkCommandBuffer commandBuffer,
+    assert(bbar == num_buffer_barriers);
+    assert(tbar == num_image_barriers);
+ 
+-   ID3D12GraphicsCommandList8_Barrier(cmdbuf->cmdlist8, num_barrier_groups, groups);
++   ID3D12GraphicsCommandList8_Barrier((dzn_cmd_note(cmdbuf, "Barrier"), cmdbuf->cmdlist8), num_barrier_groups, groups);
+ 
+    vk_free(&cmdbuf->vk.pool->alloc, global_barriers);
+ }
+@@ -1951,7 +2000,7 @@ dzn_cmd_buffer_clear_rects_with_copy(struct dzn_cmd_buffer *cmdbuf,
+                .back = 1,
+             };
+ 
+-            ID3D12GraphicsCommandList1_CopyTextureRegion(cmdbuf->cmdlist,
++            ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdbuf->cmdlist),
+                                                          &dst_loc,
+                                                          rects[r].left,
+                                                          rects[r].top, 0,
+@@ -2102,7 +2151,7 @@ dzn_cmd_buffer_clear_ranges_with_copy(struct dzn_cmd_buffer *cmdbuf,
+                   .back = d,
+                };
+ 
+-               ID3D12GraphicsCommandList1_CopyTextureRegion(cmdbuf->cmdlist, &dst_loc, 0, 0, 0,
++               ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdbuf->cmdlist), &dst_loc, 0, 0, 0,
+                                                   &src_loc, &src_box);
+ 
+             }
+@@ -2168,7 +2217,7 @@ dzn_cmd_buffer_clear_attachment(struct dzn_cmd_buffer *cmdbuf,
+ 
+          D3D12_DEPTH_STENCIL_VIEW_DESC desc = dzn_image_get_dsv_desc(image, &range, 0);
+          D3D12_CPU_DESCRIPTOR_HANDLE handle = dzn_cmd_buffer_get_dsv(cmdbuf, image, &desc);
+-         ID3D12GraphicsCommandList1_ClearDepthStencilView(cmdbuf->cmdlist, handle, flags,
++         ID3D12GraphicsCommandList1_ClearDepthStencilView((dzn_cmd_note(cmdbuf, "ClearDepthStencilView"), cmdbuf->cmdlist), handle, flags,
+                                                 value->depthStencil.depth,
+                                                 value->depthStencil.stencil,
+                                                 rect_count, rects);
+@@ -2230,7 +2279,7 @@ dzn_cmd_buffer_clear_attachment(struct dzn_cmd_buffer *cmdbuf,
+ 
+          D3D12_RENDER_TARGET_VIEW_DESC desc = dzn_image_get_rtv_desc(image, &range, 0);
+          D3D12_CPU_DESCRIPTOR_HANDLE handle = dzn_cmd_buffer_get_rtv(cmdbuf, image, &desc);
+-         ID3D12GraphicsCommandList1_ClearRenderTargetView(cmdbuf->cmdlist, handle, vals, rect_count, rects);
++         ID3D12GraphicsCommandList1_ClearRenderTargetView((dzn_cmd_note(cmdbuf, "ClearRenderTargetView"), cmdbuf->cmdlist), handle, vals, rect_count, rects);
+ 
+          if (cmdbuf->enhanced_barriers) {
+             dzn_cmd_buffer_restore_layout(cmdbuf, image,
+@@ -2314,7 +2363,7 @@ dzn_cmd_buffer_clear_color(struct dzn_cmd_buffer *cmdbuf,
+ 
+          D3D12_RENDER_TARGET_VIEW_DESC desc = dzn_image_get_rtv_desc(image, &view_range, lvl);
+          D3D12_CPU_DESCRIPTOR_HANDLE handle = dzn_cmd_buffer_get_rtv(cmdbuf, image, &desc);
+-         ID3D12GraphicsCommandList1_ClearRenderTargetView(cmdbuf->cmdlist, handle, clear_vals, 0, NULL);
++         ID3D12GraphicsCommandList1_ClearRenderTargetView((dzn_cmd_note(cmdbuf, "ClearRenderTargetView"), cmdbuf->cmdlist), handle, clear_vals, 0, NULL);
+       }
+ 
+       if (cmdbuf->enhanced_barriers) {
+@@ -2367,7 +2416,7 @@ dzn_cmd_buffer_clear_zs(struct dzn_cmd_buffer *cmdbuf,
+       for (uint32_t lvl = 0; lvl < level_count; lvl++) {
+          D3D12_DEPTH_STENCIL_VIEW_DESC desc = dzn_image_get_dsv_desc(image, range, lvl);
+          D3D12_CPU_DESCRIPTOR_HANDLE handle = dzn_cmd_buffer_get_dsv(cmdbuf, image, &desc);
+-         ID3D12GraphicsCommandList1_ClearDepthStencilView(cmdbuf->cmdlist,
++         ID3D12GraphicsCommandList1_ClearDepthStencilView((dzn_cmd_note(cmdbuf, "ClearDepthStencilView"), cmdbuf->cmdlist),
+                                                           handle, flags,
+                                                           zs->depth,
+                                                           zs->stencil,
+@@ -2431,7 +2480,7 @@ dzn_cmd_buffer_copy_buf2img_region(struct dzn_cmd_buffer *cmdbuf,
+          .back = region.imageExtent.depth,
+       };
+ 
+-      ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist, &dst_img_loc,
++      ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist), &dst_img_loc,
+                                                    region.imageOffset.x,
+                                                    region.imageOffset.y,
+                                                    region.imageOffset.z,
+@@ -2458,7 +2507,7 @@ dzn_cmd_buffer_copy_buf2img_region(struct dzn_cmd_buffer *cmdbuf,
+ 
+          src_box.left = src_x;
+          src_box.right = src_x + region.imageExtent.width;
+-         ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist,
++         ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist),
+                                                       &dst_img_loc,
+                                                       region.imageOffset.x,
+                                                       region.imageOffset.y + y,
+@@ -2512,7 +2561,7 @@ dzn_cmd_buffer_copy_img2buf_region(struct dzn_cmd_buffer *cmdbuf,
+          .back = (UINT)(region.imageOffset.z + region.imageExtent.depth),
+       };
+ 
+-      ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist, &dst_buf_loc,
++      ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist), &dst_buf_loc,
+                                                    0, 0, 0, &src_img_loc,
+                                                    &src_box);
+       return;
+@@ -2539,7 +2588,7 @@ dzn_cmd_buffer_copy_img2buf_region(struct dzn_cmd_buffer *cmdbuf,
+          src_box.top = region.imageOffset.y + y;
+          src_box.bottom = src_box.top + blkh;
+ 
+-         ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist,
++         ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist),
+                                                       &dst_buf_line_loc,
+                                                       dst_x, 0, 0,
+                                                       &src_img_loc,
+@@ -2618,7 +2667,7 @@ dzn_cmd_buffer_copy_img_chunk(struct dzn_cmd_buffer *cmdbuf,
+    };
+ 
+    if (!tmp_loc->pResource) {
+-      ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist, &dst_loc,
++      ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist), &dst_loc,
+                                                    region.dstOffset.x,
+                                                    region.dstOffset.y,
+                                                    dst_z, &src_loc,
+@@ -2651,7 +2700,7 @@ dzn_cmd_buffer_copy_img_chunk(struct dzn_cmd_buffer *cmdbuf,
+       }
+    }
+ 
+-   ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist, tmp_loc, 0, 0, 0, &src_loc, &src_box);
++   ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist), tmp_loc, 0, 0, 0, &src_loc, &src_box);
+ 
+    if (cmdbuf->enhanced_barriers) {
+       dzn_cmd_buffer_buffer_barrier(cmdbuf, tmp_loc->pResource,
+@@ -2692,7 +2741,7 @@ dzn_cmd_buffer_copy_img_chunk(struct dzn_cmd_buffer *cmdbuf,
+       .back = tmp_loc->PlacedFootprint.Footprint.Depth,
+    };
+ 
+-   ID3D12GraphicsCommandList1_CopyTextureRegion(cmdlist, &dst_loc,
++   ID3D12GraphicsCommandList1_CopyTextureRegion((dzn_cmd_note(cmdbuf, "CopyTextureRegion"), cmdlist), &dst_loc,
+                                                 region.dstOffset.x,
+                                                 region.dstOffset.y,
+                                                 dst_z,
+@@ -2745,7 +2794,7 @@ dzn_cmd_buffer_blit_prepare_src_view(struct dzn_cmd_buffer *cmdbuf,
+ 
+    D3D12_GPU_DESCRIPTOR_HANDLE handle =
+       dzn_descriptor_heap_get_gpu_handle(heap, heap_slot);
+-   ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable(cmdbuf->cmdlist, 0, handle);
++   ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable((dzn_cmd_note(cmdbuf, "SetGraphicsRootDescriptorTable"), cmdbuf->cmdlist), 0, handle);
+ }
+ 
+ static void
+@@ -2767,7 +2816,7 @@ dzn_cmd_buffer_blit_prepare_dst_view(struct dzn_cmd_buffer *cmdbuf,
+    if (ds) {
+       D3D12_DEPTH_STENCIL_VIEW_DESC desc = dzn_image_get_dsv_desc(img, &range, 0);
+       D3D12_CPU_DESCRIPTOR_HANDLE handle = dzn_cmd_buffer_get_dsv(cmdbuf, img, &desc);
+-      ID3D12GraphicsCommandList1_OMSetRenderTargets(cmdbuf->cmdlist, 0, NULL, true, &handle);
++      ID3D12GraphicsCommandList1_OMSetRenderTargets((dzn_cmd_note(cmdbuf, "OMSetRenderTargets"), cmdbuf->cmdlist), 0, NULL, true, &handle);
+ 
+       if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) {
+          const struct dzn_physical_device *pdev = container_of(cmdbuf->vk.base.device->physical, struct dzn_physical_device, vk);
+@@ -2778,13 +2827,13 @@ dzn_cmd_buffer_blit_prepare_dst_view(struct dzn_cmd_buffer *cmdbuf,
+                .top = dst_offsets[0].y,
+                .bottom = dst_offsets[1].y,
+             };
+-            ID3D12GraphicsCommandList1_ClearDepthStencilView(cmdbuf->cmdlist, handle, D3D12_CLEAR_FLAG_STENCIL, 0.f, 0, 1, &clear_rect);
++            ID3D12GraphicsCommandList1_ClearDepthStencilView((dzn_cmd_note(cmdbuf, "ClearDepthStencilView"), cmdbuf->cmdlist), handle, D3D12_CLEAR_FLAG_STENCIL, 0.f, 0, 1, &clear_rect);
+          }
+       }
+    } else {
+       D3D12_RENDER_TARGET_VIEW_DESC desc = dzn_image_get_rtv_desc(img, &range, 0);
+       D3D12_CPU_DESCRIPTOR_HANDLE handle = dzn_cmd_buffer_get_rtv(cmdbuf, img, &desc);
+-      ID3D12GraphicsCommandList1_OMSetRenderTargets(cmdbuf->cmdlist, 1, &handle, false, NULL);
++      ID3D12GraphicsCommandList1_OMSetRenderTargets((dzn_cmd_note(cmdbuf, "OMSetRenderTargets"), cmdbuf->cmdlist), 1, &handle, false, NULL);
+    }
+ }
+ 
+@@ -2836,9 +2885,9 @@ dzn_cmd_buffer_blit_set_pipeline(struct dzn_cmd_buffer *cmdbuf,
+    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
+    if (cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].root_sig != ctx->root_sig) {
+       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].root_sig = ctx->root_sig;
+-      ID3D12GraphicsCommandList1_SetGraphicsRootSignature(cmdbuf->cmdlist, ctx->root_sig);
++      ID3D12GraphicsCommandList1_SetGraphicsRootSignature((dzn_cmd_note(cmdbuf, "SetGraphicsRootSignature"), cmdbuf->cmdlist), ctx->root_sig);
+    }
+-   ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, ctx->pipeline_state);
++   ID3D12GraphicsCommandList1_SetPipelineState((dzn_cmd_note(cmdbuf, "SetPipelineState"), cmdbuf->cmdlist), ctx->pipeline_state);
+ }
+ 
+ static void
+@@ -2880,7 +2929,7 @@ dzn_cmd_buffer_blit_set_2d_region(struct dzn_cmd_buffer *cmdbuf,
+       dst_pos[2], dst_pos[3], src_pos[2], src_pos[3],
+    };
+ 
+-   ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants(cmdbuf->cmdlist, 1, ARRAY_SIZE(coords), coords, 0);
++   ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstants"), cmdbuf->cmdlist), 1, ARRAY_SIZE(coords), coords, 0);
+ 
+    D3D12_VIEWPORT vp = {
+       .TopLeftX = 0,
+@@ -2890,7 +2939,7 @@ dzn_cmd_buffer_blit_set_2d_region(struct dzn_cmd_buffer *cmdbuf,
+       .MinDepth = 0,
+       .MaxDepth = 1,
+    };
+-   ID3D12GraphicsCommandList1_RSSetViewports(cmdbuf->cmdlist, 1, &vp);
++   ID3D12GraphicsCommandList1_RSSetViewports((dzn_cmd_note(cmdbuf, "RSSetViewports"), cmdbuf->cmdlist), 1, &vp);
+ 
+    D3D12_RECT scissor = {
+       .left = MIN2(dst_offsets[0].x, dst_offsets[1].x),
+@@ -2898,7 +2947,7 @@ dzn_cmd_buffer_blit_set_2d_region(struct dzn_cmd_buffer *cmdbuf,
+       .right = MAX2(dst_offsets[0].x, dst_offsets[1].x),
+       .bottom = MAX2(dst_offsets[0].y, dst_offsets[1].y),
+    };
+-   ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, 1, &scissor);
++   ID3D12GraphicsCommandList1_RSSetScissorRects((dzn_cmd_note(cmdbuf, "RSSetScissorRects"), cmdbuf->cmdlist), 1, &scissor);
+ }
+ 
+ static void
+@@ -3054,21 +3103,21 @@ dzn_cmd_buffer_blit_region(struct dzn_cmd_buffer *cmdbuf,
+ 
+       for (uint32_t slice = 0; slice < slice_count; slice++) {
+          dzn_cmd_buffer_blit_prepare_dst_view(cmdbuf, dst, aspect, dst_level, dst_z_coord, region->dstOffsets);
+-         ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants(cmdbuf->cmdlist, 1, 1, &src_z_coord, 16);
++         ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstants"), cmdbuf->cmdlist), 1, 1, &src_z_coord, 16);
+          if (!device->support_static_samplers) {
+-            ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable(cmdbuf->cmdlist, 2, dzn_descriptor_heap_get_gpu_handle(sampler_heap, sampler_heap_slot));
++            ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable((dzn_cmd_note(cmdbuf, "SetGraphicsRootDescriptorTable"), cmdbuf->cmdlist), 2, dzn_descriptor_heap_get_gpu_handle(sampler_heap, sampler_heap_slot));
+             stencil_bit_root_param_slot++;
+          }
+          if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT && !support_stencil_blit) {
+             cmdbuf->state.dirty |= DZN_CMD_DIRTY_STENCIL_REF;
+-            ID3D12GraphicsCommandList1_OMSetStencilRef(cmdbuf->cmdlist, 0xff);
++            ID3D12GraphicsCommandList1_OMSetStencilRef((dzn_cmd_note(cmdbuf, "OMSetStencilRef"), cmdbuf->cmdlist), 0xff);
+             for (stencil_bit = 0; stencil_bit < 8; ++stencil_bit) {
+                dzn_cmd_buffer_blit_set_pipeline(cmdbuf, src, dst, aspect, info->filter, dzn_blit_resolve_none, stencil_bit);
+-               ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstant(cmdbuf->cmdlist, stencil_bit_root_param_slot, (1 << stencil_bit), 0);
+-               ID3D12GraphicsCommandList1_DrawInstanced(cmdbuf->cmdlist, 4, 1, 0, 0);
++               ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstant((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstant"), cmdbuf->cmdlist), stencil_bit_root_param_slot, (1 << stencil_bit), 0);
++               ID3D12GraphicsCommandList1_DrawInstanced((dzn_cmd_note(cmdbuf, "DrawInstanced"), cmdbuf->cmdlist), 4, 1, 0, 0);
+             }
+          } else {
+-            ID3D12GraphicsCommandList1_DrawInstanced(cmdbuf->cmdlist, 4, 1, 0, 0);
++            ID3D12GraphicsCommandList1_DrawInstanced((dzn_cmd_note(cmdbuf, "DrawInstanced"), cmdbuf->cmdlist), 4, 1, 0, 0);
+          }
+          src_z_coord += src_slice_step;
+          dst_z_coord += dst_slice_step;
+@@ -3162,21 +3211,21 @@ dzn_cmd_buffer_resolve_region(struct dzn_cmd_buffer *cmdbuf,
+                                               dst, aspect, region->dstSubresource.mipLevel,
+                                               region->dstSubresource.baseArrayLayer + layer,
+                                               dst_offset);
+-         ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants(cmdbuf->cmdlist, 1, 1, &src_z_coord, 16);
++         ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstants"), cmdbuf->cmdlist), 1, 1, &src_z_coord, 16);
+          if (!device->support_static_samplers) {
+-            ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable(cmdbuf->cmdlist, 2, dzn_descriptor_heap_get_gpu_handle(sampler_heap, sampler_heap_slot));
++            ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable((dzn_cmd_note(cmdbuf, "SetGraphicsRootDescriptorTable"), cmdbuf->cmdlist), 2, dzn_descriptor_heap_get_gpu_handle(sampler_heap, sampler_heap_slot));
+             stencil_bit_root_param_slot++;
+          }
+          if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT && !support_stencil_blit) {
+             cmdbuf->state.dirty |= DZN_CMD_DIRTY_STENCIL_REF;
+-            ID3D12GraphicsCommandList1_OMSetStencilRef(cmdbuf->cmdlist8, 0xff);
++            ID3D12GraphicsCommandList1_OMSetStencilRef((dzn_cmd_note(cmdbuf, "OMSetStencilRef"), cmdbuf->cmdlist8), 0xff);
+             for (stencil_bit = 0; stencil_bit < 8; ++stencil_bit) {
+                dzn_cmd_buffer_blit_set_pipeline(cmdbuf, src, dst, aspect, VK_FILTER_NEAREST, resolve_mode, stencil_bit);
+-               ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstant(cmdbuf->cmdlist, stencil_bit_root_param_slot, (1 << stencil_bit), 0);
+-               ID3D12GraphicsCommandList1_DrawInstanced(cmdbuf->cmdlist, 4, 1, 0, 0);
++               ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstant((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstant"), cmdbuf->cmdlist), stencil_bit_root_param_slot, (1 << stencil_bit), 0);
++               ID3D12GraphicsCommandList1_DrawInstanced((dzn_cmd_note(cmdbuf, "DrawInstanced"), cmdbuf->cmdlist), 4, 1, 0, 0);
+             }
+          } else {
+-            ID3D12GraphicsCommandList1_DrawInstanced(cmdbuf->cmdlist, 4, 1, 0, 0);
++            ID3D12GraphicsCommandList1_DrawInstanced((dzn_cmd_note(cmdbuf, "DrawInstanced"), cmdbuf->cmdlist), 4, 1, 0, 0);
+          }
+       }
+ 
+@@ -3220,19 +3269,19 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
+                ID3D12DescriptorHeap *heaps[NUM_POOL_TYPES];
+                dzn_foreach_pool_type(type)
+                   heaps[type] = cmdbuf->state.heaps[type]->heap;
+-               ID3D12GraphicsCommandList1_SetDescriptorHeaps(cmdbuf->cmdlist, NUM_POOL_TYPES, heaps);
++               ID3D12GraphicsCommandList1_SetDescriptorHeaps((dzn_cmd_note(cmdbuf, "SetDescriptorHeaps"), cmdbuf->cmdlist), NUM_POOL_TYPES, heaps);
+             }
+          }
+ 
+          if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+-            ID3D12GraphicsCommandList1_SetGraphicsRootSignature(cmdbuf->cmdlist, pipeline->root.sig);
++            ID3D12GraphicsCommandList1_SetGraphicsRootSignature((dzn_cmd_note(cmdbuf, "SetGraphicsRootSignature"), cmdbuf->cmdlist), pipeline->root.sig);
+          else
+-            ID3D12GraphicsCommandList1_SetComputeRootSignature(cmdbuf->cmdlist, pipeline->root.sig);
++            ID3D12GraphicsCommandList1_SetComputeRootSignature((dzn_cmd_note(cmdbuf, "SetComputeRootSignature"), cmdbuf->cmdlist), pipeline->root.sig);
+       }
+       if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+          struct dzn_graphics_pipeline *gfx =
+             (struct dzn_graphics_pipeline *)pipeline;
+-         ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, gfx->ia.topology);
++         ID3D12GraphicsCommandList1_IASetPrimitiveTopology((dzn_cmd_note(cmdbuf, "IASetPrimitiveTopology"), cmdbuf->cmdlist), gfx->ia.topology);
+          dzn_graphics_pipeline_get_state(gfx, &cmdbuf->state.pipeline_variant);
+          if (gfx->multiview.native_view_instancing)
+             view_instance_mask = gfx->multiview.view_mask;
+@@ -3247,14 +3296,14 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
+    ID3D12PipelineState *new_pipeline_state = pipeline->state;
+ 
+    if (old_pipeline_state != new_pipeline_state) {
+-      ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, pipeline->state);
++      ID3D12GraphicsCommandList1_SetPipelineState((dzn_cmd_note(cmdbuf, "SetPipelineState"), cmdbuf->cmdlist), pipeline->state);
+       cmdbuf->state.pipeline = pipeline;
+    }
+ 
+    /* Deferring this until after the pipeline has been set due to an NVIDIA driver bug
+     * when view instancing mask is set with no pipeline bound. */
+    if (view_instance_mask)
+-      ID3D12GraphicsCommandList1_SetViewInstanceMask(cmdbuf->cmdlist, view_instance_mask);
++      ID3D12GraphicsCommandList1_SetViewInstanceMask((dzn_cmd_note(cmdbuf, "SetViewInstanceMask"), cmdbuf->cmdlist), view_instance_mask);
+ }
+ 
+ static void
+@@ -3352,7 +3401,7 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+          desc_heaps[num_desc_heaps++] = new_heaps[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV]->heap;
+       if (new_heaps[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER])
+          desc_heaps[num_desc_heaps++] = new_heaps[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER]->heap;
+-      ID3D12GraphicsCommandList1_SetDescriptorHeaps(cmdbuf->cmdlist, num_desc_heaps, desc_heaps);
++      ID3D12GraphicsCommandList1_SetDescriptorHeaps((dzn_cmd_note(cmdbuf, "SetDescriptorHeaps"), cmdbuf->cmdlist), num_desc_heaps, desc_heaps);
+ 
+       for (unsigned h = 0; h < ARRAY_SIZE(cmdbuf->state.heaps); h++)
+          cmdbuf->state.heaps[h] = new_heaps[h];
+@@ -3369,9 +3418,9 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+             dzn_descriptor_heap_get_gpu_handle(new_heaps[type], new_heap_offsets[type]);
+ 
+          if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+-            ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable(cmdbuf->cmdlist, r, handle);
++            ID3D12GraphicsCommandList1_SetGraphicsRootDescriptorTable((dzn_cmd_note(cmdbuf, "SetGraphicsRootDescriptorTable"), cmdbuf->cmdlist), r, handle);
+          else
+-            ID3D12GraphicsCommandList1_SetComputeRootDescriptorTable(cmdbuf->cmdlist, r, handle);
++            ID3D12GraphicsCommandList1_SetComputeRootDescriptorTable((dzn_cmd_note(cmdbuf, "SetComputeRootDescriptorTable"), cmdbuf->cmdlist), r, handle);
+       }
+    }
+ 
+@@ -3385,9 +3434,9 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+          if (cmdbuf->state.bindpoint[bindpoint].dirty & dirty_bit) {
+             uint64_t gpuva = set->pool->bindless.gpuva + (set->heap_offsets[0] * sizeof(struct dxil_spirv_bindless_entry));
+             if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+-               ID3D12GraphicsCommandList1_SetGraphicsRootShaderResourceView(cmdbuf->cmdlist, s, gpuva);
++               ID3D12GraphicsCommandList1_SetGraphicsRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetGraphicsRootShaderResourceView"), cmdbuf->cmdlist), s, gpuva);
+             else
+-               ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist, s, gpuva);
++               ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetComputeRootShaderResourceView"), cmdbuf->cmdlist), s, gpuva);
+          }
+       }
+       if (pipeline->dynamic_buffer_count &&
+@@ -3426,11 +3475,11 @@ dzn_cmd_buffer_update_heaps(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+ 
+          { ID3D12Resource_Unmap(dynamic_buffer_buf, 0, NULL); DZN_TRACE("Unmap"); }
+          if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+-            ID3D12GraphicsCommandList1_SetGraphicsRootShaderResourceView(cmdbuf->cmdlist,
++            ID3D12GraphicsCommandList1_SetGraphicsRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetGraphicsRootShaderResourceView"), cmdbuf->cmdlist),
+                                                                          pipeline->root.dynamic_buffer_bindless_param_idx,
+                                                                          gpuva);
+          else
+-            ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist,
++            ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetComputeRootShaderResourceView"), cmdbuf->cmdlist),
+                                                                         pipeline->root.dynamic_buffer_bindless_param_idx,
+                                                                         gpuva);
+       }
+@@ -3449,11 +3498,11 @@ dzn_cmd_buffer_update_sysvals(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
+    uint32_t sysval_cbv_param_idx = pipeline->root.sysval_cbv_param_idx;
+ 
+    if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+-      ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants(cmdbuf->cmdlist, sysval_cbv_param_idx,
++      ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstants"), cmdbuf->cmdlist), sysval_cbv_param_idx,
+                                                      sizeof(cmdbuf->state.sysvals.gfx) / 4,
+                                                      &cmdbuf->state.sysvals.gfx, 0);
+    } else {
+-      ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants(cmdbuf->cmdlist, sysval_cbv_param_idx,
++      ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetComputeRoot32BitConstants"), cmdbuf->cmdlist), sysval_cbv_param_idx,
+                                                     sizeof(cmdbuf->state.sysvals.compute) / 4,
+                                                     &cmdbuf->state.sysvals.compute, 0);
+    }
+@@ -3471,7 +3520,7 @@ dzn_cmd_buffer_update_viewports(struct dzn_cmd_buffer *cmdbuf)
+        !pipeline->vp.count)
+       return;
+ 
+-   ID3D12GraphicsCommandList1_RSSetViewports(cmdbuf->cmdlist, pipeline->vp.count, cmdbuf->state.viewports);
++   ID3D12GraphicsCommandList1_RSSetViewports((dzn_cmd_note(cmdbuf, "RSSetViewports"), cmdbuf->cmdlist), pipeline->vp.count, cmdbuf->state.viewports);
+ }
+ 
+ static void
+@@ -3485,7 +3534,7 @@ dzn_cmd_buffer_update_scissors(struct dzn_cmd_buffer *cmdbuf)
+ 
+    if (!pipeline->scissor.count) {
+       /* Apply a scissor delimiting the render area. */
+-      ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, 1, &cmdbuf->state.render.area);
++      ID3D12GraphicsCommandList1_RSSetScissorRects((dzn_cmd_note(cmdbuf, "RSSetScissorRects"), cmdbuf->cmdlist), 1, &cmdbuf->state.render.area);
+       return;
+    }
+ 
+@@ -3499,7 +3548,7 @@ dzn_cmd_buffer_update_scissors(struct dzn_cmd_buffer *cmdbuf)
+       scissors[i].bottom = MIN2(scissors[i].bottom, cmdbuf->state.render.area.bottom);
+    }
+ 
+-   ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, pipeline->scissor.count, scissors);
++   ID3D12GraphicsCommandList1_RSSetScissorRects((dzn_cmd_note(cmdbuf, "RSSetScissorRects"), cmdbuf->cmdlist), pipeline->scissor.count, scissors);
+ }
+ 
+ static void
+@@ -3508,7 +3557,7 @@ dzn_cmd_buffer_update_vbviews(struct dzn_cmd_buffer *cmdbuf)
+    unsigned start, end;
+ 
+    BITSET_FOREACH_RANGE(start, end, cmdbuf->state.vb.dirty, MAX_VBS)
+-      ID3D12GraphicsCommandList1_IASetVertexBuffers(cmdbuf->cmdlist, start, end - start, &cmdbuf->state.vb.views[start]);
++      ID3D12GraphicsCommandList1_IASetVertexBuffers((dzn_cmd_note(cmdbuf, "IASetVertexBuffers"), cmdbuf->cmdlist), start, end - start, &cmdbuf->state.vb.views[start]);
+ 
+    BITSET_CLEAR_RANGE(cmdbuf->state.vb.dirty, 0, MAX_VBS);
+ }
+@@ -3519,7 +3568,7 @@ dzn_cmd_buffer_update_ibview(struct dzn_cmd_buffer *cmdbuf)
+    if (!(cmdbuf->state.dirty & DZN_CMD_DIRTY_IB))
+       return;
+ 
+-   ID3D12GraphicsCommandList1_IASetIndexBuffer(cmdbuf->cmdlist, &cmdbuf->state.ib.view);
++   ID3D12GraphicsCommandList1_IASetIndexBuffer((dzn_cmd_note(cmdbuf, "IASetIndexBuffer"), cmdbuf->cmdlist), &cmdbuf->state.ib.view);
+ }
+ 
+ static void
+@@ -3540,9 +3589,9 @@ dzn_cmd_buffer_update_push_constants(struct dzn_cmd_buffer *cmdbuf, uint32_t bin
+    uint32_t *vals = state->values + offset;
+ 
+    if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+-      ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants(cmdbuf->cmdlist, slot, count, vals, offset);
++      ID3D12GraphicsCommandList1_SetGraphicsRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetGraphicsRoot32BitConstants"), cmdbuf->cmdlist), slot, count, vals, offset);
+    else
+-      ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants(cmdbuf->cmdlist, slot, count, vals, offset);
++      ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetComputeRoot32BitConstants"), cmdbuf->cmdlist), slot, count, vals, offset);
+ 
+    state->offset = 0;
+    state->end = 0;
+@@ -3558,7 +3607,7 @@ dzn_cmd_buffer_update_zsa(struct dzn_cmd_buffer *cmdbuf)
+          cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
+       if (cmdbuf->cmdlist8 &&
+           pdev->options14.IndependentFrontAndBackStencilRefMaskSupported) {
+-         ID3D12GraphicsCommandList8_OMSetFrontAndBackStencilRef(cmdbuf->cmdlist8,
++         ID3D12GraphicsCommandList8_OMSetFrontAndBackStencilRef((dzn_cmd_note(cmdbuf, "OMSetFrontAndBackStencilRef"), cmdbuf->cmdlist8),
+                                                                 cmdbuf->state.zsa.stencil_test.front.ref,
+                                                                 cmdbuf->state.zsa.stencil_test.back.ref);
+       } else {
+@@ -3566,7 +3615,7 @@ dzn_cmd_buffer_update_zsa(struct dzn_cmd_buffer *cmdbuf)
+             gfx->zsa.stencil_test.front.uses_ref ?
+             cmdbuf->state.zsa.stencil_test.front.ref :
+             cmdbuf->state.zsa.stencil_test.back.ref;
+-         ID3D12GraphicsCommandList1_OMSetStencilRef(cmdbuf->cmdlist, ref);
++         ID3D12GraphicsCommandList1_OMSetStencilRef((dzn_cmd_note(cmdbuf, "OMSetStencilRef"), cmdbuf->cmdlist), ref);
+       }
+    }
+ }
+@@ -3575,7 +3624,7 @@ static void
+ dzn_cmd_buffer_update_blend_constants(struct dzn_cmd_buffer *cmdbuf)
+ {
+    if (cmdbuf->state.dirty & DZN_CMD_DIRTY_BLEND_CONSTANTS)
+-      ID3D12GraphicsCommandList1_OMSetBlendFactor(cmdbuf->cmdlist,
++      ID3D12GraphicsCommandList1_OMSetBlendFactor((dzn_cmd_note(cmdbuf, "OMSetBlendFactor"), cmdbuf->cmdlist),
+                                                   cmdbuf->state.blend.constants);
+ }
+ 
+@@ -3583,7 +3632,7 @@ static void
+ dzn_cmd_buffer_update_depth_bounds(struct dzn_cmd_buffer *cmdbuf)
+ {
+    if (cmdbuf->state.dirty & DZN_CMD_DIRTY_DEPTH_BOUNDS) {
+-      ID3D12GraphicsCommandList1_OMSetDepthBounds(cmdbuf->cmdlist,
++      ID3D12GraphicsCommandList1_OMSetDepthBounds((dzn_cmd_note(cmdbuf, "OMSetDepthBounds"), cmdbuf->cmdlist),
+                                                   cmdbuf->state.zsa.depth_bounds.min,
+                                                   cmdbuf->state.zsa.depth_bounds.max);
+    }
+@@ -3594,7 +3643,7 @@ dzn_cmd_buffer_update_depth_bias(struct dzn_cmd_buffer *cmdbuf)
+ {
+    if (cmdbuf->state.dirty & DZN_CMD_DIRTY_DEPTH_BIAS) {
+       assert(cmdbuf->cmdlist9);
+-      ID3D12GraphicsCommandList9_RSSetDepthBias(cmdbuf->cmdlist9,
++      ID3D12GraphicsCommandList9_RSSetDepthBias((dzn_cmd_note(cmdbuf, "RSSetDepthBias"), cmdbuf->cmdlist9),
+                                                 cmdbuf->state.pipeline_variant.depth_bias.constant_factor,
+                                                 cmdbuf->state.pipeline_variant.depth_bias.clamp,
+                                                 cmdbuf->state.pipeline_variant.depth_bias.slope_factor);
+@@ -3698,13 +3747,13 @@ dzn_cmd_buffer_triangle_fan_rewrite_index(struct dzn_cmd_buffer *cmdbuf,
+ 
+    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_COMPUTE].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
+    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_COMPUTE].root_sig = NULL;
+-   ID3D12GraphicsCommandList1_SetComputeRootSignature(cmdbuf->cmdlist, rewrite_index->root_sig);
+-   ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, rewrite_index->pipeline_state);
+-   ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView(cmdbuf->cmdlist, 0, ID3D12Resource_GetGPUVirtualAddress(new_index_buf));
+-   ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants(cmdbuf->cmdlist, 1, sizeof(params) / 4,
++   ID3D12GraphicsCommandList1_SetComputeRootSignature((dzn_cmd_note(cmdbuf, "SetComputeRootSignature"), cmdbuf->cmdlist), rewrite_index->root_sig);
++   ID3D12GraphicsCommandList1_SetPipelineState((dzn_cmd_note(cmdbuf, "SetPipelineState"), cmdbuf->cmdlist), rewrite_index->pipeline_state);
++   ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView((dzn_cmd_note(cmdbuf, "SetComputeRootUnorderedAccessView"), cmdbuf->cmdlist), 0, ID3D12Resource_GetGPUVirtualAddress(new_index_buf));
++   ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetComputeRoot32BitConstants"), cmdbuf->cmdlist), 1, sizeof(params) / 4,
+                                                  &params, 0);
+-   ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist, 2, old_index_buf_gpu);
+-   ID3D12GraphicsCommandList1_Dispatch(cmdbuf->cmdlist, triangle_count, 1, 1);
++   ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetComputeRootShaderResourceView"), cmdbuf->cmdlist), 2, old_index_buf_gpu);
++   ID3D12GraphicsCommandList1_Dispatch((dzn_cmd_note(cmdbuf, "Dispatch"), cmdbuf->cmdlist), triangle_count, 1, 1);
+ 
+    if (cmdbuf->enhanced_barriers) {
+       dzn_cmd_buffer_buffer_barrier(cmdbuf, new_index_buf,
+@@ -3883,28 +3932,28 @@ dzn_cmd_buffer_patch_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
+ 
+    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_COMPUTE].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
+    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_COMPUTE].root_sig = NULL;
+-   ID3D12GraphicsCommandList1_SetComputeRootSignature(cmdbuf->cmdlist, indirect_draw->root_sig);
+-   ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, indirect_draw->pipeline_state);
+-   ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants(cmdbuf->cmdlist, root_param_idx++,
++   ID3D12GraphicsCommandList1_SetComputeRootSignature((dzn_cmd_note(cmdbuf, "SetComputeRootSignature"), cmdbuf->cmdlist), indirect_draw->root_sig);
++   ID3D12GraphicsCommandList1_SetPipelineState((dzn_cmd_note(cmdbuf, "SetPipelineState"), cmdbuf->cmdlist), indirect_draw->pipeline_state);
++   ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetComputeRoot32BitConstants"), cmdbuf->cmdlist), root_param_idx++,
+                                                            params_size / 4, (const void *)&params, 0);
+-   ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist, root_param_idx++,
++   ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetComputeRootShaderResourceView"), cmdbuf->cmdlist), root_param_idx++,
+                                                                draw_buf_gpu);
+-   ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView(cmdbuf->cmdlist, root_param_idx++,
++   ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView((dzn_cmd_note(cmdbuf, "SetComputeRootUnorderedAccessView"), cmdbuf->cmdlist), root_param_idx++,
+                                                                 ID3D12Resource_GetGPUVirtualAddress(exec_buf));
+    if (*inout_count_buf) {
+-      ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist,
++      ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetComputeRootShaderResourceView"), cmdbuf->cmdlist),
+                                                                   root_param_idx++,
+                                                                   ID3D12Resource_GetGPUVirtualAddress(*inout_count_buf) +
+                                                                   *inout_count_buf_offset);
+    }
+ 
+    if (triangle_fan_exec_buf) {
+-      ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView(cmdbuf->cmdlist,
++      ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView((dzn_cmd_note(cmdbuf, "SetComputeRootUnorderedAccessView"), cmdbuf->cmdlist),
+                                                                    root_param_idx++,
+                                                                    ID3D12Resource_GetGPUVirtualAddress(triangle_fan_exec_buf));
+    }
+ 
+-   ID3D12GraphicsCommandList1_Dispatch(cmdbuf->cmdlist, max_draw_count, 1, 1);
++   ID3D12GraphicsCommandList1_Dispatch((dzn_cmd_note(cmdbuf, "Dispatch"), cmdbuf->cmdlist), max_draw_count, 1, 1);
+ 
+    D3D12_BUFFER_BARRIER buf_barriers[2];
+    D3D12_BARRIER_GROUP enhanced_barriers = {
+@@ -3941,22 +3990,22 @@ dzn_cmd_buffer_patch_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
+ 
+       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_COMPUTE].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
+       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_COMPUTE].root_sig = NULL;
+-      ID3D12GraphicsCommandList1_SetComputeRootSignature(cmdbuf->cmdlist, rewrite_index->root_sig);
+-      ID3D12GraphicsCommandList1_SetPipelineState(cmdbuf->cmdlist, rewrite_index->pipeline_state);
++      ID3D12GraphicsCommandList1_SetComputeRootSignature((dzn_cmd_note(cmdbuf, "SetComputeRootSignature"), cmdbuf->cmdlist), rewrite_index->root_sig);
++      ID3D12GraphicsCommandList1_SetPipelineState((dzn_cmd_note(cmdbuf, "SetPipelineState"), cmdbuf->cmdlist), rewrite_index->pipeline_state);
+       root_param_idx = 0;
+-      ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView(cmdbuf->cmdlist, root_param_idx++,
++      ID3D12GraphicsCommandList1_SetComputeRootUnorderedAccessView((dzn_cmd_note(cmdbuf, "SetComputeRootUnorderedAccessView"), cmdbuf->cmdlist), root_param_idx++,
+                                                                    ID3D12Resource_GetGPUVirtualAddress(triangle_fan_index_buf));
+-      ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants(cmdbuf->cmdlist, root_param_idx++,
++      ID3D12GraphicsCommandList1_SetComputeRoot32BitConstants((dzn_cmd_note(cmdbuf, "SetComputeRoot32BitConstants"), cmdbuf->cmdlist), root_param_idx++,
+                                                               sizeof(rewrite_index_params) / 4,
+                                                               (const void *)&rewrite_index_params, 0);
+ 
+       if (*inout_indexed) {
+-         ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView(cmdbuf->cmdlist,
++         ID3D12GraphicsCommandList1_SetComputeRootShaderResourceView((dzn_cmd_note(cmdbuf, "SetComputeRootShaderResourceView"), cmdbuf->cmdlist),
+                                                                      root_param_idx++,
+                                                                      cmdbuf->state.ib.view.BufferLocation);
+       }
+ 
+-      ID3D12GraphicsCommandList1_ExecuteIndirect(cmdbuf->cmdlist, rewrite_index->cmd_sig,
++      ID3D12GraphicsCommandList1_ExecuteIndirect((dzn_cmd_note(cmdbuf, "ExecuteIndirect"), cmdbuf->cmdlist), rewrite_index->cmd_sig,
+                                                  max_draw_count, triangle_fan_exec_buf, 0,
+                                                  *inout_count_buf ? exec_buf : NULL, 0);
+ 
+@@ -3994,7 +4043,7 @@ dzn_cmd_buffer_patch_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
+          .pResource = exec_buf,
+          .Offset = 0, .Size = UINT64_MAX
+       };
+-      ID3D12GraphicsCommandList8_Barrier(cmdbuf->cmdlist8, 1, &enhanced_barriers);
++      ID3D12GraphicsCommandList8_Barrier((dzn_cmd_note(cmdbuf, "Barrier"), cmdbuf->cmdlist8), 1, &enhanced_barriers);
+    }
+    else {
+       dzn_cmd_buffer_queue_transition_barriers(cmdbuf, exec_buf, 0, 1,
+@@ -4094,7 +4143,7 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
+ 
+       dzn_cmd_buffer_prepare_draw(cmdbuf, indexed);
+ 
+-      ID3D12GraphicsCommandList1_ExecuteIndirect(cmdbuf->cmdlist, cmdsig,
++      ID3D12GraphicsCommandList1_ExecuteIndirect((dzn_cmd_note(cmdbuf, "ExecuteIndirect"), cmdbuf->cmdlist), cmdsig,
+                                                  max_draw_count,
+                                                  draw_buf, draw_buf_offset,
+                                                  count_buf, count_buf_offset);
+@@ -4130,7 +4179,7 @@ dzn_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
+    for (int i = 0; i < info->regionCount; i++) {
+       const VkBufferCopy2 *region = info->pRegions + i;
+ 
+-      ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, dst_buffer->res, region->dstOffset,
++      ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), dst_buffer->res, region->dstOffset,
+                                         src_buffer->res, region->srcOffset,
+                                         region->size);
+    }
+@@ -4371,7 +4420,7 @@ dzn_alloc_and_bind_blit_heap_slots(struct dzn_cmd_buffer *cmdbuf,
+       ID3D12DescriptorHeap * const heaps[] = { (*view_heap)->heap, *sampler_heap ? (*sampler_heap)->heap : NULL };
+       cmdbuf->state.heaps[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV] = *view_heap;
+       cmdbuf->state.heaps[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER] = *sampler_heap;
+-      ID3D12GraphicsCommandList1_SetDescriptorHeaps(cmdbuf->cmdlist, *sampler_heap ? 2 : 1, heaps);
++      ID3D12GraphicsCommandList1_SetDescriptorHeaps((dzn_cmd_note(cmdbuf, "SetDescriptorHeaps"), cmdbuf->cmdlist), *sampler_heap ? 2 : 1, heaps);
+    }
+ 
+    return VK_SUCCESS;
+@@ -4403,7 +4452,7 @@ dzn_CmdBlitImage2(VkCommandBuffer commandBuffer,
+    if (result != VK_SUCCESS)
+       return;
+ 
+-   ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++   ID3D12GraphicsCommandList1_IASetPrimitiveTopology((dzn_cmd_note(cmdbuf, "IASetPrimitiveTopology"), cmdbuf->cmdlist), D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+ 
+    for (uint32_t r = 0; r < info->regionCount; r++)
+       dzn_cmd_buffer_blit_region(cmdbuf, info, heap, &heap_slot, sampler_heap, sampler_heap_slot, r);
+@@ -4439,7 +4488,7 @@ dzn_CmdResolveImage2(VkCommandBuffer commandBuffer,
+    if (result != VK_SUCCESS)
+       return;
+ 
+-   ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++   ID3D12GraphicsCommandList1_IASetPrimitiveTopology((dzn_cmd_note(cmdbuf, "IASetPrimitiveTopology"), cmdbuf->cmdlist), D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+ 
+    for (uint32_t r = 0; r < info->regionCount; r++)
+       dzn_cmd_buffer_resolve_region(cmdbuf, info, VK_RESOLVE_MODE_AVERAGE_BIT, heap, &heap_slot, sampler_heap, sampler_heap_slot, r);
+@@ -4501,7 +4550,7 @@ dzn_CmdDispatchBase(VkCommandBuffer commandBuffer,
+       DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+ 
+    dzn_cmd_buffer_prepare_dispatch(cmdbuf);
+-   ID3D12GraphicsCommandList1_Dispatch(cmdbuf->cmdlist, groupCountX, groupCountY, groupCountZ);
++   ID3D12GraphicsCommandList1_Dispatch((dzn_cmd_note(cmdbuf, "Dispatch"), cmdbuf->cmdlist), groupCountX, groupCountY, groupCountZ);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -4539,7 +4588,7 @@ dzn_CmdFillBuffer(VkCommandBuffer commandBuffer,
+ 
+    { ID3D12Resource_Unmap(src_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+-   ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset, src_res, src_offset, size);
++   ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), buf->res, dstOffset, src_res, src_offset, size);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -4579,7 +4628,7 @@ dzn_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
+    memcpy((uint8_t *)cpu_ptr + src_offset, data, size);
+    { ID3D12Resource_Unmap(src_res, 0, NULL); DZN_TRACE("Unmap"); }
+ 
+-   ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset, src_res, src_offset, size);
++   ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), buf->res, dstOffset, src_res, src_offset, size);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -4675,7 +4724,7 @@ dzn_cmd_buffer_resolve_rendering_attachment_via_blit(struct dzn_cmd_buffer *cmdb
+    if (result != VK_SUCCESS)
+       return;
+ 
+-   ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++   ID3D12GraphicsCommandList1_IASetPrimitiveTopology((dzn_cmd_note(cmdbuf, "IASetPrimitiveTopology"), cmdbuf->cmdlist), D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+ 
+    VkImageResolve2 region = {
+       .sType = VK_STRUCTURE_TYPE_IMAGE_RESOLVE_2,
+@@ -4811,7 +4860,7 @@ dzn_cmd_buffer_resolve_rendering_attachment(struct dzn_cmd_buffer *cmdbuf,
+ 
+          if (cmdbuf->cmdlist8 &&
+              pdev->options2.ProgrammableSamplePositionsTier > D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED) {
+-            ID3D12GraphicsCommandList8_ResolveSubresourceRegion(cmdbuf->cmdlist8,
++            ID3D12GraphicsCommandList8_ResolveSubresourceRegion((dzn_cmd_note(cmdbuf, "ResolveSubresourceRegion"), cmdbuf->cmdlist8),
+                                                                 dst_img->res, dst_subres,
+                                                                 0, 0,
+                                                                 src_img->res, src_subres,
+@@ -4819,7 +4868,7 @@ dzn_cmd_buffer_resolve_rendering_attachment(struct dzn_cmd_buffer *cmdbuf,
+                                                                 format,
+                                                                 dzn_get_resolve_mode(att->resolve.mode));
+          } else {
+-            ID3D12GraphicsCommandList1_ResolveSubresource(cmdbuf->cmdlist,
++            ID3D12GraphicsCommandList1_ResolveSubresource((dzn_cmd_note(cmdbuf, "ResolveSubresource"), cmdbuf->cmdlist),
+                                                           dst_img->res, dst_subres,
+                                                           src_img->res, src_subres,
+                                                           format);
+@@ -5004,7 +5053,7 @@ dzn_CmdBeginRendering(VkCommandBuffer commandBuffer,
+       }
+    }
+ 
+-   ID3D12GraphicsCommandList1_OMSetRenderTargets(cmdbuf->cmdlist,
++   ID3D12GraphicsCommandList1_OMSetRenderTargets((dzn_cmd_note(cmdbuf, "OMSetRenderTargets"), cmdbuf->cmdlist),
+                                                  pRenderingInfo->colorAttachmentCount,
+                                                  pRenderingInfo->colorAttachmentCount ? rt_handles : NULL,
+                                                  false, zs_handle.ptr ? &zs_handle : NULL);
+@@ -5308,7 +5357,7 @@ dzn_CmdDraw(VkCommandBuffer commandBuffer,
+          cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |=
+             DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+          dzn_cmd_buffer_prepare_draw(cmdbuf, true);
+-         ID3D12GraphicsCommandList1_DrawIndexedInstanced(cmdbuf->cmdlist, vertexCount, instanceCount, 0,
++         ID3D12GraphicsCommandList1_DrawIndexedInstanced((dzn_cmd_note(cmdbuf, "DrawIndexedInstanced"), cmdbuf->cmdlist), vertexCount, instanceCount, 0,
+                                                 firstVertex, firstInstance);
+       }
+ 
+@@ -5324,7 +5373,7 @@ dzn_CmdDraw(VkCommandBuffer commandBuffer,
+          cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |=
+             DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+          dzn_cmd_buffer_prepare_draw(cmdbuf, false);
+-         ID3D12GraphicsCommandList1_DrawInstanced(cmdbuf->cmdlist, vertexCount, instanceCount,
++         ID3D12GraphicsCommandList1_DrawInstanced((dzn_cmd_note(cmdbuf, "DrawInstanced"), cmdbuf->cmdlist), vertexCount, instanceCount,
+                                           firstVertex, firstInstance);
+       }
+    }
+@@ -5402,7 +5451,7 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
+          DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+ 
+       dzn_cmd_buffer_prepare_draw(cmdbuf, true);
+-      ID3D12GraphicsCommandList1_DrawIndexedInstanced(cmdbuf->cmdlist, indexCount, instanceCount, firstIndex,
++      ID3D12GraphicsCommandList1_DrawIndexedInstanced((dzn_cmd_note(cmdbuf, "DrawIndexedInstanced"), cmdbuf->cmdlist), indexCount, instanceCount, firstIndex,
+                                             vertexOffset, firstInstance);
+    }
+ 
+@@ -5609,7 +5658,7 @@ dzn_CmdWaitEvents2(VkCommandBuffer commandBuffer,
+             .UAV = {.pResource = NULL },
+          };
+ 
+-         ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &barrier);
++         ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), 1, &barrier);
+       }
+    }
+    cmdbuf->vk.base.device->dispatch_table.CmdPipelineBarrier2(
+@@ -5634,7 +5683,7 @@ dzn_CmdBeginQuery(VkCommandBuffer commandBuffer,
+    for (uint32_t i = 0; i < cmdbuf->state.multiview.num_views; ++i)
+       qpool->queries[query + i].type = dzn_query_pool_get_query_type(qpool, flags);
+ 
+-   ID3D12GraphicsCommandList1_BeginQuery(cmdbuf->cmdlist, qpool->heap, qpool->queries[query].type, query);
++   ID3D12GraphicsCommandList1_BeginQuery((dzn_cmd_note(cmdbuf, "BeginQuery"), cmdbuf->cmdlist), qpool->heap, qpool->queries[query].type, query);
+ 
+    dzn_cmd_buffer_dynbitset_clear_range(cmdbuf, &state->collect, query, cmdbuf->state.multiview.num_views);
+    dzn_cmd_buffer_dynbitset_clear_range(cmdbuf, &state->zero, query, cmdbuf->state.multiview.num_views);
+@@ -5653,7 +5702,7 @@ dzn_CmdEndQuery(VkCommandBuffer commandBuffer,
+    if (!state)
+       return;
+ 
+-   ID3D12GraphicsCommandList1_EndQuery(cmdbuf->cmdlist, qpool->heap, qpool->queries[query].type, query);
++   ID3D12GraphicsCommandList1_EndQuery((dzn_cmd_note(cmdbuf, "EndQuery"), cmdbuf->cmdlist), qpool->heap, qpool->queries[query].type, query);
+ 
+    dzn_cmd_buffer_dynbitset_set(cmdbuf, &state->collect, query);
+    if (cmdbuf->state.multiview.num_views > 1)
+@@ -5681,11 +5730,11 @@ dzn_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+       .UAV = { .pResource = NULL },
+    };
+ 
+-   ID3D12GraphicsCommandList1_ResourceBarrier(cmdbuf->cmdlist, 1, &barrier);
++   ID3D12GraphicsCommandList1_ResourceBarrier((dzn_cmd_note(cmdbuf, "ResourceBarrier"), cmdbuf->cmdlist), 1, &barrier);
+ 
+    for (uint32_t i = 0; i < cmdbuf->state.multiview.num_views; ++i)
+       qpool->queries[query + i].type = D3D12_QUERY_TYPE_TIMESTAMP;
+-   ID3D12GraphicsCommandList1_EndQuery(cmdbuf->cmdlist, qpool->heap, qpool->queries[query].type, query);
++   ID3D12GraphicsCommandList1_EndQuery((dzn_cmd_note(cmdbuf, "EndQuery"), cmdbuf->cmdlist), qpool->heap, qpool->queries[query].type, query);
+ 
+    dzn_cmd_buffer_dynbitset_set(cmdbuf, &state->collect, query);
+    if (cmdbuf->state.multiview.num_views > 1)
+@@ -5714,7 +5763,7 @@ dzn_CmdResetQueryPool(VkCommandBuffer commandBuffer,
+    for (uint32_t q = 0; q < queryCount; q += q_step) {
+       uint32_t q_count = MIN2(queryCount - q, q_step);
+ 
+-      ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, qpool->collect_buffer,
++      ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), qpool->collect_buffer,
+                                         dzn_query_pool_get_availability_offset(qpool, firstQuery + q),
+                                         device->queries.refs,
+                                         DZN_QUERY_REFS_ALL_ZEROS_OFFSET,
+@@ -5724,7 +5773,7 @@ dzn_CmdResetQueryPool(VkCommandBuffer commandBuffer,
+    q_step = DZN_QUERY_REFS_SECTION_SIZE / qpool->query_size;
+ 
+    for (uint32_t q = 0; q < queryCount; q += q_step) {
+-      ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, qpool->collect_buffer,
++      ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), qpool->collect_buffer,
+                                         dzn_query_pool_get_result_offset(qpool, firstQuery + q),
+                                         device->queries.refs,
+                                         DZN_QUERY_REFS_ALL_ZEROS_OFFSET,
+@@ -5794,7 +5843,7 @@ dzn_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
+    }
+ 
+    if (raw_copy) {
+-      ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset,
++      ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), buf->res, dstOffset,
+                                         qpool->collect_buffer,
+                                         dzn_query_pool_get_result_offset(qpool, firstQuery),
+                                         dzn_query_pool_get_result_size(qpool, queryCount));
+@@ -5810,21 +5859,21 @@ dzn_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
+                if (!(BITFIELD_BIT(c) & qpool->pipeline_statistics))
+                   continue;
+ 
+-               ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset + dst_counter_offset,
++               ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), buf->res, dstOffset + dst_counter_offset,
+                                                  qpool->collect_buffer,
+                                                  res_offset + (c * sizeof(uint64_t)),
+                                                  step);
+                dst_counter_offset += step;
+             }
+          } else {
+-            ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset,
++            ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), buf->res, dstOffset,
+                                               qpool->collect_buffer,
+                                               res_offset, step);
+             dst_counter_offset += step;
+          }
+ 
+          if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) {
+-            ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, buf->res, dstOffset + dst_counter_offset,
++            ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), buf->res, dstOffset + dst_counter_offset,
+                                               qpool->collect_buffer,
+                                               dzn_query_pool_get_availability_offset(qpool, firstQuery + q),
+                                               step);
+@@ -5892,11 +5941,11 @@ dzn_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                                                DZN_QUEUE_TRANSITION_FLUSH);
+    }
+ 
+-   ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, exec_buf, 0,
++   ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), exec_buf, 0,
+                                      buf->res,
+                                      offset,
+                                      sizeof(D3D12_DISPATCH_ARGUMENTS));
+-   ID3D12GraphicsCommandList1_CopyBufferRegion(cmdbuf->cmdlist, exec_buf, sizeof(D3D12_DISPATCH_ARGUMENTS),
++   ID3D12GraphicsCommandList1_CopyBufferRegion((dzn_cmd_note(cmdbuf, "CopyBufferRegion"), cmdbuf->cmdlist), exec_buf, sizeof(D3D12_DISPATCH_ARGUMENTS),
+                                      buf->res,
+                                      offset,
+                                      sizeof(D3D12_DISPATCH_ARGUMENTS));
+@@ -5912,7 +5961,7 @@ dzn_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                                                DZN_QUEUE_TRANSITION_FLUSH);
+    }
+ 
+-   ID3D12GraphicsCommandList1_ExecuteIndirect(cmdbuf->cmdlist, cmdsig, 1, exec_buf, 0, NULL, 0);
++   ID3D12GraphicsCommandList1_ExecuteIndirect((dzn_cmd_note(cmdbuf, "ExecuteIndirect"), cmdbuf->cmdlist), cmdsig, 1, exec_buf, 0, NULL, 0);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index 46153e9..dc16184 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -695,10 +695,16 @@ enum dzn_internal_buf_bucket {
+    DZN_INTERNAL_BUF_BUCKET_COUNT,
+ };
+ 
++#define DZN_CMD_NOTE_RING 64
++
+ struct dzn_cmd_buffer {
+    struct vk_command_buffer vk;
+    struct dzn_cmd_buffer_state state;
+ 
++   /* ONYX: names of the last D3D12 command-list calls, dumped when Close fails. */
++   const char *onyx_notes[DZN_CMD_NOTE_RING];
++   uint32_t onyx_note_count;
++
+    struct {
+       struct hash_table *ht;
+       struct util_dynarray reset;
+@@ -1378,4 +1384,13 @@ bool
+ dzn_view_format_allowed(const struct dzn_device *device, const struct dzn_image *image,
+                         DXGI_FORMAT view_format, const char *what);
+ 
++static inline void
++dzn_cmd_note(struct dzn_cmd_buffer *cmdbuf, const char *what)
++{
++   cmdbuf->onyx_notes[cmdbuf->onyx_note_count++ % DZN_CMD_NOTE_RING] = what;
++}
++
++void
++dzn_cmd_dump_notes(struct dzn_cmd_buffer *cmdbuf, const char *why);
++
+ #endif /* DZN_PRIVATE_H */
+-- 
+2.43.0
+
