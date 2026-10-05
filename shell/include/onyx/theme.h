@@ -57,7 +57,12 @@ struct ThemeStyle {
     double hover_scale = 1.08;
     int empty_slots = 12;         // fill the page with empty channels, Wii style
     bool show_clock = true;
-    std::string font = "Segoe UI Variable Display";
+    // XAML font family: a system font name or a packaged file,
+    // "ms-appx:///Assets/Fonts/<file>.ttf#<Family>". The default is the bundled
+    // Rounded M+ 1c (SIL OFL), a soft rounded face in the spirit of the classic
+    // console menus. font_bold is used for headings; empty = font + SemiBold.
+    std::string font = "ms-appx:///Assets/Fonts/RoundedMplus1c-Medium.ttf#Rounded Mplus 1c";
+    std::string font_bold = "ms-appx:///Assets/Fonts/RoundedMplus1c-Bold.ttf#Rounded Mplus 1c";
 };
 
 struct Theme {

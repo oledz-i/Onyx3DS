@@ -198,7 +198,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         return false;
     }
     if (core_crashed_) {
-        error = "The emulator stopped after an error earlier. Close and reopen ONYX 3DS to play again.";
+        error = "The emulator stopped after an error earlier. Restart ONYX 3DS to play again.";
         return false;
     }
     if (thread_.joinable()) thread_.join();
@@ -328,16 +328,21 @@ void EmulatorSession::OnCoreCrashed(const GuardedCrash& crash) {
     } catch (...) {
     }
     state_ = SessionState::Failed;
-    std::string reason = std::string("The emulator hit an error (") + crash.what + " in " +
-                         crash.where + ") and the game was stopped.";
+    // Plain words first; the technical line goes last for bug reports.
+    std::string reason;
     if (crash.in_jit)
-        reason += "\n\nIt happened in the CPU JIT, so ONYX switched the CPU to the interpreter "
-                  "(Settings > CPU JIT). Games will run slower until you switch it back.";
+        reason = "The emulator hit an error in the CPU JIT and the game was stopped. ONYX switched "
+                 "the CPU to the interpreter (Settings > CPU JIT), which is slower but safer.";
     else if (crashed_in_gpu_)
-        reason += "\n\nIt happened with the hardware renderer, so ONYX switched to the "
-                  "software renderer (Settings > Renderer). Games will run slower until you "
-                  "switch it back.";
-    reason += "\n\nClose and reopen ONYX 3DS before starting another game.";
+        reason = "The hardware renderer stopped working on this console, so the game was stopped. "
+                 "ONYX switched to the software renderer (Settings > Renderer); games will run "
+                 "slower until you switch it back.";
+    else
+        reason = "The emulator hit an error and the game was stopped.";
+    reason += "\n\nThe emulator can't be started again until ONYX restarts. Choose Restart ONYX to "
+              "restart it and reopen this game.";
+    reason += std::string("\n\nDetails: ") + crash.what + " in " + crash.where +
+              ". If it keeps happening, report it in the Issues tab on GitHub with your onyx.log.";
     std::function<void(const std::string&)> stopped;
     {
         std::lock_guard lock(events_mutex_);

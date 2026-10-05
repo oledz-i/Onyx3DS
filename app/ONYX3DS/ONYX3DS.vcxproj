@@ -241,6 +241,9 @@
     <None Include="Assets\Audio\**\*">
       <DeploymentContent>true</DeploymentContent>
     </None>
+    <None Include="Assets\Fonts\**\*">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
     <!-- Native drivers loaded with LoadPackagedLibrary; build-app.ps1 copies
          them here from deps\bin so they land at the package root. -->
     <None Include="vulkan_dzn.dll" Condition="Exists('vulkan_dzn.dll')">

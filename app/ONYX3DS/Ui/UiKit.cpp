@@ -35,8 +35,9 @@ TextBlock Text(const std::string& text, double size, bool bold, const std::strin
     TextBlock tb;
     tb.Text(H(text));
     tb.FontSize(size);
-    tb.FontFamily(FontFamily(H(T().style.font)));
-    if (bold) tb.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    tb.FontFamily(AppServices::Get().ThemeFont(bold));
+    if (bold && !AppServices::Get().ThemeHasBoldFont())
+        tb.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
     tb.Foreground(B(color_hex.empty() ? T().colors.text : color_hex));
     tb.TextWrapping(TextWrapping::WrapWholeWords);
     return tb;

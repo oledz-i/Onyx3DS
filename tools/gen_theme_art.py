@@ -125,6 +125,28 @@ def waves(img, color, base_y, amp, count, alpha, seed):
     return img * (1 - a) + c * a
 
 
+def dot_grid(img, spacing, size, color, alpha, fade_from=0.0):
+    """Rounded-square dot grid, fading toward the top (a handheld-menu look)."""
+    h, w, _ = img.shape
+    layer = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(layer)
+    off = spacing / 2
+    y = off
+    while y < h:
+        x = off
+        while x < w:
+            d.rounded_rectangle([x - size / 2, y - size / 2, x + size / 2, y + size / 2],
+                                radius=size * 0.3, fill=255)
+            x += spacing
+        y += spacing
+    layer = layer.filter(ImageFilter.GaussianBlur(0.6))
+    yy = np.arange(h)[:, None] / h
+    fade = np.clip((yy - fade_from) / (1 - fade_from), 0, 1) ** 1.3
+    a = np.asarray(layer, float) / 255 * alpha * (0.25 + 0.75 * fade)
+    c = np.array(hex_rgb(color), float)
+    return img * (1 - a[..., None]) + c * a[..., None]
+
+
 def save_rgb(arr, path, quality=90):
     Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB").save(path, quality=quality, optimize=True)
 
@@ -290,6 +312,11 @@ def round_button(face, rim, glyph_col, size=176):
     return Image.alpha_composite(img, gl)
 
 
+# Rounded M+ 1c (SIL OFL 1.1), bundled in Assets/Fonts: the soft, rounded
+# look of the classic console menus.
+FONT = "ms-appx:///Assets/Fonts/RoundedMplus1c-Medium.ttf#Rounded Mplus 1c"
+FONT_BOLD = "ms-appx:///Assets/Fonts/RoundedMplus1c-Bold.ttf#Rounded Mplus 1c"
+
 THEMES = [
     {
         "id": "aero-channel",
@@ -309,7 +336,7 @@ THEMES = [
         "button": ("#FFFFFF", "#3CB9EC"),
         "style": {"tile_corner_radius": 18, "tile_depth": 12, "tile_tilt": 6, "parallax": 1.0,
                   "hover_scale": 1.08, "empty_slots": 12, "show_clock": True,
-                  "font": "Segoe UI Variable Display"},
+                  "font": FONT, "font_bold": FONT_BOLD},
         "music": "aero-channel.m4a",
     },
     {
@@ -330,7 +357,7 @@ THEMES = [
         "button": ("#22243A", "#8F73FF"),
         "style": {"tile_corner_radius": 16, "tile_depth": 18, "tile_tilt": 7, "parallax": 1.0,
                   "hover_scale": 1.08, "empty_slots": 12, "show_clock": True,
-                  "font": "Segoe UI Variable Display"},
+                  "font": FONT, "font_bold": FONT_BOLD},
         "music": "midnight-onyx.m4a",
     },
     {
@@ -351,7 +378,7 @@ THEMES = [
         "button": ("#3A1C4A", "#FF6FAE"),
         "style": {"tile_corner_radius": 14, "tile_depth": 16, "tile_tilt": 8, "parallax": 1.2,
                   "hover_scale": 1.09, "empty_slots": 8, "show_clock": True,
-                  "font": "Bahnschrift"},
+                  "font": FONT, "font_bold": FONT_BOLD},
         "music": "sunset-arcade.m4a",
     },
     {
@@ -372,7 +399,7 @@ THEMES = [
         "button": ("#FBFCF7", "#6FAE5E"),
         "style": {"tile_corner_radius": 20, "tile_depth": 10, "tile_tilt": 4, "parallax": 0.8,
                   "hover_scale": 1.06, "empty_slots": 12, "show_clock": True,
-                  "font": "Segoe UI Variable Display"},
+                  "font": FONT, "font_bold": FONT_BOLD},
         "music": "aero-channel.m4a",
     },
     {
@@ -392,8 +419,29 @@ THEMES = [
         "button": ("#22252A", "#3DDC97"),
         "style": {"tile_corner_radius": 6, "tile_depth": 8, "tile_tilt": 0, "parallax": 0.4,
                   "hover_scale": 1.05, "empty_slots": 0, "show_clock": True,
-                  "font": "Segoe UI Variable Display"},
+                  "font": FONT, "font_bold": FONT_BOLD},
         "music": "midnight-onyx.m4a",
+    },
+    {
+        "id": "dual-screen",
+        "name": "Dual Screen",
+        "description": "Optional: clean silver and white with a dot grid, styled after the 3DS home menu.",
+        "colors": {
+            "background_top": "#FDFDFE", "background_bottom": "#D9DDE3", "accent": "#1F9BF0",
+            "accent_text": "#FFFFFF", "text": "#4A4F57", "text_muted": "#8D939C", "tile_face": "#FFFFFF",
+            "tile_edge": "#B8BEC7", "tile_glow": "#33B6FF", "bar": "#EEF0F3", "bar_text": "#585E67",
+            "panel": "#FFFFFFF0"},
+        "bg": {"top": "#FFFFFF", "bottom": "#D3D8DF", "light": "#FFFFFF", "light2": "#BFE6FF",
+               "stripes": 0.0, "wave": "#C7CDD6", "wave2": "#FFFFFF", "wave_alpha": 0.22,
+               "rays": 0.15, "dots": "#9AA3AF", "dots_alpha": 0.16, "vignette": 0.10, "grain": 1.6},
+        "bokeh": ["#FFFFFF", "#E3EEF8", "#CFE9FF"],
+        "bubbles": ["#FFFFFF", "#DDEFFF"],
+        "bar": ("#F7F8FA", "#CED3DA", "#1F9BF0"),
+        "button": ("#FFFFFF", "#1F9BF0"),
+        "style": {"tile_corner_radius": 12, "tile_depth": 8, "tile_tilt": 3, "parallax": 0.5,
+                  "hover_scale": 1.07, "empty_slots": 18, "show_clock": True,
+                  "font": FONT, "font_bold": FONT_BOLD},
+        "music": "dual-screen.m4a",
     },
 ]
 
@@ -415,6 +463,8 @@ def build(theme, seed):
         img = waves(img, bg["wave2"], H * 0.70, 30, 5, bg.get("wave_alpha", 0.45) * 0.8, seed + 9)
     if "grid" in bg:
         img = horizon_grid(img, bg["grid"], H * 0.58, 0.55)
+    if "dots" in bg:
+        img = dot_grid(img, 48, 14, bg["dots"], bg.get("dots_alpha", 0.10), 0.0)
     img = vignette(img, bg["vignette"])
     img = grain(img, bg["grain"], seed)
     save_rgb(img, os.path.join(out, "background.jpg"))
@@ -452,5 +502,8 @@ def build(theme, seed):
 
 
 if __name__ == "__main__":
+    import sys
+    only = set(sys.argv[1:])
     for i, t in enumerate(THEMES):
-        build(t, 1000 + i * 17)
+        if not only or t["id"] in only:
+            build(t, 1000 + i * 17)

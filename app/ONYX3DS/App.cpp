@@ -87,6 +87,7 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     ApplicationView::GetForCurrentView().FullScreenSystemOverlayMode(FullScreenSystemOverlayMode::Minimal);
 
     AppServices::Get().Initialize();
+    AppServices::Get().SetLaunchArguments(std::wstring(e.Arguments()));
 
     Frame root = Window::Current().Content().try_as<Frame>();
     if (!root) {
@@ -100,6 +101,7 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e) {
         });
         Window::Current().Content(root);
     }
+    AppServices::Get().ApplyGlobalFont();
     // B / Back: let the page decide first (close a panel, ignore in-game),
     // then go back a page.
     winrt::Windows::UI::Core::SystemNavigationManager::GetForCurrentView().BackRequested(

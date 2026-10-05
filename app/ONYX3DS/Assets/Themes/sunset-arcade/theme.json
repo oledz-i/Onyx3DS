@@ -43,6 +43,7 @@
     "hover_scale": 1.09,
     "empty_slots": 8,
     "show_clock": true,
-    "font": "Bahnschrift"
+    "font": "ms-appx:///Assets/Fonts/RoundedMplus1c-Medium.ttf#Rounded Mplus 1c",
+    "font_bold": "ms-appx:///Assets/Fonts/RoundedMplus1c-Bold.ttf#Rounded Mplus 1c"
   }
 }

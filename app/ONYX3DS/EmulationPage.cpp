@@ -267,7 +267,19 @@ void EmulationPage::OnStopped(const std::string& reason) {
                 : reason + "\n\nCommon fixes: use a decrypted dump, put aes_keys.txt / "
                            "seeddb.bin in your System folder, and check Settings > System check.")));
     d.CloseButtonText(L"Back to menu");
-    d.Closed([leave](auto&&, auto&&) { leave(); });
+    if (crashed) {
+        // The core can't run twice in one process after a crash: offer a restart
+        // that reopens the same game (with the safer setting already saved).
+        d.PrimaryButtonText(L"Restart ONYX");
+        d.DefaultButton(ContentDialogButton::Primary);
+    }
+    d.Closed([leave, crashed, path = game_.path](ContentDialog const&, ContentDialogClosedEventArgs const& args) {
+        if (crashed && args.Result() == ContentDialogResult::Primary) {
+            Svc().RestartApp(path);
+            return;
+        }
+        leave();
+    });
     d.ShowAsync();
 }
 

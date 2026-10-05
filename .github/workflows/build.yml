@@ -171,7 +171,8 @@ jobs:
   # Publishes a GitHub Release with just what an install needs: the .msix and
   # its x64 dependency (plus the map file for decoding crash logs). Runs for
   # a v* tag, or on main when the package version (Package.appxmanifest,
-  # e.g. 2.0.0.0 -> v2.0) has no release yet. Notes: docs/releases/<tag>.md.
+  # e.g. 2.1.0.0 -> v2.1.0) has no release yet and its notes,
+  # docs/releases/<tag>.md, are not marked "<!-- draft -->".
   release:
     needs: verify
     if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
@@ -191,10 +192,15 @@ jobs:
           else
             ver=$(grep -oP '<Identity[^>]*Version="\K[0-9.]+' app/ONYX3DS/Package.appxmanifest)
             IFS=. read -r a b c d <<< "$ver"
-            tag="v$a.$b"
-            [ "${c:-0}" != 0 ] && tag="$tag.$c"
+            tag="v$a.$b.${c:-0}"
           fi
-          if gh release view "$tag" >/dev/null 2>&1; then
+          notes="docs/releases/$tag.md"
+          if [[ "$GITHUB_REF" != refs/tags/v* ]] && { [ ! -f "$notes" ] || grep -q '<!-- draft' "$notes"; }; then
+            # Main builds only publish once the notes exist and are no longer
+            # marked as a draft, so a version bump can be tested first.
+            echo "Release notes for $tag are missing or a draft; not publishing."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; nothing to publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else

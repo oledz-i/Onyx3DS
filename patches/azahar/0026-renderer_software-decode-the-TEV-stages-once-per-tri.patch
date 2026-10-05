@@ -1,0 +1,241 @@
+From 0950cb2c7c674f7a8198ef8e7ed8aac1894e9794 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 06:36:51 -0400
+Subject: [PATCH 26/27] renderer_software: decode the TEV stages once per
+ triangle
+
+The texture combiner was ~28% of the emulation thread in NSMB2: every pixel
+re-read six stages of register bit fields, switched over sources and walked
+trailing pass-through stages. Decode the stages into plain bytes per
+triangle, read sources from a small table, skip multiplies by one and stop
+after the last stage that changes the colour. Same results.
+---
+ .../renderer_software/sw_rasterizer.cpp       | 153 +++++++++++++++++-
+ .../renderer_software/sw_rasterizer.h         |  33 ++++
+ 2 files changed, 183 insertions(+), 3 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index 8b2b8fd..2917e7a 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -408,6 +408,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+         }
+     }
+     const auto tev_stages = regs.texturing.GetTevStages();
++    const TevProgram tev = CompileTev(tev_stages);
+ 
+     // Enter rasterization loop, starting at the center of the topleft bounding box corner.
+     // TODO: Not sure if looping through x first might be faster
+@@ -620,9 +621,8 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 }
+ 
+                 // Write the TEV stages.
+-                auto combiner_output =
+-                    WriteTevConfig(texture_color, tev_stages, primary_color, primary_fragment_color,
+-                                   secondary_fragment_color);
++                auto combiner_output = RunTev(tev, texture_color, primary_color,
++                                              primary_fragment_color, secondary_fragment_color);
+ 
+                 if (shadow_mode) {
+                     const u32 depth_int = static_cast<u32>(depth * 0xFFFFFF);
+@@ -1071,6 +1071,153 @@ Common::Vec4<u8> RasterizerSoftware::PixelColor(u16 x, u16 y,
+     return result;
+ }
+ 
++RasterizerSoftware::TevProgram RasterizerSoftware::CompileTev(
++    std::span<const Pica::TexturingRegs::TevStageConfig, 6> tev_stages) const {
++    using Source = TexturingRegs::TevStageConfig::Source;
++    using Operation = TexturingRegs::TevStageConfig::Operation;
++    const auto operands = [](Operation op) -> u8 {
++        switch (op) {
++        case Operation::Replace:
++            return 1;
++        case Operation::Lerp:
++        case Operation::MultiplyThenAdd:
++        case Operation::AddThenMultiply:
++            return 3;
++        default:
++            return 2;
++        }
++    };
++    TevProgram p{};
++    p.buffer_init = Common::MakeVec(regs.texturing.tev_combiner_buffer_color.r.Value(),
++                                    regs.texturing.tev_combiner_buffer_color.g.Value(),
++                                    regs.texturing.tev_combiner_buffer_color.b.Value(),
++                                    regs.texturing.tev_combiner_buffer_color.a.Value())
++                        .Cast<u8>();
++    p.count = 0;
++    for (u32 i = 0; i < 6; ++i) {
++        const auto& t = tev_stages[i];
++        auto& st = p.stages[i];
++        st.color_op = t.color_op.Value();
++        st.alpha_op = t.alpha_op.Value();
++        st.color_operands = operands(st.color_op);
++        st.alpha_operands = operands(st.alpha_op);
++        st.color_mul = static_cast<u8>(t.GetColorMultiplier());
++        st.alpha_mul = static_cast<u8>(t.GetAlphaMultiplier());
++        st.updates_rgb =
++            regs.texturing.tev_combiner_buffer_input.TevStageUpdatesCombinerBufferColor(i);
++        st.updates_alpha =
++            regs.texturing.tev_combiner_buffer_input.TevStageUpdatesCombinerBufferAlpha(i);
++        st.constant = Common::MakeVec(t.const_r.Value(), t.const_g.Value(), t.const_b.Value(),
++                                      t.const_a.Value())
++                          .Cast<u8>();
++        const Source s1 = i == 0 && t.color_source1 == Source::Previous ? t.color_source3.Value()
++                                                                        : t.color_source1.Value();
++        const Source s2 = i == 0 && t.color_source2 == Source::Previous ? t.color_source3.Value()
++                                                                        : t.color_source2.Value();
++        st.color_src[0] = static_cast<u8>(s1) & 0xF;
++        st.color_src[1] = static_cast<u8>(s2) & 0xF;
++        st.color_src[2] = static_cast<u8>(t.color_source3.Value()) & 0xF;
++        st.alpha_src[0] = static_cast<u8>(t.alpha_source1.Value()) & 0xF;
++        st.alpha_src[1] = static_cast<u8>(t.alpha_source2.Value()) & 0xF;
++        st.alpha_src[2] = static_cast<u8>(t.alpha_source3.Value()) & 0xF;
++        st.color_mod[0] = t.color_modifier1.Value();
++        st.color_mod[1] = t.color_modifier2.Value();
++        st.color_mod[2] = t.color_modifier3.Value();
++        st.alpha_mod[0] = t.alpha_modifier1.Value();
++        st.alpha_mod[1] = t.alpha_modifier2.Value();
++        st.alpha_mod[2] = t.alpha_modifier3.Value();
++        st.pass_through =
++            i > 0 && st.color_op == Operation::Replace && st.alpha_op == Operation::Replace &&
++            t.color_source1 == Source::Previous &&
++            t.color_modifier1 == TexturingRegs::TevStageConfig::ColorModifier::SourceColor &&
++            t.alpha_source1 == Source::Previous &&
++            t.alpha_modifier1 == TexturingRegs::TevStageConfig::AlphaModifier::SourceAlpha &&
++            st.color_mul == 1 && st.alpha_mul == 1;
++        if (!st.pass_through) {
++            p.count = i + 1; // pass-through stages after the last real one change nothing
++        }
++    }
++    return p;
++}
++
++Common::Vec4<u8> RasterizerSoftware::RunTev(const TevProgram& program,
++                                            std::span<const Common::Vec4<u8>, 4> texture_color,
++                                            Common::Vec4<u8> primary_color,
++                                            Common::Vec4<u8> primary_fragment_color,
++                                            Common::Vec4<u8> secondary_fragment_color) {
++    // Inputs indexed by the 4-bit TEV source number; unknown sources read zero.
++    std::array<Common::Vec4<u8>, 16> src{};
++    src[0x0] = primary_color;
++    src[0x1] = primary_fragment_color;
++    src[0x2] = secondary_fragment_color;
++    src[0x3] = texture_color[0];
++    src[0x4] = texture_color[1];
++    src[0x5] = texture_color[2];
++    src[0x6] = texture_color[3];
++
++    Common::Vec4<u8> combiner_output = {0, 0, 0, 0};
++    Common::Vec4<u8> combiner_buffer = {0, 0, 0, 0};
++    Common::Vec4<u8> next_combiner_buffer = program.buffer_init;
++
++    for (u32 i = 0; i < program.count; ++i) {
++        const auto& st = program.stages[i];
++        if (!st.pass_through) {
++            src[0xd] = combiner_buffer;
++            src[0xe] = st.constant;
++            src[0xf] = combiner_output;
++
++            std::array<Common::Vec3<u8>, 3> color_result{};
++            color_result[0] = GetColorModifier(st.color_mod[0], src[st.color_src[0]]);
++            if (st.color_operands > 1) {
++                color_result[1] = GetColorModifier(st.color_mod[1], src[st.color_src[1]]);
++            }
++            if (st.color_operands > 2) {
++                color_result[2] = GetColorModifier(st.color_mod[2], src[st.color_src[2]]);
++            }
++            const Common::Vec3<u8> color_output = ColorCombine(st.color_op, color_result);
++
++            u8 alpha_output;
++            if (st.color_op == TexturingRegs::TevStageConfig::Operation::Dot3_RGBA) {
++                alpha_output = color_output.x;
++            } else {
++                std::array<u8, 3> alpha_result{};
++                alpha_result[0] = GetAlphaModifier(st.alpha_mod[0], src[st.alpha_src[0]]);
++                if (st.alpha_operands > 1) {
++                    alpha_result[1] = GetAlphaModifier(st.alpha_mod[1], src[st.alpha_src[1]]);
++                }
++                if (st.alpha_operands > 2) {
++                    alpha_result[2] = GetAlphaModifier(st.alpha_mod[2], src[st.alpha_src[2]]);
++                }
++                alpha_output = AlphaCombine(st.alpha_op, alpha_result);
++            }
++
++            if (st.color_mul == 1) {
++                combiner_output[0] = color_output.r();
++                combiner_output[1] = color_output.g();
++                combiner_output[2] = color_output.b();
++            } else {
++                combiner_output[0] = static_cast<u8>(std::min(255U, color_output.r() * u32{st.color_mul}));
++                combiner_output[1] = static_cast<u8>(std::min(255U, color_output.g() * u32{st.color_mul}));
++                combiner_output[2] = static_cast<u8>(std::min(255U, color_output.b() * u32{st.color_mul}));
++            }
++            combiner_output[3] =
++                st.alpha_mul == 1 ? alpha_output
++                                  : static_cast<u8>(std::min(255U, alpha_output * u32{st.alpha_mul}));
++        }
++
++        combiner_buffer = next_combiner_buffer;
++        if (st.updates_rgb) {
++            next_combiner_buffer.r() = combiner_output.r();
++            next_combiner_buffer.g() = combiner_output.g();
++            next_combiner_buffer.b() = combiner_output.b();
++        }
++        if (st.updates_alpha) {
++            next_combiner_buffer.a() = combiner_output.a();
++        }
++    }
++    return combiner_output;
++}
++
+ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+     std::span<const Common::Vec4<u8>, 4> texture_color,
+     std::span<const Pica::TexturingRegs::TevStageConfig, 6> tev_stages,
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index ccf4795..c31dd44 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -99,6 +99,39 @@ private:
+     /// Returns the final pixel color with blending or logic ops applied.
+     Common::Vec4<u8> PixelColor(u16 x, u16 y, Common::Vec4<u8> combiner_output) const;
+ 
++    /// The six TEV stages decoded once per triangle: register bit fields, the
++    /// stage-0 source substitution and the buffer-update masks become plain bytes,
++    /// pass-through stages are flagged, and trailing pass-through stages are cut.
++    struct TevProgram {
++        struct Stage {
++            u8 color_src[3];
++            u8 alpha_src[3];
++            Pica::TexturingRegs::TevStageConfig::ColorModifier color_mod[3];
++            Pica::TexturingRegs::TevStageConfig::AlphaModifier alpha_mod[3];
++            Pica::TexturingRegs::TevStageConfig::Operation color_op;
++            Pica::TexturingRegs::TevStageConfig::Operation alpha_op;
++            u8 color_operands;
++            u8 alpha_operands;
++            u8 color_mul;
++            u8 alpha_mul;
++            bool pass_through;
++            bool updates_rgb;
++            bool updates_alpha;
++            Common::Vec4<u8> constant;
++        };
++        std::array<Stage, 6> stages;
++        u32 count; // stages to run; the rest pass the result through unchanged
++        Common::Vec4<u8> buffer_init;
++    };
++    TevProgram CompileTev(std::span<const Pica::TexturingRegs::TevStageConfig, 6> tev_stages) const;
++
++    /// Runs a compiled TEV program (same results as WriteTevConfig).
++    static Common::Vec4<u8> RunTev(const TevProgram& program,
++                                   std::span<const Common::Vec4<u8>, 4> texture_color,
++                                   Common::Vec4<u8> primary_color,
++                                   Common::Vec4<u8> primary_fragment_color,
++                                   Common::Vec4<u8> secondary_fragment_color);
++
+     /// Emulates the TEV configuration and returns the combiner output.
+     Common::Vec4<u8> WriteTevConfig(
+         std::span<const Common::Vec4<u8>, 4> texture_color,
+-- 
+2.43.0
+

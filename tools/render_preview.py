@@ -17,6 +17,10 @@ W, H = 1920, 1080
 
 
 def font(size, bold=False):
+    bundled = os.path.join(os.path.dirname(__file__), "..", "app", "ONYX3DS", "Assets", "Fonts",
+                           "RoundedMplus1c-Bold.ttf" if bold else "RoundedMplus1c-Medium.ttf")
+    if os.path.exists(bundled):
+        return ImageFont.truetype(bundled, size)
     for name in (["DejaVuSans-Bold.ttf"] if bold else ["DejaVuSans.ttf"]):
         for d in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts"):
             p = os.path.join(d, name)

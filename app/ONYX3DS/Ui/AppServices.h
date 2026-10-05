@@ -13,6 +13,8 @@
 #include "onyx/library.h"
 #include "onyx/settings.h"
 #include "onyx/steamgriddb.h"
+
+#include <utility>
 #include "onyx/theme.h"
 
 namespace onyx::app {
@@ -50,6 +52,12 @@ public:
     winrt::Windows::UI::Color ThemeColor(const std::string& hex) const;
     winrt::Windows::UI::Xaml::Media::SolidColorBrush ThemeBrush(const std::string& hex) const;
     std::string ThemeAsset(const std::string& relative) const; // absolute path or ms-appx URI
+    // The theme's font (bold: its heading font). Falls back to Segoe UI when unset.
+    winrt::Windows::UI::Xaml::Media::FontFamily ThemeFont(bool bold = false) const;
+    // True when ThemeFont(true) is a real bold face (no synthetic weight needed).
+    bool ThemeHasBoldFont() const { return !CurrentTheme().style.font_bold.empty(); }
+    // Makes the theme font the default for every page, dialog and control.
+    void ApplyGlobalFont();
 
     // ---- sound ------------------------------------------------------------
     void PlaySfx(const char* id);
@@ -79,12 +87,21 @@ public:
     void SetBackOverride(std::function<bool()> handler) { back_override_ = std::move(handler); }
     bool TryHandleBack() { return back_override_ && back_override_(); }
 
+    // ---- restart ----------------------------------------------------------
+    // Restarts the app (settings flushed first) and reopens `game_path` once it
+    // is back; closes the app if the system refuses the restart.
+    void RestartApp(const std::string& game_path);
+    // Launch arguments "resume=<path>" from a restart: read once.
+    void SetLaunchArguments(const std::wstring& args);
+    std::string TakeResumePath() { return std::exchange(resume_path_, {}); }
+
     // ---- toasts -------------------------------------------------------------
     // Pages register a sink; messages from background work land there.
     void SetToastSink(std::function<void(const std::string&)> sink);
     void Toast(const std::string& text);
 
 private:
+    std::string resume_path_;
     AppServices() = default;
     void LoadSounds();
     void StartMusicLocked();

@@ -155,6 +155,7 @@ const Theme& AppServices::CurrentTheme() const {
 void AppServices::SetTheme(const std::string& id) {
     settings_.qol.theme_id = id;
     SaveSettings();
+    ApplyGlobalFont();
     LoadSounds();
     if (settings_.qol.menu_music) {
         StopMusic(false);
@@ -208,6 +209,54 @@ std::string AppServices::ThemeAsset(const std::string& relative) const {
         return "ms-appx:///" + rel;
     }
     return t.Resolve(relative);
+}
+
+void AppServices::SetLaunchArguments(const std::wstring& args) {
+    constexpr std::wstring_view kResume = L"resume=";
+    if (args.rfind(kResume, 0) == 0) resume_path_ = winrt::to_string(args.substr(kResume.size()));
+}
+
+void AppServices::RestartApp(const std::string& game_path) {
+    ONYX_INFO("Restarting ONYX%s", game_path.empty() ? "" : " to reopen the game");
+    FlushSettings();
+    const std::wstring args = game_path.empty() ? L"" : L"resume=" + winrt::to_hstring(game_path);
+    try {
+        auto op = winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(args);
+        op.Completed([](auto const& async, winrt::Windows::Foundation::AsyncStatus status) {
+            // Success never comes back (the app is gone); anything else: just close.
+            ONYX_WARN("Restart refused (status %d, reason %d); closing instead", static_cast<int>(status),
+                      status == winrt::Windows::Foundation::AsyncStatus::Completed
+                          ? static_cast<int>(async.GetResults())
+                          : -1);
+            winrt::Windows::ApplicationModel::Core::CoreApplication::Exit();
+        });
+    } catch (winrt::hresult_error const& e) {
+        ONYX_WARN("Restart not available (0x%08X); closing instead", static_cast<unsigned>(e.code().value));
+        winrt::Windows::ApplicationModel::Core::CoreApplication::Exit();
+    }
+}
+
+FontFamily AppServices::ThemeFont(bool bold) const {
+    const auto& style = CurrentTheme().style;
+    const std::string& name = bold && !style.font_bold.empty() ? style.font_bold : style.font;
+    if (name.empty()) return FontFamily(L"Segoe UI");
+    return FontFamily(winrt::to_hstring(name));
+}
+
+void AppServices::ApplyGlobalFont() {
+    try {
+        const FontFamily font = ThemeFont(false);
+        // Control templates (buttons, toggles, dialogs, combo boxes) read this resource.
+        auto resources = winrt::Windows::UI::Xaml::Application::Current().Resources();
+        resources.Insert(winrt::box_value(L"ContentControlThemeFontFamily"), font);
+        // Plain TextBlocks inherit the font from the root Frame.
+        if (auto window = winrt::Windows::UI::Xaml::Window::Current()) {
+            if (auto frame = window.Content().try_as<winrt::Windows::UI::Xaml::Controls::Frame>())
+                frame.FontFamily(font);
+        }
+    } catch (winrt::hresult_error const& e) {
+        ONYX_WARN("Could not apply the theme font: 0x%08X", static_cast<unsigned>(e.code().value));
+    }
 }
 
 // ---------------------------------------------------------------------------

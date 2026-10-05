@@ -1,0 +1,36 @@
+From cb0466f63f26ecf3b6537769abe38fc9ea209b2d Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 06:36:51 -0400
+Subject: [PATCH 27/27] libretro: log the screen rectangles whenever the layout
+ changes
+
+---
+ src/citra_libretro/emu_window/libretro_window.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/citra_libretro/emu_window/libretro_window.cpp b/src/citra_libretro/emu_window/libretro_window.cpp
+index 415bb73..676d91e 100644
+--- a/src/citra_libretro/emu_window/libretro_window.cpp
++++ b/src/citra_libretro/emu_window/libretro_window.cpp
+@@ -353,6 +353,18 @@ void EmuWindow_LibRetro::UpdateLayout() {
+     height = baseY;
+ 
+     UpdateCurrentFramebufferLayout(baseX, baseY);
++    {
++        const auto& l = GetFramebufferLayout();
++        LOG_INFO(Frontend,
++                 "Layout {} {}x{} (proportion {:.2f}, swapped {}): top {} [{},{} {}x{}], "
++                 "bottom {} [{},{} {}x{}]",
++                 static_cast<int>(Settings::values.layout_option.GetValue()), baseX, baseY,
++                 Settings::values.large_screen_proportion.GetValue(),
++                 Settings::values.swap_screen.GetValue(), l.top_screen_enabled, l.top_screen.left,
++                 l.top_screen.top, l.top_screen.GetWidth(), l.top_screen.GetHeight(),
++                 l.bottom_screen_enabled, l.bottom_screen.left, l.bottom_screen.top,
++                 l.bottom_screen.GetWidth(), l.bottom_screen.GetHeight());
++    }
+ 
+     doCleanFrame = true;
+ }
+-- 
+2.43.0
+

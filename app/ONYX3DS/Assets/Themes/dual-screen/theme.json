@@ -1,21 +1,21 @@
 {
-  "id": "matcha",
-  "name": "Matcha",
+  "id": "dual-screen",
+  "name": "Dual Screen",
   "author": "ONYX 3DS",
-  "description": "Calm green paper tones with soft daylight.",
+  "description": "Optional: clean silver and white with a dot grid, styled after the 3DS home menu.",
   "colors": {
-    "background_top": "#F3F6EC",
-    "background_bottom": "#CFDDBF",
-    "accent": "#5C9E4F",
+    "background_top": "#FDFDFE",
+    "background_bottom": "#D9DDE3",
+    "accent": "#1F9BF0",
     "accent_text": "#FFFFFF",
-    "text": "#3F4A38",
-    "text_muted": "#7D8A72",
-    "tile_face": "#FBFCF7",
-    "tile_edge": "#AEBF9E",
-    "tile_glow": "#86C46F",
-    "bar": "#E6EDDB",
-    "bar_text": "#4F5C46",
-    "panel": "#FBFCF7EE"
+    "text": "#4A4F57",
+    "text_muted": "#8D939C",
+    "tile_face": "#FFFFFF",
+    "tile_edge": "#B8BEC7",
+    "tile_glow": "#33B6FF",
+    "bar": "#EEF0F3",
+    "bar_text": "#585E67",
+    "panel": "#FFFFFFF0"
   },
   "textures": {
     "background": "background.jpg",
@@ -29,19 +29,19 @@
     "cursor": "cursor.png"
   },
   "audio": {
-    "music": "../../Audio/aero-channel.m4a",
+    "music": "../../Audio/dual-screen.m4a",
     "move": "../../Audio/move.wav",
     "select": "../../Audio/select.wav",
     "back": "../../Audio/back.wav",
     "launch": "../../Audio/launch.wav"
   },
   "style": {
-    "tile_corner_radius": 20,
-    "tile_depth": 10,
-    "tile_tilt": 4,
-    "parallax": 0.8,
-    "hover_scale": 1.06,
-    "empty_slots": 12,
+    "tile_corner_radius": 12,
+    "tile_depth": 8,
+    "tile_tilt": 3,
+    "parallax": 0.5,
+    "hover_scale": 1.07,
+    "empty_slots": 18,
     "show_clock": true,
     "font": "ms-appx:///Assets/Fonts/RoundedMplus1c-Medium.ttf#Rounded Mplus 1c",
     "font_bold": "ms-appx:///Assets/Fonts/RoundedMplus1c-Bold.ttf#Rounded Mplus 1c"

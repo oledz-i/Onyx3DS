@@ -65,6 +65,9 @@ foreach ($bin in Get-ChildItem $x -Include *.exe, *.dll -Recurse) {
 }
 $assets = Get-ChildItem (Join-Path $x "Assets") -Recurse -File -ErrorAction SilentlyContinue
 $rep += "Package Assets: $($assets.Count) files; themes: " + ((Get-ChildItem (Join-Path $x "Assets\Themes") -Directory -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', ')
+$fonts = Get-ChildItem (Join-Path $x "Assets\Fonts") -Filter *.ttf -File -ErrorAction SilentlyContinue
+$rep += "Package fonts: " + (($fonts | ForEach-Object Name) -join ', ')
+if (-not $fonts) { $rep += "   MISSING: Assets\Fonts (menus would fall back to Segoe UI)" }
 $rep | Set-Content report-imports.txt
 $rep | Write-Host
 

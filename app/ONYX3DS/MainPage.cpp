@@ -85,6 +85,14 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
     if (!resume_checked_) {
         resume_checked_ = true;
         const auto& cfg = Svc().Config();
+        // A restart after a crash reopens the game it was playing.
+        if (const std::string resume = Svc().TakeResumePath(); !resume.empty()) {
+            if (auto g = Svc().Library().Find(resume)) {
+                ONYX_INFO("Reopening %s after the restart", g->title.c_str());
+                Frame().Navigate(xaml_typename<ONYX3DS::EmulationPage>(), box_value(kit::H(g->path)));
+                return;
+            }
+        }
         if (cfg.qol.resume_last_game && !cfg.last_played_path.empty()) {
             if (auto g = Svc().Library().Find(cfg.last_played_path)) {
                 Frame().Navigate(xaml_typename<ONYX3DS::EmulationPage>(), box_value(kit::H(g->path)));
@@ -109,8 +117,10 @@ void MainPage::ApplyTheme() {
     FarLayer().Source(ImageFromFile(Svc().ThemeAsset(t.textures.background_far)));
     NearLayer().Source(ImageFromFile(Svc().ThemeAsset(t.textures.background_near)));
     BarImage().Source(ImageFromFile(Svc().ThemeAsset(t.textures.bar)));
-    const auto font = winrt::Windows::UI::Xaml::Media::FontFamily(kit::H(t.style.font));
-    for (auto tb : {TitleText(), InfoText(), ClockText(), DateText(), HintText()}) tb.FontFamily(font);
+    const auto font = Svc().ThemeFont(false);
+    for (auto tb : {InfoText(), DateText(), HintText()}) tb.FontFamily(font);
+    // Title and clock use the heading face (a real bold file when the theme ships one).
+    for (auto tb : {TitleText(), ClockText()}) tb.FontFamily(Svc().ThemeFont(true));
     TitleText().Foreground(Svc().ThemeBrush(t.colors.text));
     InfoText().Foreground(Svc().ThemeBrush(t.colors.text_muted));
     ClockText().Foreground(Svc().ThemeBrush(t.colors.bar_text));

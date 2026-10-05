@@ -163,87 +163,231 @@ def encode_m4a(wav_path, m4a_path):
 # ---------------------------------------------------------------------------
 # Songs. Chords are lists of MIDI notes; each chord lasts one bar.
 
+def lowpass(x, cutoff):
+    """One-pole low-pass (vectorised)."""
+    from scipy.signal import lfilter
+    a = np.exp(-2 * np.pi * cutoff / SR)
+    return lfilter([1 - a], [1, -a], x)
+
+
+def piano_note(freq, dur, vel=0.3, release=0.25):
+    """Soft felt piano: slightly inharmonic partials whose highs fade first,
+    a quiet hammer knock and a short damper release."""
+    n = int((dur + release) * SR)
+    t = np.arange(n) / SR
+    out = np.zeros(n)
+    B = 0.0004
+    for k in range(1, 9):
+        fk = freq * k * np.sqrt(1 + B * k * k)
+        if fk > 16000:
+            break
+        amp = (0.9 ** (k - 1)) / k ** 0.7
+        decay = 0.9 + 0.55 * k + freq / 900
+        out += amp * np.sin(2 * np.pi * fk * t + k * 0.3) * np.exp(-t * decay)
+    out *= (1 - np.exp(-t * 900))
+    knock = np.random.default_rng(int(freq)).standard_normal(n) * np.exp(-t * 120) * 0.02
+    out = out + lowpass(knock, 2500)
+    gate = np.ones(n)
+    off = int(dur * SR)
+    if off < n:
+        gate[off:] = np.exp(-np.arange(n - off) / SR * (4.6 / release))
+    return out * gate * vel
+
+
+def marimba_note(freq, dur, vel=0.3):
+    n = int(dur * SR)
+    t = np.arange(n) / SR
+    s = (np.sin(2 * np.pi * freq * t) * np.exp(-t * 7)
+         + 0.35 * np.sin(2 * np.pi * freq * 3.93 * t) * np.exp(-t * 22)
+         + 0.12 * np.sin(2 * np.pi * freq * 9.2 * t) * np.exp(-t * 45))
+    return s * (1 - np.exp(-t * 1500)) * vel
+
+
+def soft_pad(freq, dur, vel=0.12, cutoff=1100.0, attack=1.2, release=1.6):
+    n = int((dur + release) * SR)
+    t = np.arange(n) / SR
+    s = np.zeros(n)
+    for det, ph in ((-0.09, 0.0), (0.0, 1.3), (0.08, 2.1)):
+        f = freq * 2 ** (det / 12)
+        s += np.sin(2 * np.pi * f * t + ph) + 0.35 * np.sin(4 * np.pi * f * t + ph) + 0.15 * (2 * ((t * f + ph) % 1.0) - 1)
+    s = lowpass(s, cutoff)
+    e = np.minimum(1, t / attack)
+    off = int(dur * SR)
+    e[off:] *= np.exp(-np.arange(n - off) / SR * (4.6 / release))
+    swell = 1 + 0.08 * np.sin(2 * np.pi * 0.11 * t)
+    return s * e * swell * vel / 3
+
+
+def echo_loop(x, delay_s, feedback=0.35, taps=4):
+    """Circular feedback delay (wraps across the loop point)."""
+    out = x.copy()
+    d = int(delay_s * SR)
+    g = 1.0
+    for i in range(1, taps + 1):
+        g *= feedback
+        out += np.roll(x, d * i, axis=0) * g
+    return out
+
+
+def play_melody(buf, notes, spb, beats, voice, transpose=0, vel=0.3, swing=0.0):
+    for bar, pos, note, length in notes:
+        sw = swing if (pos * 2) % 2 == 1 else 0.0
+        add(buf, (bar * beats + pos + sw) * spb, voice(midi_hz(note + transpose), length * spb, vel))
+
+
 def song_aero():
-    """Breezy 92 BPM bossa-ish loop in F major: EP comping, round bass,
-    music-box melody and soft brushes."""
-    bpm, beats = 92, 4
-    prog = [
-        [53, 57, 60, 64], [52, 55, 59, 62], [50, 53, 57, 60], [52, 55, 60, 64],
-        [46, 50, 53, 57], [45, 48, 52, 55], [43, 46, 50, 53], [48, 53, 55, 58],
-    ] * 4  # 32 bars
-    roots = [53, 52, 50, 52, 46, 45, 43, 48] * 4
+    """'Plaza': calm, bouncy home-menu loop in F major, 104 BPM, in the spirit
+    of the classic console menus: felt piano melody, staccato off-beat
+    chords, plucked bass, a whisper of pad and shaker. Original composition."""
+    bpm, beats = 104, 4
     spb = 60 / bpm
-    total = len(prog) * beats * spb
-    L = int(total * SR)
-    ep, bass, mel, perc = (np.zeros(L) for _ in range(4))
-    rnd = random.Random(7)
-    # comping rhythm (in beats) with a bossa push on the "and" of 2
-    comp = [(0.0, 1.2), (1.5, 0.9), (2.5, 1.0), (3.5, 0.6)]
-    for bar, chord in enumerate(prog):
-        b0 = bar * beats * spb
-        for k, (pos, length) in enumerate(comp):
-            for i, note in enumerate(chord):
-                vel = 0.20 if k else 0.26
-                add(ep, b0 + pos * spb + i * 0.012, ep_note(midi_hz(note + 12), length * spb, vel))
-        r = roots[bar]
-        for pos, n, v in ((0, r, 0.55), (1.5, r + 7, 0.40), (2, r + 12, 0.30), (3, r + 7, 0.40)):
-            add(bass, b0 + pos * spb, bass_note(midi_hz(n - 12), 0.9 * spb, v))
-        # brushes: swung eighths, accent on 2 and 4
-        for e in range(8):
-            swing = 0.08 if e % 2 else 0.0
-            vel = 0.10 if e % 2 else 0.07
-            add(perc, b0 + (e * 0.5 + swing) * spb, noise_hit(0.12, 6500, 2500, vel, bar * 8 + e))
-        for beat in (1, 3):
-            add(perc, b0 + beat * spb, noise_hit(0.2, 2500, 1800, 0.12, 999 + bar))
-        add(perc, b0, thump(0.35, 0.22))
-        add(perc, b0 + 2.5 * spb, thump(0.3, 0.14))
-    # melody: phrases of 2 bars drawn from chord tones + major pentatonic
-    scale = [65, 67, 69, 72, 74, 77, 79, 81]
-    for phrase in range(0, len(prog), 2):
-        if phrase % 8 == 6:
-            continue  # breathe
-        b0 = phrase * beats * spb
-        t = 0.0
-        while t < 7.0:
-            step = rnd.choice([0.5, 0.5, 1.0, 1.0, 1.5])
-            note = rnd.choice(scale + [n + 12 for n in prog[phrase][1:3]])
-            add(mel, b0 + t * spb, bell_note(midi_hz(note), 1.6, 0.20 + rnd.random() * 0.08))
-            t += step
-    mix = np.zeros((L, 2))
-    mix += pan(ep, -0.15)
-    mix += pan(bass, 0.0)
-    mix += pan(mel, 0.25)
-    mix += pan(perc, 0.05) * 0.9
-    return master(reverb_loop(mix, 2.2, 0.26))
+    # one chord per half bar
+    A = [("F", [53, 57, 60, 64])] * 2 + [("Am", [57, 60, 64, 67])] * 2 + \
+        [("Bb", [58, 62, 65, 69])] * 2 + [("C6", [60, 64, 67, 69])] * 2 + \
+        [("F", [53, 57, 60, 64])] * 2 + [("Dm", [50, 53, 57, 60])] * 2 + \
+        [("Gm", [55, 58, 62, 65])] * 2 + [("Csus", [48, 53, 55, 58])] * 2
+    B = [("Bb", [58, 62, 65, 69])] * 2 + [("Am", [57, 60, 64, 67])] * 2 + \
+        [("Gm", [55, 58, 62, 65])] * 2 + [("F", [53, 57, 60, 64])] * 2 + \
+        [("Bb", [58, 62, 65, 69])] * 2 + [("A7", [57, 61, 64, 67])] * 2 + \
+        [("Dm", [50, 53, 57, 60]), ("G7", [55, 59, 62, 65])] + [("Csus", [48, 53, 55, 58]), ("C7", [48, 52, 55, 58])]
+    halves = A + A + B + A
+    bars = len(halves) // 2
+    L = int(bars * beats * spb * SR)
+    piano, chords, bass, pad, shaker, sparkle = (np.zeros(L) for _ in range(6))
+    melA = [(0, 0, 69, .5), (0, .5, 72, .5), (0, 1, 76, 1), (0, 2.5, 74, .5), (0, 3, 72, 1),
+            (1, .5, 76, .5), (1, 1, 76, .5), (1, 1.5, 72, .5), (1, 2, 69, 1.5),
+            (2, 0, 74, .5), (2, .5, 77, .5), (2, 1, 81, 1), (2, 2.5, 79, .5), (2, 3, 77, 1),
+            (3, 0, 76, 1.5), (3, 1.5, 74, .5), (3, 2, 72, 2),
+            (4, 0, 69, .5), (4, .5, 72, .5), (4, 1, 77, 1), (4, 2.5, 76, .5), (4, 3, 77, .5), (4, 3.5, 79, .5),
+            (5, 0, 81, 1.5), (5, 1.5, 77, .5), (5, 2, 74, 2),
+            (6, .5, 70, .5), (6, 1, 74, .5), (6, 1.5, 77, .5), (6, 2, 76, 1), (6, 3, 74, 1),
+            (7, 0, 72, 3)]
+    melB = [(0, 0, 74, 1), (0, 1, 72, .5), (0, 1.5, 74, .5), (0, 2, 77, 1.5),
+            (1, 0, 76, 1), (1, 1, 74, .5), (1, 1.5, 76, .5), (1, 2, 72, 1.5),
+            (2, 0, 70, .5), (2, .5, 74, .5), (2, 1, 79, 1), (2, 2, 77, .5), (2, 2.5, 74, .5), (2, 3, 70, 1),
+            (3, 0, 69, 3),
+            (4, 0, 77, .5), (4, .5, 79, .5), (4, 1, 81, 1), (4, 2, 79, .5), (4, 2.5, 77, .5), (4, 3, 74, 1),
+            (5, 0, 73, 1), (5, 1, 76, 1), (5, 2, 79, 1.5),
+            (6, 0, 77, 1), (6, 1, 74, 1), (6, 2, 71, 1), (6, 3, 74, 1),
+            (7, 0, 76, 2)]
+    mel = []
+    for section, start in ((melA, 0), (melA, 8), (melB, 16), (melA, 24)):
+        mel += [(b + start, p, n, d) for b, p, n, d in section]
+    play_melody(piano, mel, spb, beats, lambda f, d, v: piano_note(f, d * 0.92, v), vel=0.34, swing=0.06)
+    play_melody(sparkle, [m for m in mel if m[3] >= 1], spb, beats,
+                lambda f, d, v: bell_note(f, 1.4, v), transpose=12, vel=0.05)
+    for h, (_, chord) in enumerate(halves):
+        t0 = h * 2 * spb
+        # staccato off-beat chord on the half bar's second beat, root-position voicing
+        for i, note in enumerate(chord):
+            add(chords, t0 + (1 + 0.06) * spb + i * 0.008, piano_note(midi_hz(note), 0.32 * spb, 0.10, 0.12))
+        add(pad, t0, np.concatenate([soft_pad(midi_hz(chord[1]), 2 * spb, 0.05, 900, 0.4, 0.6)]))
+        root = chord[0]
+        while root > 50:
+            root -= 12
+        add(bass, t0, bass_note(midi_hz(root - 12 + (7 if h % 4 == 3 else 0)), 0.8 * spb, 0.42))
+        for e in range(4):
+            add(shaker, t0 + (e * 0.5 + (0.06 if e % 2 else 0)) * spb,
+                noise_hit(0.07, 7600, 1800, 0.035 if e % 2 else 0.022, 200 + h * 4 + e))
+    mix = pan(piano, -0.08) + pan(chords, 0.18) * 0.9 + pan(bass, 0) + pan(pad, -0.2) + \
+        pan(shaker, 0.3) + pan(sparkle, 0.35)
+    return master(reverb_loop(mix, 2.4, 0.24), 0.78)
 
 
 def song_midnight():
-    """Slow, dark lo-fi loop in D minor: warm pad, sub bass, glassy arps."""
-    bpm, beats = 78, 4
-    prog = [[50, 53, 57, 60], [46, 50, 53, 57], [43, 46, 50, 53], [45, 49, 52, 55]] * 6
+    """'Afterglow': slow ambient console-dashboard loop, 60 BPM. Swelling
+    pads, sparse felt-piano notes with echoes, glassy shimmer, sub bass.
+    Original composition."""
+    bpm, beats = 60, 4
     spb = 60 / bpm
+    prog = [  # two bars each
+        [47, 54, 57, 62, 66],   # Bm9
+        [43, 50, 54, 59, 62],   # Gmaj7
+        [42, 50, 54, 57, 61],   # D/F#
+        [40, 47, 54, 55, 59],   # Em9
+        [47, 54, 57, 61, 62],   # Bm(add9)
+        [43, 50, 55, 57, 62],   # Gmaj9-ish
+        [45, 52, 57, 59, 64],   # Aadd9
+        [42, 49, 54, 57, 61],   # F#m7
+    ]
+    bars = len(prog) * 2
+    L = int(bars * beats * spb * SR)
+    pad, keys, sub, glass = (np.zeros(L) for _ in range(4))
+    piano_lines = [  # (beat within the 8-beat chord, chord-tone index, octave shift)
+        [(0, 4, 12), (1.5, 3, 12), (3, 2, 12), (5, 4, 12), (6.5, 3, 24)],
+        [(0.5, 3, 12), (2, 4, 12), (4, 2, 12), (5.5, 3, 12)],
+    ]
+    for c, chord in enumerate(prog):
+        t0 = c * 2 * beats * spb
+        for note in chord[1:]:
+            add(pad, t0, soft_pad(midi_hz(note), 2 * beats * spb, 0.10, 800, 2.6, 2.8))
+        add(sub, t0, soft_pad(midi_hz(chord[0] - 12), 2 * beats * spb, 0.16, 300, 1.5, 2.0))
+        for beat, idx, octv in piano_lines[c % 2]:
+            add(keys, t0 + beat * spb, piano_note(midi_hz(chord[idx] + octv), 1.6 * spb, 0.17, 1.2))
+        for k in range(4):
+            add(glass, t0 + (k * 2 + 1) * spb,
+                bell_note(midi_hz(chord[1 + (k + c) % 4] + 36), 3.0, 0.035))
+    keys = echo_loop(keys[:, None], 0.75 * spb, 0.38, 4)[:, 0]
+    glass = echo_loop(glass[:, None], 1.5 * spb, 0.45, 5)[:, 0]
+    mix = pan(pad, 0) + pan(sub, 0) + pan(keys, -0.12) + pan(glass, 0.3)
+    return master(reverb_loop(mix, 4.0, 0.42), 0.74)
+
+
+def song_dual():
+    """'Pocket Plaza': bright, bouncy handheld home-menu loop in G major,
+    120 BPM: marimba arpeggios, kalimba-like melody, walking bass, brushes
+    and soft snaps. Original composition."""
+    bpm, beats = 120, 4
+    spb = 60 / bpm
+    A = [[55, 59, 62, 66], [52, 55, 59, 62], [57, 60, 64, 67], [50, 54, 57, 60],
+         [59, 62, 66, 69], [52, 55, 59, 62], [48, 52, 55, 59], [50, 55, 57, 60]]
+    Bp = [[48, 52, 55, 59], [59, 62, 66, 69], [57, 60, 64, 67], [55, 59, 62, 66],
+          [48, 52, 55, 59], [59, 63, 66, 69], [52, 55, 59, 62], [57, 60, 64, 67]]
+    prog = A + A + Bp + A
     L = int(len(prog) * beats * spb * SR)
-    pad, bass, arp, perc = (np.zeros(L) for _ in range(4))
-    rnd = random.Random(11)
+    mar, mel, bass, perc, ep = (np.zeros(L) for _ in range(5))
+    melA = [(0, 0, 71, .5), (0, .5, 74, .5), (0, 1, 78, 1), (0, 2, 76, .5), (0, 2.5, 74, .5), (0, 3, 71, 1),
+            (1, 0, 79, 1.5), (1, 1.5, 78, .5), (1, 2, 76, 1), (1, 3, 74, 1),
+            (2, 0, 72, .5), (2, .5, 76, .5), (2, 1, 81, 1), (2, 2, 79, .5), (2, 2.5, 76, .5), (2, 3, 72, 1),
+            (3, 0, 78, 1), (3, 1, 76, .5), (3, 1.5, 74, .5), (3, 2, 72, 1), (3, 3, 69, 1),
+            (4, 0, 74, .5), (4, .5, 78, .5), (4, 1, 81, 1.5), (4, 2.5, 78, .5), (4, 3, 74, 1),
+            (5, 0, 71, 1), (5, 1, 74, .5), (5, 1.5, 76, .5), (5, 2, 79, 2),
+            (6, 0, 76, .5), (6, .5, 79, .5), (6, 1, 76, .5), (6, 1.5, 74, .5), (6, 2, 72, .5), (6, 2.5, 71, .5), (6, 3, 72, 1),
+            (7, 0, 74, 3)]
+    melB = [(0, 0, 76, 1), (0, 1, 79, 1), (0, 2, 72, .5), (0, 2.5, 76, .5), (0, 3, 79, 1),
+            (1, 0, 78, 1.5), (1, 1.5, 74, .5), (1, 2, 71, 2),
+            (2, 0, 69, .5), (2, .5, 72, .5), (2, 1, 76, 1), (2, 2, 79, .5), (2, 2.5, 76, .5), (2, 3, 72, 1),
+            (3, 0, 74, 3),
+            (4, 0, 79, .5), (4, .5, 81, .5), (4, 1, 79, 1), (4, 2, 76, .5), (4, 2.5, 72, .5), (4, 3, 76, 1),
+            (5, 0, 75, 1), (5, 1, 78, 1), (5, 2, 81, 2),
+            (6, 0, 79, 1), (6, 1, 76, 1), (6, 2, 73, 1), (6, 3, 76, 1),
+            (7, 0, 72, 1.5), (7, 1.5, 69, .5), (7, 2, 78, 2)]
+    notes = []
+    for section, start in ((melA, 0), (melA, 8), (melB, 16), (melA, 24)):
+        notes += [(b + start, p, n, d) for b, p, n, d in section]
+    play_melody(mel, notes, spb, beats, lambda f, d, v: bell_note(f, max(0.6, d * 1.2), v), vel=0.26)
+    play_melody(mel, notes, spb, beats, lambda f, d, v: marimba_note(f, max(0.4, d), v), vel=0.12)
+    arp = [0, 2, 1, 3, 2, 1, 3, 2]
     for bar, chord in enumerate(prog):
         b0 = bar * beats * spb
-        for note in chord:
-            add(pad, b0, pad_note(midi_hz(note), beats * spb * 1.05, 0.16, 1200))
-        add(bass, b0, bass_note(midi_hz(chord[0] - 12), 2.5 * spb, 0.6))
-        add(bass, b0 + 2.5 * spb, bass_note(midi_hz(chord[0] - 12), 1.4 * spb, 0.4))
-        order = chord[1:] + [chord[0] + 12, chord[2] + 12]
-        for s in range(8):
-            if rnd.random() < 0.18:
-                continue
-            note = order[(s * 3 + bar) % len(order)] + 12
-            add(arp, b0 + s * 0.5 * spb, bell_note(midi_hz(note), 1.2, 0.12))
-        add(perc, b0, thump(0.4, 0.3))
-        add(perc, b0 + 2 * spb, noise_hit(0.25, 1900, 1200, 0.16, bar))
+        for e, idx in enumerate(arp):
+            add(mar, b0 + e * 0.5 * spb, marimba_note(midi_hz(chord[idx]), 0.5, 0.13 if e % 2 else 0.17))
+        for i, note in enumerate(chord):
+            add(ep, b0 + i * 0.01, ep_note(midi_hz(note), 3.6 * spb, 0.06))
+        root = chord[0]
+        while root > 52:
+            root -= 12
+        walk = [root, root + 7, root + 12, root + 7] if bar % 2 == 0 else [root, root + 4, root + 7, root + 9]
+        for q, n in enumerate(walk):
+            add(bass, b0 + q * spb, bass_note(midi_hz(n - 12), 0.85 * spb, 0.42 if q == 0 else 0.32))
         for e in range(8):
-            add(perc, b0 + e * 0.5 * spb + (0.06 if e % 2 else 0), noise_hit(0.08, 8000, 2000, 0.05, 50 + e))
-    crackle = (np.random.default_rng(5).random(L) > 0.9993) * np.random.default_rng(6).uniform(-0.2, 0.2, L)
-    mix = pan(pad, 0) + pan(bass, 0) + pan(arp, 0.3) + pan(perc, -0.05) + pan(crackle, 0) * 0.6
-    return master(reverb_loop(mix, 2.8, 0.32))
+            add(perc, b0 + e * 0.5 * spb, noise_hit(0.09, 6800, 2200, 0.05 if e % 2 else 0.035, 400 + bar * 8 + e))
+        for q in (1, 3):
+            snap = noise_hit(0.12, 2600, 900, 0.10, 900 + bar * 2 + q)
+            add(perc, b0 + q * spb, snap)
+        add(perc, b0, thump(0.25, 0.12))
+    mix = pan(mar, 0.2) + pan(mel, -0.1) + pan(bass, 0) + pan(perc, 0.05) * 0.8 + pan(ep, -0.25)
+    return master(reverb_loop(mix, 1.8, 0.22), 0.78)
 
 
 def song_sunset():
@@ -302,13 +446,20 @@ def sfx():
 def main():
     os.makedirs(OUT, exist_ok=True)
     tmp = os.path.join(OUT, "_tmp.wav")
-    for name, fn in (("aero-channel", song_aero), ("midnight-onyx", song_midnight),
-                     ("sunset-arcade", song_sunset)):
+    import sys
+    songs = (("aero-channel", song_aero), ("midnight-onyx", song_midnight),
+             ("sunset-arcade", song_sunset), ("dual-screen", song_dual))
+    only = set(sys.argv[1:])
+    for name, fn in songs:
+        if only and name not in only:
+            continue
         data = fn()
         write_wav(tmp, data)
         encode_m4a(tmp, os.path.join(OUT, name + ".m4a"))
         print(f"{name}: {len(data) / SR:.1f}s")
     os.remove(tmp)
+    if only and "sfx" not in only:
+        return
     for name, data in sfx().items():
         write_wav(os.path.join(OUT, name + ".wav"), data)
         print("sfx", name)

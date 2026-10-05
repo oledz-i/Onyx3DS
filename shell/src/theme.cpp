@@ -97,6 +97,9 @@ std::optional<Theme> Theme::Parse(std::string_view text, const std::string& fold
         if (auto it = s->find("show_clock"); it != s->end() && it->is_boolean())
             o.show_clock = it->get<bool>();
         Str(*s, "font", o.font);
+        // A theme that names its own font but no bold one bolds that font.
+        if (s->contains("font") && !s->contains("font_bold")) o.font_bold.clear();
+        Str(*s, "font_bold", o.font_bold);
     }
     return t;
 }
@@ -122,7 +125,8 @@ std::string Theme::ToJson() const {
          {{"tile_corner_radius", style.tile_corner_radius}, {"tile_depth", style.tile_depth},
           {"tile_tilt", style.tile_tilt}, {"parallax", style.parallax},
           {"hover_scale", style.hover_scale}, {"empty_slots", style.empty_slots},
-          {"show_clock", style.show_clock}, {"font", style.font}}},
+          {"show_clock", style.show_clock}, {"font", style.font},
+          {"font_bold", style.font_bold}}},
     };
     return j.dump(2);
 }
