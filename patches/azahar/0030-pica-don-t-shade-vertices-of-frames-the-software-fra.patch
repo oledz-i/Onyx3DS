@@ -1,0 +1,45 @@
+From 5f5013ac786cdcbc29eaa39501e3a560d475d204 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 07:51:05 -0400
+Subject: [PATCH] pica: don't shade vertices of frames the software frame skip
+ drops
+
+In NSMB2 the emulation thread is the bottleneck (80% busy while the drawing
+threads idle half the time), and vertex loading/shading plus clipping is
+~20% of it. Skipped frames are never shown and their triangles are dropped,
+so skip their vertex work too (geometry-shader draws still run).
+---
+ src/video_core/pica/pica_core.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/video_core/pica/pica_core.cpp b/src/video_core/pica/pica_core.cpp
+index 910ebc2..a46a258 100644
+--- a/src/video_core/pica/pica_core.cpp
++++ b/src/video_core/pica/pica_core.cpp
+@@ -11,6 +11,7 @@
+ #include "core/memory.h"
+ #include "video_core/debug_utils/debug_utils.h"
+ #include "video_core/pica/pica_core.h"
++#include "video_core/renderer_software/sw_frame_skip.h"
+ #include "video_core/pica/vertex_loader.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/shader/shader.h"
+@@ -1083,6 +1084,15 @@ void PicaCore::DrawArrays(bool is_indexed) {
+         return;
+     }
+ 
++    // Software frame skip: a skipped frame is never shown and its triangles are dropped
++    // anyway, so don't run the vertex shader for it either. Geometry-shader draws still
++    // run, since the GS unit keeps state between draws.
++    if (SwRenderer::FrameSkip::skipping.load(std::memory_order_relaxed) &&
++        regs.internal.pipeline.use_gs != PipelineRegs::UseGS::Yes) {
++        SwRenderer::FrameSkip::drew.store(true, std::memory_order_relaxed);
++        return;
++    }
++
+     // We cannot accelerate the draw, so load and execute the vertex shader for each vertex.
+     LoadVertices(is_indexed);
+ 
+-- 
+2.43.0
+
