@@ -4,6 +4,10 @@
 // for the home menu's sound effects.
 #pragma once
 
+namespace AudioCore {
+class TimeStretcher;
+}
+
 namespace onyx::app {
 
 class AudioOutput {
@@ -28,6 +32,10 @@ public:
     // Small resampling nudge (±0.5%) that keeps the queue near its target
     // without audible pitch change; called once per frame by the pacer.
     void SetRateNudge(double ratio);
+    // Called after every emulated frame. While emulation runs slower than real
+    // time, the frame's audio is time-stretched (same pitch, longer) to fill the
+    // real time that passed, instead of leaving gaps that crackle.
+    void EndFrame();
 
 private:
     struct Callback;
@@ -44,6 +52,13 @@ private:
     size_t next_ = 0;
     std::vector<int16_t> staging_;
     std::atomic<uint64_t> submitted_frames_{0};
+    void Submit(const int16_t* data, size_t frames);
+    std::vector<int16_t> frame_in_;  // this frame's samples (EndFrame consumes them)
+    std::vector<int16_t> stretch_out_;
+    std::unique_ptr<AudioCore::TimeStretcher> stretcher_;
+    bool stretching_ = false;
+    int fast_frames_ = 0;
+    std::chrono::steady_clock::time_point last_frame_{};
     float volume_ = 1.0f;
     bool muted_ = false;
 };

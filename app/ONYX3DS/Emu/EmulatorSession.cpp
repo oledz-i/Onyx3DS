@@ -519,6 +519,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             if (now > deadline + std::chrono::milliseconds(50)) deadline = now; // too far behind
             else timer.SleepUntil(deadline);
         }
+        if (!ffw) audio_.EndFrame();
         // Keep ~60 ms of audio queued by nudging playback speed by <=0.5%.
         if (!ffw && audio_.SampleRate()) {
             const double target = audio_.SampleRate() * 0.06;

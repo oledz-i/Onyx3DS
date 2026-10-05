@@ -1,0 +1,124 @@
+From 2f204ed8a9b16b4401b2c7c0d999be7aa60fd999 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 21:43:09 -0400
+Subject: [PATCH] libretro (software): skip rebuilding unchanged frames;
+ compose screens on the drawing threads
+
+---
+ .../emu_window/libretro_window.cpp            | 24 +++++++++++++++++--
+ .../emu_window/libretro_window.h              |  1 +
+ .../renderer_software/renderer_software.cpp   |  4 +++-
+ .../renderer_software/sw_frame_skip.h         |  2 ++
+ 4 files changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/src/citra_libretro/emu_window/libretro_window.cpp b/src/citra_libretro/emu_window/libretro_window.cpp
+index 2e864b7..415bb73 100644
+--- a/src/citra_libretro/emu_window/libretro_window.cpp
++++ b/src/citra_libretro/emu_window/libretro_window.cpp
+@@ -7,6 +7,7 @@
+ #endif
+ #include <libretro.h>
+ 
++#include <algorithm>
+ #include <cstring>
+ #include <vector>
+ #include "audio_core/audio_types.h"
+@@ -21,6 +22,7 @@
+ #endif
+ #include "video_core/gpu.h"
+ #include "video_core/renderer_software/renderer_software.h"
++#include "video_core/renderer_software/sw_frame_skip.h"
+ 
+ #ifdef ENABLE_OPENGL
+ /// LibRetro expects a "default" GL state.
+@@ -95,6 +97,17 @@ void EmuWindow_LibRetro::SwapBuffers() {
+         break;
+     }
+     case Settings::GraphicsAPI::Software: {
++        // Frame skip left the picture unchanged: tell the frontend to keep showing the
++        // last one instead of rebuilding and copying the whole output again.
++        if (SwRenderer::FrameSkip::unchanged.load(std::memory_order_relaxed) && !doCleanFrame &&
++            sent_software_frame) {
++            LibRetro::UploadVideoFrame(nullptr, static_cast<unsigned>(width),
++                                       static_cast<unsigned>(height), 0);
++            break;
++        }
++        sent_software_frame = true;
++        auto* sw_rasterizer = static_cast<SwRenderer::RasterizerSoftware*>(
++            Core::System::GetInstance().GPU().Renderer().Rasterizer());
+         retro_framebuffer fb;
+         u8* data;
+         size_t pitch;
+@@ -135,15 +148,21 @@ void EmuWindow_LibRetro::SwapBuffers() {
+ 
+             // Source column for every output column, computed once per screen
+             // instead of a division per pixel. Same mapping as before.
+-            thread_local std::vector<u32> col_src;
++            std::vector<u32> col_src;
+             col_src.resize(rect_w);
+             for (u32 ox = 0; ox < rect_w; ox++) {
+                 col_src[ox] = ox * native_w / rect_w;
+             }
+             const size_t src_size = info.pixels.size();
++            // Bands of output rows are independent: spread them over the renderer's
++            // drawing threads.
++            constexpr u32 kBandRows = 32;
++            const u32 bands = (rect_h + kBandRows - 1) / kBandRows;
++            sw_rasterizer->ParallelFor(bands, [&](u32 band) {
++            const u32 band_end = std::min(rect_h, (band + 1) * kBandRows);
+             u32 prev_dy = ~0u;
+             u8* prev_row = nullptr;
+-            for (u32 oy = 0; oy < rect_h; oy++) {
++            for (u32 oy = band * kBandRows; oy < band_end; oy++) {
+                 const u32 dy = oy * native_h / rect_h;
+                 u8* dst_row = data + static_cast<size_t>(rect.top + oy) * pitch +
+                               static_cast<size_t>(rect.left) * 4;
+@@ -169,6 +188,7 @@ void EmuWindow_LibRetro::SwapBuffers() {
+                 prev_dy = dy;
+                 prev_row = dst_row;
+             }
++            });
+         };
+ 
+         if (layout.top_screen_enabled) {
+diff --git a/src/citra_libretro/emu_window/libretro_window.h b/src/citra_libretro/emu_window/libretro_window.h
+index 1ff793f..fdc5b52 100644
+--- a/src/citra_libretro/emu_window/libretro_window.h
++++ b/src/citra_libretro/emu_window/libretro_window.h
+@@ -70,6 +70,7 @@ private:
+     bool submittedFrame = false;
+ 
+     // Hack to ensure stuff runs on the main thread
++    bool sent_software_frame = false;
+     bool doCleanFrame = false;
+ 
+     // For tracking LibRetro state
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index baa02df..344c877 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -24,7 +24,9 @@ RendererSoftware::~RendererSoftware() = default;
+ void RendererSoftware::SwapBuffers() {
+     system.perf_stats->StartSwap();
+     // A skipped frame left the previous picture in memory: keep the converted one.
+-    if (!FrameSkip::skipping.load(std::memory_order_relaxed)) {
++    const bool frame_was_skipped = FrameSkip::skipping.load(std::memory_order_relaxed);
++    FrameSkip::unchanged.store(frame_was_skipped, std::memory_order_relaxed);
++    if (!frame_was_skipped) {
+         PrepareRenderTarget();
+     }
+     const u32 skip = FrameSkip::setting.load(std::memory_order_relaxed);
+diff --git a/src/video_core/renderer_software/sw_frame_skip.h b/src/video_core/renderer_software/sw_frame_skip.h
+index 5c3cc62..c4c831d 100644
+--- a/src/video_core/renderer_software/sw_frame_skip.h
++++ b/src/video_core/renderer_software/sw_frame_skip.h
+@@ -19,4 +19,6 @@ inline std::atomic<bool> skipping{false};
+ /// The game asked for drawing since the last vblank (frames where it draws nothing,
+ /// e.g. every other vblank of a 30 fps game, are not counted).
+ inline std::atomic<bool> drew{false};
++/// The frame just presented was skipped (screen contents unchanged since the last one).
++inline std::atomic<bool> unchanged{false};
+ } // namespace SwRenderer::FrameSkip
+-- 
+2.43.0
+

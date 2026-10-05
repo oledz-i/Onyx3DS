@@ -2,6 +2,8 @@
 #include "pch.h"
 #include "Emu/AudioOutput.h"
 
+#include "Emu/AzaharBridge.h"
+
 #include "Platform/Log.h"
 #include "Platform/UwpPlatform.h"
 
@@ -52,6 +54,10 @@ bool AudioOutput::Start(uint32_t sample_rate) {
     for (auto& b : pool_) b.assign(kFramesPerBuffer * 2, 0);
     staging_.clear();
     staging_.reserve(kFramesPerBuffer * 2);
+    frame_in_.clear();
+    stretching_ = false;
+    last_frame_ = {};
+    if (stretcher_) stretcher_->Clear();
     submitted_frames_ = 0;
     rate_ = sample_rate;
     voice_->SetVolume(muted_ ? 0.0f : volume_);
@@ -86,8 +92,65 @@ size_t AudioOutput::QueuedFrames() const {
 
 void AudioOutput::Push(const int16_t* data, size_t frames) {
     if (!voice_ || frames == 0) return;
-    // ~150 ms cap: anything more is latency nobody wants.
-    if (QueuedFrames() > rate_ * 15 / 100) return;
+    // Collected per emulated frame; EndFrame decides whether to stretch it.
+    frame_in_.insert(frame_in_.end(), data, data + frames * 2);
+}
+
+void AudioOutput::EndFrame() {
+    const auto now = std::chrono::steady_clock::now();
+    const double dt = last_frame_ == std::chrono::steady_clock::time_point{}
+                          ? 0.0
+                          : std::chrono::duration<double>(now - last_frame_).count();
+    last_frame_ = now;
+    if (!voice_ || frame_in_.empty()) {
+        frame_in_.clear();
+        return;
+    }
+    const size_t in = frame_in_.size() / 2;
+    const double want = std::clamp(dt, 0.0, 0.25) * rate_; // frames real time consumed
+    const size_t queued = QueuedFrames();
+
+    if (!stretching_) {
+        // Behind real time and the queue has run dry: start stretching.
+        if (want > in * 1.15 && queued < rate_ * 3 / 100) {
+            stretching_ = true;
+            fast_frames_ = 0;
+            if (!stretcher_) stretcher_ = std::make_unique<AudioCore::TimeStretcher>();
+            stretcher_->SetOutputSampleRate(rate_);
+            ONYX_INFO("Audio: emulation is behind real time, stretching audio");
+        }
+    }
+    if (!stretching_) {
+        // ~150 ms cap: anything more is latency nobody wants.
+        if (queued <= rate_ * 15 / 100) Submit(frame_in_.data(), in);
+        frame_in_.clear();
+        return;
+    }
+
+    // Ask the stretcher for the real time that passed, steered toward ~60 ms queued.
+    const double target = rate_ * 0.06;
+    double out = want + (target - static_cast<double>(queued)) * 0.25;
+    out = std::clamp(out, in * 0.9, in * 4.0);
+    const size_t num_out = static_cast<size_t>(out);
+    stretch_out_.resize(num_out * 2);
+    const size_t written = stretcher_->Process(frame_in_.data(), in, stretch_out_.data(), num_out);
+    Submit(stretch_out_.data(), written);
+    frame_in_.clear();
+
+    // Back at full speed for ~2 s: stop stretching (flush what the stretcher holds).
+    fast_frames_ = want <= in * 1.05 ? fast_frames_ + 1 : 0;
+    if (fast_frames_ >= 120) {
+        stretching_ = false;
+        stretcher_->Flush();
+        stretch_out_.resize(rate_ / 10 * 2);
+        const size_t rest = stretcher_->Process(nullptr, 0, stretch_out_.data(), rate_ / 10);
+        Submit(stretch_out_.data(), rest);
+        stretcher_->Clear();
+        ONYX_INFO("Audio: emulation caught up, audio stretching off");
+    }
+}
+
+void AudioOutput::Submit(const int16_t* data, size_t frames) {
     size_t i = 0;
     while (i < frames) {
         const size_t room = kFramesPerBuffer - staging_.size() / 2;
