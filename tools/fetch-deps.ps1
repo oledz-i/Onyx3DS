@@ -15,14 +15,40 @@ if (!(Test-Path "$azahar\.git")) {
     Write-Step "Cloning Azahar $AzaharCommit"
     Invoke-Checked git clone $AzaharRepo $azahar
 }
+# A cached tree can be incomplete (a cancelled run saved it half-fetched): missing
+# sources or empty submodules. Check for that and repair, or start over.
+function Test-AzaharTree($dir) {
+    foreach ($f in @("src\CMakeLists.txt", "externals\dynarmic\CMakeLists.txt",
+                     "externals\xxHash\xxhash.h", "externals\glslang\CMakeLists.txt",
+                     "externals\sirit\sirit\CMakeLists.txt", "externals\boost\.git",
+                     "externals\fmt\CMakeLists.txt", "externals\cryptopp\.git")) {
+        if (!(Test-Path (Join-Path $dir $f))) { Write-Host "   missing $f"; return $false }
+    }
+    return $true
+}
 Push-Location $azahar
 try {
-    if (!(Test-Path "externals\dynarmic\.git")) {
-        Invoke-Checked git checkout --quiet $AzaharCommit
-        Write-Step "Fetching Azahar submodules (this takes a while the first time)"
-        Invoke-Checked git submodule update --init --recursive --depth 1 --jobs 8
+    if (!(Test-Path "externals\dynarmic\.git") -or !(Test-AzaharTree $azahar)) {
+        Write-Step "Fetching Azahar sources and submodules (this takes a while the first time)"
+        Remove-Item -Force -ErrorAction SilentlyContinue ".onyx-patched"
+        Invoke-Checked git checkout --quiet --force $AzaharCommit
+        Invoke-Checked git checkout --quiet -- .
+        Invoke-Checked git submodule update --init --recursive --force --depth 1 --jobs 8
+        foreach ($sub in @("dynarmic", "boost", "cryptopp")) {
+            Remove-Item -Force -ErrorAction SilentlyContinue "externals\$sub\.onyx-patched"
+        }
     }
 } finally { Pop-Location }
+if (!(Test-AzaharTree $azahar)) {
+    Write-Step "Cached Azahar tree is broken; cloning it again"
+    Remove-Item -Recurse -Force $azahar
+    Invoke-Checked git clone $AzaharRepo $azahar
+    Push-Location $azahar
+    try {
+        Invoke-Checked git checkout --quiet $AzaharCommit
+        Invoke-Checked git submodule update --init --recursive --depth 1 --jobs 8
+    } finally { Pop-Location }
+}
 Write-Step "Patching Azahar"
 Apply-Patches $azahar (Join-Path $Root "patches\azahar")
 Apply-Patches (Join-Path $azahar "externals\dynarmic") (Join-Path $Root "patches\dynarmic")
