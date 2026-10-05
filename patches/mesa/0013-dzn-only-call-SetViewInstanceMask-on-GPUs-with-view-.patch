@@ -1,0 +1,37 @@
+From 02eb29242ad830c576f01d1b3074fb41a0ab4510 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 17:47:39 -0400
+Subject: [PATCH] dzn: only call SetViewInstanceMask on GPUs with view
+ instancing
+
+Every graphics pipeline bind set the view instance mask to 1, even on
+hardware with D3D12_VIEW_INSTANCING_TIER_NOT_SUPPORTED (Xbox Series S).
+There it is an invalid API call, which makes ID3D12GraphicsCommandList::
+Close fail with E_FAIL, so every command list with a draw failed.
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index 987d787..4eebbfa 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -3302,7 +3302,14 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
+ 
+    /* Deferring this until after the pipeline has been set due to an NVIDIA driver bug
+     * when view instancing mask is set with no pipeline bound. */
+-   if (view_instance_mask)
++   /* ONYX: SetViewInstanceMask is an invalid API call on GPUs without view
++    * instancing (Xbox Series S), and an invalid call makes Close() fail with
++    * E_FAIL for the whole command list. Without native view instancing the
++    * mask is always 1, which is the default anyway. */
++   struct dzn_physical_device *vi_pdev =
++      container_of(cmdbuf->vk.base.device->physical, struct dzn_physical_device, vk);
++   if (view_instance_mask &&
++       vi_pdev->options3.ViewInstancingTier > D3D12_VIEW_INSTANCING_TIER_NOT_SUPPORTED)
+       ID3D12GraphicsCommandList1_SetViewInstanceMask((dzn_cmd_note(cmdbuf, "SetViewInstanceMask"), cmdbuf->cmdlist), view_instance_mask);
+ }
+ 
+-- 
+2.43.0
+

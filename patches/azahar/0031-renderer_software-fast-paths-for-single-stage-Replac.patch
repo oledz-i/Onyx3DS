@@ -1,0 +1,104 @@
+From c1f321ef6c536d4c25c10a54d8048c8d8f61e641 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 17:47:41 -0400
+Subject: [PATCH] renderer_software: fast paths for single-stage
+ Replace/Modulate TEV programs
+
+Most 2D and UI drawing is one stage doing texture or texture * vertex
+color on both color and alpha. Compute it directly instead of through the
+general source table, modifiers and combiners.
+---
+ .../renderer_software/sw_rasterizer.cpp       | 53 +++++++++++++++++++
+ .../renderer_software/sw_rasterizer.h         |  5 ++
+ 2 files changed, 58 insertions(+)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index f7f4e0e..0010490 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -1144,6 +1144,28 @@ RasterizerSoftware::TevProgram RasterizerSoftware::CompileTev(
+             p.count = i + 1; // pass-through stages after the last real one change nothing
+         }
+     }
++
++    // Single-stage fast paths. Sources must be plain inputs (not the previous result or
++    // buffer, which are zero in stage 0) and both combiners must agree.
++    p.fast = 0;
++    const auto& s0 = p.stages[0];
++    const auto plain = [](u8 src) { return src <= 0x6 || src == 0xe; };
++    using CM = TexturingRegs::TevStageConfig::ColorModifier;
++    using AM = TexturingRegs::TevStageConfig::AlphaModifier;
++    if (p.count == 1 && s0.color_mul == 1 && s0.alpha_mul == 1 && s0.color_op == s0.alpha_op &&
++        s0.color_mod[0] == CM::SourceColor && s0.alpha_mod[0] == AM::SourceAlpha &&
++        s0.color_src[0] == s0.alpha_src[0] && plain(s0.color_src[0])) {
++        if (s0.color_op == Operation::Replace) {
++            p.fast = 1;
++            p.fast_src0 = s0.color_src[0];
++        } else if (s0.color_op == Operation::Modulate && s0.color_mod[1] == CM::SourceColor &&
++                   s0.alpha_mod[1] == AM::SourceAlpha && s0.color_src[1] == s0.alpha_src[1] &&
++                   plain(s0.color_src[1])) {
++            p.fast = 2;
++            p.fast_src0 = s0.color_src[0];
++            p.fast_src1 = s0.color_src[1];
++        }
++    }
+     return p;
+ }
+ 
+@@ -1152,6 +1174,37 @@ Common::Vec4<u8> RasterizerSoftware::RunTev(const TevProgram& program,
+                                             Common::Vec4<u8> primary_color,
+                                             Common::Vec4<u8> primary_fragment_color,
+                                             Common::Vec4<u8> secondary_fragment_color) {
++    if (program.fast) {
++        const auto input = [&](u8 s) -> Common::Vec4<u8> {
++            switch (s) {
++            case 0x0:
++                return primary_color;
++            case 0x1:
++                return primary_fragment_color;
++            case 0x2:
++                return secondary_fragment_color;
++            case 0x3:
++            case 0x4:
++            case 0x5:
++            case 0x6:
++                return texture_color[s - 0x3];
++            case 0xe:
++                return program.stages[0].constant;
++            default:
++                return {0, 0, 0, 0};
++            }
++        };
++        const Common::Vec4<u8> a = input(program.fast_src0);
++        if (program.fast == 1) {
++            return a;
++        }
++        const Common::Vec4<u8> b = input(program.fast_src1);
++        return Common::MakeVec<u8>(static_cast<u8>(u32{a.r()} * b.r() / 255),
++                                   static_cast<u8>(u32{a.g()} * b.g() / 255),
++                                   static_cast<u8>(u32{a.b()} * b.b() / 255),
++                                   static_cast<u8>(u32{a.a()} * b.a() / 255));
++    }
++
+     // Inputs indexed by the 4-bit TEV source number; unknown sources read zero.
+     std::array<Common::Vec4<u8>, 16> src{};
+     src[0x0] = primary_color;
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index c31dd44..04f3cf6 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -122,6 +122,11 @@ private:
+         std::array<Stage, 6> stages;
+         u32 count; // stages to run; the rest pass the result through unchanged
+         Common::Vec4<u8> buffer_init;
++        /// One stage doing the same Replace or Modulate on color and alpha (most 2D and
++        /// UI drawing): 1 = Replace(src0), 2 = Modulate(src0, src1), 0 = general path.
++        u8 fast;
++        u8 fast_src0;
++        u8 fast_src1;
+     };
+     TevProgram CompileTev(std::span<const Pica::TexturingRegs::TevStageConfig, 6> tev_stages) const;
+ 
+-- 
+2.43.0
+

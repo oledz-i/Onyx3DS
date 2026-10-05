@@ -744,6 +744,16 @@ void SettingsPage::BuildAbout() {
     const auto v = winrt::Windows::ApplicationModel::Package::Current().Id().Version();
     Add(kit::SectionHeader("ONYX 3DS " + std::to_string(v.Major) + "." + std::to_string(v.Minor) + "." +
                            std::to_string(v.Build)));
+    {
+        // Same value as "Build stamp" in onyx.log: tells test builds apart on the TV.
+        const auto* base = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        char stamp[64];
+        std::snprintf(stamp, sizeof(stamp), "Build stamp %08x",
+                      static_cast<unsigned>(nt->FileHeader.TimeDateStamp));
+        Note(stamp);
+    }
     Note("A Nintendo 3DS emulator frontend for Xbox Series X|S Dev Mode, running the Azahar emulator core "
          "with Vulkan translated to DirectX 12 by Mesa's Dozen driver.");
     Note("Bring your own games: dump cartridges and system files from a 3DS you own. ONYX 3DS does not "
@@ -756,6 +766,7 @@ void SettingsPage::BuildAbout() {
              "nlohmann/json (MIT), doctest (MIT)",
              "DirectX Shader Compiler DXIL.dll (Microsoft redistributable)",
              "Menu artwork, themes and music: original, generated for ONYX 3DS (GPLv3+)",
+             "Rounded M+ 1c font by The Rounded M+ Project Authors (SIL Open Font License 1.1)",
              "Cheat database: CTRPF Action Replay codes by the community",
              "Artwork: SteamGridDB community uploads",
              "ONYX 3DS is GPLv3+. Source: see README on the project's repository."})
