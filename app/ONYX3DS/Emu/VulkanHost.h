@@ -150,6 +150,8 @@ private:
         bool ready = false; // holds a submitted frame not shown yet
     };
     bool readback_ = true;
+    static constexpr uint32_t kReadbackDiagFrames = 600;
+    uint32_t readback_diag_frames_ = 0;
     std::array<Readback, kSyncFrames> readbacks_{};
     std::vector<uint8_t> readback_pixels_;
     bool EnsureReadback(Readback& rb, VkDeviceSize size);

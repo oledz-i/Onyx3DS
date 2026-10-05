@@ -1,0 +1,93 @@
+From b56adaafab97e898005d12c49e47c52cbcb4c6cd Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 18:19:57 -0400
+Subject: [PATCH] renderer_vulkan: submit the frame before handing it to the
+ frontend; no crash on empty images; async shaders on Dozen
+
+- RenderToWindow waits for the worker thread after flushing, so the
+  output image's draw is on the queue before the frontend copies it
+  (set_image passes no semaphore).
+- Zero-sized surfaces are clamped to 1x1 (VMA refused them with
+  VK_ERROR_INITIALIZATION_FAILED and Azahar hit UNREACHABLE); any other
+  allocation failure throws instead of crashing.
+- On Dozen, shaders compile asynchronously (500 ms stalls otherwise).
+---
+ src/citra_libretro/libretro_vk.cpp               |  4 ++++
+ .../renderer_vulkan/renderer_vulkan.cpp          |  4 ++++
+ .../renderer_vulkan/vk_texture_runtime.cpp       | 16 ++++++++++++++--
+ 3 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/src/citra_libretro/libretro_vk.cpp b/src/citra_libretro/libretro_vk.cpp
+index c4e6798..d44f12c 100644
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -349,6 +349,10 @@ LibRetroVKInstance::LibRetroVKInstance(Frontend::EmuWindow& window,
+     if (static_cast<u32>(driver_id) == 23u /* VK_DRIVER_ID_MESA_DOZEN */) {
+         triangle_fan_supported = false;
+         LOG_INFO(Render_Vulkan, "Dozen: triangle fans go through the software vertex path");
++        // Shader compiles through Dozen (SPIR-V -> DXIL -> driver) take long enough to
++        // stall a frame for hundreds of ms; compile in the background instead.
++        Settings::values.async_shader_compilation.SetValue(true);
++        LOG_INFO(Render_Vulkan, "Dozen: asynchronous shader compilation on");
+     }
+ 
+     // Initialize subsystems
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.cpp b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+index d0048f0..7ce3163 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -257,6 +257,10 @@ void RendererVulkan::RenderToWindow(PresentWindow& window, const Layout::Framebu
+ 
+         DrawScreens(frame, layout, flipped);
+         scheduler.Flush(frame->render_ready);
++        // The frontend copies or samples the output image as soon as Present hands it
++        // over, with no semaphore to wait on. Make sure this frame's commands are
++        // actually submitted first (the worker thread may not have got to them yet).
++        scheduler.WaitWorker();
+         window.Present(frame);
+         if ((secondaryWindowEnabled && isSecondaryWindow) || (!secondaryWindowEnabled)) {
+             Core::PerfStats::game_frames_updated = false;
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index 028e60e..73162ab 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <stdexcept>
+ #include "video_core/renderer_vulkan/vk_texture_runtime.h"
+ 
+ #include <limits>
+@@ -175,6 +176,15 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
+         flags &= ~vk::ImageCreateFlagBits::eCubeCompatible;
+     }
+ 
++    // A zero-sized surface makes VMA fail with VK_ERROR_INITIALIZATION_FAILED, which used
++    // to end in UNREACHABLE(). Give it one texel instead.
++    if (width == 0 || height == 0 || levels == 0) {
++        LOG_WARNING(Render_Vulkan, "Clamping empty image {}x{} ({} levels) to at least 1",
++                    width, height, levels);
++        width = std::max(width, 1u);
++        height = std::max(height, 1u);
++        levels = std::max(levels, 1u);
++    }
+     this->width = width;
+     this->height = height;
+     this->levels = levels;
+@@ -216,8 +226,10 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
+     VkResult result = vmaCreateImage(instance.GetAllocator(), &unsafe_image_info, &alloc_info,
+                                      &unsafe_image, &allocation, nullptr);
+     if (result != VK_SUCCESS) [[unlikely]] {
+-        LOG_CRITICAL(Render_Vulkan, "Failed allocating image with error {}", result);
+-        UNREACHABLE();
++        LOG_CRITICAL(Render_Vulkan, "Failed allocating image {}x{} with error {}", width, height,
++                     static_cast<int>(result));
++        // Report it to the frontend instead of crashing.
++        throw std::runtime_error("vmaCreateImage failed (" + std::to_string(static_cast<int>(result)) + ")");
+     }
+ 
+     image = vk::Image{unsafe_image};
+-- 
+2.43.0
+

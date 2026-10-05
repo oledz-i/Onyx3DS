@@ -104,6 +104,7 @@ struct VulkanHost::Fn {
     PFN_vkMapMemory MapMemory = nullptr;
     PFN_vkUnmapMemory UnmapMemory = nullptr;
     PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
+    PFN_vkCmdFillBuffer CmdFillBuffer = nullptr;
     PFN_vkInvalidateMappedMemoryRanges InvalidateMappedMemoryRanges = nullptr;
 };
 
@@ -440,6 +441,7 @@ bool VulkanHost::LoadDeviceFunctions() {
     LOAD_D(MapMemory);
     LOAD_D(UnmapMemory);
     LOAD_D(CmdCopyImageToBuffer);
+    LOAD_D(CmdFillBuffer);
     LOAD_D(InvalidateMappedMemoryRanges);
 #undef LOAD_D
     return f.QueueSubmit && f.CmdCopyImage && f.CreateImage && f.AllocateMemory;
@@ -758,20 +760,29 @@ void VulkanHost::ShowReadback(uint32_t index) {
     range.size = VK_WHOLE_SIZE;
     f.InvalidateMappedMemoryRanges(device_, 1, &range);
     const size_t pitch = static_cast<size_t>(rb.width) * 4;
-    if (rb.bgra) {
-        presenter_.PushCpuFrame(rb.mapped, rb.width, rb.height, pitch);
-        return;
+    if (readback_diag_frames_ < kReadbackDiagFrames) {
+        const uint32_t n = readback_diag_frames_++;
+        if (n < 3 || n == 30 || n == 120 || n == kReadbackDiagFrames - 1) {
+            const auto* px = static_cast<const uint32_t*>(rb.mapped);
+            const size_t count = static_cast<size_t>(rb.width) * rb.height;
+            size_t marker = 0, black = 0, other = 0, samples = 0;
+            uint32_t first_other = 0;
+            for (size_t i = 0; i < count; i += 97) {
+                const uint32_t p = px[i];
+                ++samples;
+                if (p == 0xCDCDCDCDu) ++marker;
+                else if ((p & 0x00FFFFFFu) == 0) ++black;
+                else if (other++ == 0) first_other = p;
+            }
+            ONYX_INFO("Vulkan readback frame %u (%ux%u, format %d, layout %d): %zu samples, "
+                      "%zu untouched, %zu black, %zu with color (first 0x%08X)",
+                      n + 1, rb.width, rb.height, static_cast<int>(image_.create_info.format),
+                      static_cast<int>(image_.image_layout), samples, marker, black, other,
+                      first_other);
+        }
     }
-    // RGBA -> BGRA for the presenter.
-    readback_pixels_.resize(pitch * rb.height);
-    const auto* src = static_cast<const uint32_t*>(rb.mapped);
-    auto* dst = reinterpret_cast<uint32_t*>(readback_pixels_.data());
-    const size_t n = static_cast<size_t>(rb.width) * rb.height;
-    for (size_t i = 0; i < n; ++i) {
-        const uint32_t p = src[i];
-        dst[i] = (p & 0xFF00FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
-    }
-    presenter_.PushCpuFrame(readback_pixels_.data(), rb.width, rb.height, pitch);
+    // The presenter swaps R and B while it copies, so RGBA frames need no extra pass.
+    presenter_.PushCpuFrame(rb.mapped, rb.width, rb.height, pitch, !rb.bgra);
 }
 
 void VulkanHost::OnFrameReadback(unsigned width, unsigned height) {
@@ -807,6 +818,20 @@ void VulkanHost::OnFrameReadback(unsigned width, unsigned height) {
     pre.subresourceRange = range;
     f.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &pre);
+    // Diagnostics for the first frames: pre-fill with a marker, so the log can tell
+    // "the copy wrote nothing" apart from "the game's picture is black".
+    if (readback_diag_frames_ < kReadbackDiagFrames && f.CmdFillBuffer) {
+        f.CmdFillBuffer(cb, rb.buffer, 0, VK_WHOLE_SIZE, 0xCDCDCDCDu);
+        VkBufferMemoryBarrier fillb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        fillb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fillb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fillb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fillb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fillb.buffer = rb.buffer;
+        fillb.size = VK_WHOLE_SIZE;
+        f.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 1, &fillb, 0, nullptr);
+    }
     VkBufferImageCopy copy{};
     copy.bufferRowLength = width;
     copy.bufferImageHeight = height;

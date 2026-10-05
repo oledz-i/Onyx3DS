@@ -389,9 +389,9 @@ void D3D12Presenter::AbortWrite(int slot_index) {
 }
 
 bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t height,
-                                  size_t pitch) {
+                                  size_t pitch, bool rgba) {
     if (!data || width == 0 || height == 0 || !device_) return false;
-    Mirror(data, width, height, pitch);
+    Mirror(data, width, height, pitch, rgba);
     cpu_w_ = width;
     cpu_h_ = height;
     if (cpu_view_.load()) {
@@ -467,7 +467,8 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
                                                         static_cast<size_t>(y) * fp.Footprint.RowPitch);
             for (uint32_t x = 0; x < width; ++x) {
                 const uint32_t p = in[x];
-                out[x] = 0xFF000000u | ((p & 0xFFu) << 16) | (p & 0xFF00u) | ((p >> 16) & 0xFFu);
+                out[x] = rgba ? (p | 0xFF000000u)
+                              : 0xFF000000u | ((p & 0xFFu) << 16) | (p & 0xFF00u) | ((p >> 16) & 0xFFu);
             }
         }
 
@@ -517,15 +518,25 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
     }
 }
 
-void D3D12Presenter::Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch) {
+void D3D12Presenter::Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch,
+                            bool rgba) {
     std::lock_guard lock(mirror_mutex_);
     mirror_.resize(static_cast<size_t>(width) * height * 4);
     const auto* src = static_cast<const uint8_t*>(data);
     for (uint32_t y = 0; y < height; ++y) {
-        // XRGB8888 is B,G,R,X in memory: already BGRA, just make it opaque.
         const uint32_t* in = reinterpret_cast<const uint32_t*>(src + y * pitch);
         uint32_t* out = reinterpret_cast<uint32_t*>(mirror_.data() + static_cast<size_t>(y) * width * 4);
-        for (uint32_t x = 0; x < width; ++x) out[x] = in[x] | 0xFF000000u;
+        if (rgba) {
+            // Hardware frames read back as R,G,B,A bytes: swap to B,G,R and make opaque
+            // in the same pass (no separate conversion copy).
+            for (uint32_t x = 0; x < width; ++x) {
+                const uint32_t p = in[x];
+                out[x] = 0xFF000000u | ((p & 0xFFu) << 16) | (p & 0xFF00u) | ((p >> 16) & 0xFFu);
+            }
+        } else {
+            // XRGB8888 is B,G,R,X in memory: already BGRA, just make it opaque.
+            for (uint32_t x = 0; x < width; ++x) out[x] = in[x] | 0xFF000000u;
+        }
     }
     mirror_w_ = width;
     mirror_h_ = height;

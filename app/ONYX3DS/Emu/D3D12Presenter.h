@@ -63,7 +63,8 @@ public:
     // Software-rendered frame (XRGB8888 rows, as libretro hands them over):
     // copied into a slot through an upload buffer on this presenter's own
     // device. No Vulkan involved. Returns false if the frame was dropped.
-    bool PushCpuFrame(const void* data, uint32_t width, uint32_t height, size_t pitch);
+    bool PushCpuFrame(const void* data, uint32_t width, uint32_t height, size_t pitch,
+                      bool rgba = false);
 
     // Software frames are also kept as BGRA pixels for the XAML image view,
     // which shows them without the D3D12 swap chain. Copies the newest frame
@@ -123,7 +124,7 @@ private:
     uint32_t mirror_w_ = 0, mirror_h_ = 0;
     uint64_t mirror_seq_ = 0;
     std::atomic<bool> cpu_view_{false};
-    void Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch);
+    void Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch, bool rgba);
 
     // CPU frame uploads (software renderer).
     std::mutex upload_mutex_;
