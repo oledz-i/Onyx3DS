@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
+#include <stdlib.h>
 #include "Emu/VulkanHost.h"
 
 #include "Platform/Log.h"
@@ -322,6 +323,11 @@ void VulkanHost::SetNegotiationInterface(
 bool VulkanHost::CreateDevice(std::string& error) {
     if (device_) return true;
     auto& f = *fn_;
+    // On Series S the DXIL validator refuses Dozen's shaders (see the self-test lines);
+    // patches/mesa/0008 then signs them itself so the driver gets to compile them.
+    // Only for the game's device: the start-up self-test runs plain validation.
+    _putenv_s("ONYX_DXIL_SELFSIGN", "1");
+    ONYX_INFO("Vulkan: shaders the DXIL validator refuses are signed by ONYX");
     std::vector<const char*> exts;
     for (const auto& e : device_extensions_) exts.push_back(e.c_str());
 
