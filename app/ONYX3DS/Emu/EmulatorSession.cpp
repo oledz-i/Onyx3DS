@@ -149,6 +149,10 @@ bool EmulatorSession::Initialize(std::string& error) {
     return true;
 }
 
+bool EmulatorSession::UsingCpuFrames() const {
+    return software_.load() || (vulkan_ && vulkan_->UsingReadback());
+}
+
 void EmulatorSession::SetEvents(SessionEvents events) {
     std::lock_guard lock(events_mutex_);
     events_ = std::move(events);

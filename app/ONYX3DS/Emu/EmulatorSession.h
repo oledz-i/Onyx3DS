@@ -47,6 +47,8 @@ public:
     // The last game stopped because the hardware (Vulkan) renderer crashed.
     bool CrashedInGpu() const { return crashed_in_gpu_.load(); }
     bool UsingSoftwareRenderer() const { return software_.load(); }
+    // Frames arrive as CPU pixels (software renderer, or hardware frames read back).
+    bool UsingCpuFrames() const;
 
     D3D12Presenter& Presenter() { return presenter_; }
     InputManager& Input() { return input_; }

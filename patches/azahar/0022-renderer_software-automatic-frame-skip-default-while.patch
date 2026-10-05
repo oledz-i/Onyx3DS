@@ -1,0 +1,128 @@
+From e0ff301ba893894c19019f92100df558d21d052a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 20:19:13 -0400
+Subject: [PATCH] renderer_software: automatic frame skip (default) while
+ emulation runs behind real time
+
+---
+ src/citra_libretro/core_settings.cpp          | 12 +++++++----
+ .../renderer_software/renderer_software.cpp   | 20 ++++++++++++++++++-
+ .../renderer_software/renderer_software.h     |  5 +++++
+ .../renderer_software/sw_frame_skip.h         |  4 +++-
+ 4 files changed, 35 insertions(+), 6 deletions(-)
+
+diff --git a/src/citra_libretro/core_settings.cpp b/src/citra_libretro/core_settings.cpp
+index 70c2f7e..8b94afa 100644
+--- a/src/citra_libretro/core_settings.cpp
++++ b/src/citra_libretro/core_settings.cpp
+@@ -386,13 +386,14 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+         nullptr,
+         config::category::graphics,
+         {
++            { "auto", "Auto (skip only when running slow)" },
+             { "0", "Off" },
+             { "1", "1 (draw every 2nd frame)" },
+             { "2", "2 (draw every 3rd frame)" },
+             { "3", "3 (draw every 4th frame)" },
+             { nullptr, nullptr }
+         },
+-        "0"
++        "auto"
+     },
+     {
+         config::graphics::resolution_factor,
+@@ -1017,9 +1018,12 @@ static void ParseGraphicsOptions(void) {
+         config::enabled;
+ 
+     {
+-        const std::string skip = LibRetro::FetchVariable("citra_frame_skip", "0");
+-        const u32 frames = skip.empty() ? 0u : static_cast<u32>(skip[0] - '0');
+-        SwRenderer::FrameSkip::setting.store(frames <= 3 ? frames : 0u);
++        const std::string skip = LibRetro::FetchVariable("citra_frame_skip", "auto");
++        u32 frames = SwRenderer::FrameSkip::kAuto;
++        if (!skip.empty() && skip[0] >= '0' && skip[0] <= '3') {
++            frames = static_cast<u32>(skip[0] - '0');
++        }
++        SwRenderer::FrameSkip::setting.store(frames);
+     }
+ 
+     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index 840dd18..baa02df 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include "common/color.h"
+ #include "core/core.h"
+@@ -27,7 +28,24 @@ void RendererSoftware::SwapBuffers() {
+         PrepareRenderTarget();
+     }
+     const u32 skip = FrameSkip::setting.load(std::memory_order_relaxed);
+-    if (skip == 0) {
++    const auto now = std::chrono::steady_clock::now();
++    constexpr double kFrameMs = 1000.0 / 59.83;
++    const double frame_ms =
++        last_swap_time == std::chrono::steady_clock::time_point{}
++            ? kFrameMs
++            : std::chrono::duration<double, std::milli>(now - last_swap_time).count();
++    last_swap_time = now;
++    if (skip == FrameSkip::kAuto) {
++        // Skip drawing while emulation is behind real time, so the game keeps its speed
++        // and only the picture rate drops. Never skip more than 3 in a row.
++        // Decaying measure of how far behind real time recent frames ran.
++        lag_ms = std::clamp(lag_ms * 0.85 + (frame_ms - kFrameMs), 0.0, 100.0);
++        const bool was_skipping = FrameSkip::skipping.load(std::memory_order_relaxed);
++        consecutive_skips = was_skipping ? consecutive_skips + 1 : 0;
++        FrameSkip::skipping.store(lag_ms > kFrameMs * 0.5 && consecutive_skips < 3,
++                                  std::memory_order_relaxed);
++        FrameSkip::drew.store(false, std::memory_order_relaxed);
++    } else if (skip == 0) {
+         FrameSkip::skipping.store(false, std::memory_order_relaxed);
+     } else if (FrameSkip::drew.exchange(false, std::memory_order_relaxed)) {
+         ++frames_with_drawing;
+diff --git a/src/video_core/renderer_software/renderer_software.h b/src/video_core/renderer_software/renderer_software.h
+index 8692de4..3548cc0 100644
+--- a/src/video_core/renderer_software/renderer_software.h
++++ b/src/video_core/renderer_software/renderer_software.h
+@@ -4,6 +4,8 @@
+ 
+ #pragma once
+ 
++#include <chrono>
++
+ #include "video_core/renderer_base.h"
+ #include "video_core/renderer_software/sw_rasterizer.h"
+ 
+@@ -45,6 +47,9 @@ private:
+     Pica::PicaCore& pica;
+     RasterizerSoftware rasterizer;
+     u64 frames_with_drawing = 0;
++    std::chrono::steady_clock::time_point last_swap_time{};
++    double lag_ms = 0.0;
++    u32 consecutive_skips = 0;
+     std::array<ScreenInfo, 3> screen_infos{};
+ };
+ 
+diff --git a/src/video_core/renderer_software/sw_frame_skip.h b/src/video_core/renderer_software/sw_frame_skip.h
+index 55a0379..5c3cc62 100644
+--- a/src/video_core/renderer_software/sw_frame_skip.h
++++ b/src/video_core/renderer_software/sw_frame_skip.h
+@@ -10,7 +10,9 @@
+ /// Software renderer frame skip: on skipped frames triangles, memory fills and display
+ /// transfers are dropped while the game keeps running, and the previous picture stays up.
+ namespace SwRenderer::FrameSkip {
+-/// Frames skipped after each drawn frame (0 = off).
++/// Value of `setting` for automatic skipping (only while emulation is behind).
++inline constexpr u32 kAuto = 0xFF;
++/// Frames skipped after each drawn frame (0 = off, kAuto = automatic).
+ inline std::atomic<u32> setting{0};
+ /// True while the current frame is being skipped.
+ inline std::atomic<bool> skipping{false};
+-- 
+2.43.0
+

@@ -67,7 +67,7 @@ std::vector<Curated> CuratedOptions() {
         {keys::kFrameSkip, "Frame skip",
          "Software renderer: draw only some frames while the game runs at full speed. "
          "Makes slow scenes playable; some games may flicker.",
-         {{"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
+         {{"auto", "Auto (only when slow)"}, {"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
           {"3", "Draw every 4th frame"}}},
         {keys::kAccurateMul, "Accurate shader multiplication",
          "Fixes rare graphics glitches (e.g. some Pokemon effects). Slower.",

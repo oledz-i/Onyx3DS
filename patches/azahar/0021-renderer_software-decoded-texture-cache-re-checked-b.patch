@@ -1,0 +1,303 @@
+From 668a6012bc7cd9e21990f24feff312dee5555226 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 20:16:16 -0400
+Subject: [PATCH] renderer_software: decoded texture cache (re-checked by hash
+ per command list, invalidated by GPU writes)
+
+---
+ src/video_core/gpu.cpp                        |   1 +
+ src/video_core/rasterizer_interface.h         |   3 +
+ .../renderer_software/sw_rasterizer.cpp       | 137 +++++++++++++++++-
+ .../renderer_software/sw_rasterizer.h         |  38 ++++-
+ 4 files changed, 172 insertions(+), 7 deletions(-)
+
+diff --git a/src/video_core/gpu.cpp b/src/video_core/gpu.cpp
+index 40f29fe..ba4580b 100644
+--- a/src/video_core/gpu.cpp
++++ b/src/video_core/gpu.cpp
+@@ -396,6 +396,7 @@ void GPU::ApplyPerProgramSettings(u64 program_ID) {
+ }
+ 
+ void GPU::SubmitCmdList(u32 index) {
++    impl->rasterizer->NotifyCommandListStart();
+     // Check if a command list was triggered.
+     auto& config = impl->pica.regs.internal.pipeline.command_buffer;
+     if (!config.trigger[index]) {
+diff --git a/src/video_core/rasterizer_interface.h b/src/video_core/rasterizer_interface.h
+index 9306cb3..f383c91 100644
+--- a/src/video_core/rasterizer_interface.h
++++ b/src/video_core/rasterizer_interface.h
+@@ -43,6 +43,9 @@ public:
+     /// Notify rasterizer that all caches should be flushed to 3DS memory
+     virtual void FlushAll() = 0;
+ 
++    /// A GPU command list is about to run; the CPU may have rewritten memory since the last.
++    virtual void NotifyCommandListStart() {}
++
+     /// Notify rasterizer that any caches of the specified region should be flushed to 3DS memory
+     virtual void FlushRegion(PAddr addr, u32 size) = 0;
+ 
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index b33ce83..05ec958 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -2,12 +2,14 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <algorithm>
+ #include <thread>
+ #include <vector>
+ #include <boost/container/static_vector.hpp>
+ #if defined(_M_X64) || defined(__x86_64__)
+ #include <immintrin.h>
+ #endif
++#include "common/hash.h"
+ #include "common/logging/log.h"
+ #include "common/thread.h"
+ #include "common/microprofile.h"
+@@ -393,6 +395,18 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                                                v2.pos.w.ToFloat32()};
+ 
+     const auto textures = regs.texturing.GetTextures();
++    // Decoded copies of the bound textures (sampling them per pixel decoded the texel,
++    // often a whole ETC1 block, every time).
++    DecodedTextures decoded{};
++    for (u32 i = 0; i < 3; ++i) {
++        if (textures[i].enabled && textures[i].config.address != 0) {
++            const auto type = textures[i].config.type.Value();
++            if (i != 0 || type == TexturingRegs::TextureConfig::Texture2D ||
++                type == TexturingRegs::TextureConfig::Projection2D) {
++                decoded[i] = GetDecodedTexture(textures[i]);
++            }
++        }
++    }
+     const auto tev_stages = regs.texturing.GetTevStages();
+ 
+     // Enter rasterization loop, starting at the center of the topleft bounding box corner.
+@@ -577,7 +591,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 const f24 tc0_w = need_uv0
+                                       ? get_interpolated_attribute(v0.tc0_w, v1.tc0_w, v2.tc0_w)
+                                       : f24::Zero();
+-                const auto texture_color = TextureColor(uv, textures, tc0_w);
++                const auto texture_color = TextureColor(uv, textures, tc0_w, decoded);
+ 
+                 Common::Vec4<u8> primary_fragment_color = {0, 0, 0, 0};
+                 Common::Vec4<u8> secondary_fragment_color = {0, 0, 0, 0};
+@@ -653,6 +667,15 @@ void RasterizerSoftware::DrawTriangles() {
+         return;
+     }
+     fb.Bind();
++    if (!decoded_textures.empty()) {
++        // Render-to-texture: this draw rewrites its color and depth buffers.
++        const auto& fbr = regs.framebuffer.framebuffer;
++        const u32 pixels = fbr.GetWidth() * fbr.GetHeight();
++        InvalidateDecodedTextures(fbr.GetColorBufferPhysicalAddress(),
++                                  pixels * FramebufferRegs::BytesPerColorPixel(fbr.color_format));
++        InvalidateDecodedTextures(fbr.GetDepthBufferPhysicalAddress(),
++                                  pixels * FramebufferRegs::BytesPerDepthPixel(fbr.depth_format));
++    }
+     // Below this many covered pixels (bounding boxes), handing out the work costs more
+     // than drawing it here.
+     constexpr u64 kInlinePixels = 2 * 1024;
+@@ -735,9 +758,104 @@ void RasterizerSoftware::Batch::Run() {
+     }
+ }
+ 
++std::shared_ptr<const RasterizerSoftware::DecodedTexture> RasterizerSoftware::GetDecodedTexture(
++    const Pica::TexturingRegs::FullTextureConfig& texture) {
++    const u32 width = texture.config.width;
++    const u32 height = texture.config.height;
++    if (width == 0 || height == 0 || width > 1024 || height > 1024) {
++        return nullptr;
++    }
++    const PAddr address = texture.config.GetPhysicalAddress();
++    const auto info = TextureInfo::FromPicaRegister(texture.config, texture.format);
++    const u32 size = static_cast<u32>(Pica::Texture::CalculateTileSize(texture.format) *
++                                      (width / 8) * (height / 8));
++    const u8* data = memory.GetPhysicalPointer(address);
++    if (!data || size == 0 || !memory.IsValidPhysicalAddress(address + size - 1)) {
++        return nullptr;
++    }
++    ++texture_use_counter;
++    for (auto& entry : decoded_textures) {
++        if (entry->address != address || entry->width != width || entry->height != height ||
++            entry->size != size || entry->format != texture.format) {
++            continue;
++        }
++        if (entry->checked != texture_epoch) {
++            // First use this frame: make sure the game hasn't rewritten it.
++            if (Common::ComputeHash64(data, size) != entry->hash) {
++                break; // stale: re-decode below
++            }
++            entry->checked = texture_epoch;
++        }
++        entry->last_used = texture_use_counter;
++        return entry;
++    }
++
++    // Decode (rows in parallel), replacing a stale copy of the same texture if any.
++    auto fresh = std::make_shared<DecodedTexture>();
++    fresh->width = width;
++    fresh->height = height;
++    fresh->address = address;
++    fresh->size = size;
++    fresh->format = texture.format;
++    fresh->hash = Common::ComputeHash64(data, size);
++    fresh->checked = texture_epoch;
++    fresh->last_used = texture_use_counter;
++    fresh->texels.resize(static_cast<std::size_t>(width) * height);
++    u32* out = fresh->texels.data();
++    constexpr u32 kRowsPerTask = 32;
++    const u32 tasks = (height + kRowsPerTask - 1) / kRowsPerTask;
++    ParallelFor(tasks, [&](u32 task) {
++        const u32 y0 = task * kRowsPerTask;
++        const u32 y1 = std::min(height, y0 + kRowsPerTask);
++        for (u32 y = y0; y < y1; ++y) {
++            for (u32 x = 0; x < width; ++x) {
++                const auto c = LookupTexture(data, x, y, info);
++                out[static_cast<std::size_t>(y) * width + x] =
++                    static_cast<u32>(c.r()) | (static_cast<u32>(c.g()) << 8) |
++                    (static_cast<u32>(c.b()) << 16) | (static_cast<u32>(c.a()) << 24);
++            }
++        }
++    });
++
++    std::erase_if(decoded_textures, [&](const std::shared_ptr<DecodedTexture>& e) {
++        if (e->address == address && e->width == width && e->height == height) {
++            decoded_bytes -= e->texels.size() * 4;
++            return true;
++        }
++        return false;
++    });
++    decoded_bytes += fresh->texels.size() * 4;
++    decoded_textures.push_back(fresh);
++    // Keep the cache bounded (draws in flight keep their own references).
++    constexpr std::size_t kMaxDecodedBytes = 96u << 20;
++    while (decoded_bytes > kMaxDecodedBytes && decoded_textures.size() > 1) {
++        auto oldest = std::min_element(decoded_textures.begin(), decoded_textures.end(),
++                                       [](const auto& a, const auto& b) {
++                                           return a->last_used < b->last_used;
++                                       });
++        decoded_bytes -= (*oldest)->texels.size() * 4;
++        decoded_textures.erase(oldest);
++    }
++    return fresh;
++}
++
++void RasterizerSoftware::InvalidateDecodedTextures(PAddr addr, u32 size) {
++    if (size == 0) {
++        return;
++    }
++    std::erase_if(decoded_textures, [&](const std::shared_ptr<DecodedTexture>& e) {
++        if (e->address < addr + size && addr < e->address + e->size) {
++            decoded_bytes -= e->texels.size() * 4;
++            return true;
++        }
++        return false;
++    });
++}
++
+ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+     std::span<const Common::Vec2<f24>, 3> uv,
+-    std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f24 tc0_w) const {
++    std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f24 tc0_w,
++    const DecodedTextures& decoded) const {
+     std::array<Common::Vec4<u8>, 4> texture_color{};
+     for (u32 i = 0; i < 3; ++i) {
+         const auto& texture = textures[i];
+@@ -821,11 +939,18 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+             t = texture.config.height - 1 -
+                 GetWrappedTexCoord(texture.config.wrap_t, t, texture.config.height);
+ 
+-            const u8* texture_data = memory.GetPhysicalPointer(texture_address);
+-            const auto info = TextureInfo::FromPicaRegister(texture.config, texture.format);
++            if (const DecodedTexture* dec = decoded[i].get()) {
++                const u32 texel = dec->texels[static_cast<u32>(t) * dec->width + static_cast<u32>(s)];
++                texture_color[i] = Common::MakeVec<u8>(
++                    static_cast<u8>(texel), static_cast<u8>(texel >> 8),
++                    static_cast<u8>(texel >> 16), static_cast<u8>(texel >> 24));
++            } else {
++                const u8* texture_data = memory.GetPhysicalPointer(texture_address);
++                const auto info = TextureInfo::FromPicaRegister(texture.config, texture.format);
+ 
+-            // TODO: Apply the min and mag filters to the texture
+-            texture_color[i] = LookupTexture(texture_data, s, t, info);
++                // TODO: Apply the min and mag filters to the texture
++                texture_color[i] = LookupTexture(texture_data, s, t, info);
++            }
+         }
+ 
+         if (i == 0 && (texture.config.type == TexturingRegs::TextureConfig::Shadow2D ||
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index 85cb69e..ccf4795 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -46,9 +46,17 @@ public:
+     }
+     void InvalidateRegion(PAddr addr, u32 size) override {
+         DrawTriangles();
++        InvalidateDecodedTextures(addr, size);
+     }
+     void FlushAndInvalidateRegion(PAddr addr, u32 size) override {
+         DrawTriangles();
++        InvalidateDecodedTextures(addr, size);
++    }
++
++    /// The CPU may have rewritten textures since the last command list: decoded copies
++    /// are re-checked against memory (by hash) when next used.
++    void NotifyCommandListStart() override {
++        ++texture_epoch;
+     }
+     void ClearAll(bool flush) override {}
+ 
+@@ -60,10 +68,33 @@ private:
+     void ProcessTriangle(const Vertex& v0, const Vertex& v1, const Vertex& v2,
+                          bool reversed = false);
+ 
++public:
++    /// A texture decoded to RGBA8 once and sampled by index afterwards.
++    struct DecodedTexture {
++        std::vector<u32> texels; ///< texels[t * width + s], same s/t as LookupTexture
++        u32 width = 0;
++        u32 height = 0;
++        PAddr address = 0;
++        u32 size = 0;    ///< Source bytes
++        Pica::TexturingRegs::TextureFormat format{};
++        u64 hash = 0;    ///< Of the source bytes when decoded
++        u64 checked = 0; ///< Epoch in which the source was last confirmed unchanged
++        u64 last_used = 0;
++    };
++    using DecodedTextures = std::array<std::shared_ptr<const DecodedTexture>, 3>;
++
++private:
++    /// Returns the decoded copy of a texture unit's 2D texture (nullptr when it can't be).
++    std::shared_ptr<const DecodedTexture> GetDecodedTexture(
++        const Pica::TexturingRegs::FullTextureConfig& texture);
++    /// Drops decoded textures overlapping memory that changed.
++    void InvalidateDecodedTextures(PAddr addr, u32 size);
++
+     /// Returns the texture color of the currently processed pixel.
+     std::array<Common::Vec4<u8>, 4> TextureColor(
+         std::span<const Common::Vec2<f24>, 3> uv,
+-        std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f24 tc0_w) const;
++        std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f24 tc0_w,
++        const DecodedTextures& decoded) const;
+ 
+     /// Returns the final pixel color with blending or logic ops applied.
+     Common::Vec4<u8> PixelColor(u16 x, u16 y, Common::Vec4<u8> combiner_output) const;
+@@ -134,6 +165,11 @@ private:
+     std::vector<PendingTriangle> pending;
+     u64 pending_area = 0;
+     std::unique_ptr<RasterPool> pool;
++
++    std::vector<std::shared_ptr<DecodedTexture>> decoded_textures;
++    std::size_t decoded_bytes = 0;
++    u64 texture_epoch = 1;
++    u64 texture_use_counter = 0;
+ };
+ 
+ } // namespace SwRenderer
+-- 
+2.43.0
+

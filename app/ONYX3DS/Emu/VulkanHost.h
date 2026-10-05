@@ -67,6 +67,9 @@ public:
     void DestroyDevice();
     bool HasDevice() const { return device_ != VK_NULL_HANDLE; }
     bool UsingGpuSync() const { return gpu_sync_; }
+    // Frames are copied back to memory and shown like software frames (no D3D12
+    // resource or fence sharing with Dozen).
+    bool UsingReadback() const { return readback_; }
 
 private:
     struct Fn; // loaded entry points
@@ -133,6 +136,25 @@ private:
     VkSemaphore shared_timeline_ = VK_NULL_HANDLE;
     uint64_t timeline_value_ = 0;
     bool gpu_sync_ = false;
+
+    // Readback presentation: one host-visible buffer per sync index; a frame is shown
+    // when the next one is submitted (one frame of latency, GPU and CPU overlap).
+    struct Readback {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        VkDeviceSize size = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        bool bgra = false;
+        bool ready = false; // holds a submitted frame not shown yet
+    };
+    bool readback_ = true;
+    std::array<Readback, kSyncFrames> readbacks_{};
+    std::vector<uint8_t> readback_pixels_;
+    bool EnsureReadback(Readback& rb, VkDeviceSize size);
+    void ShowReadback(uint32_t index);
+    void OnFrameReadback(unsigned width, unsigned height);
 };
 
 } // namespace onyx::app

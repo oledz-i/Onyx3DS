@@ -96,6 +96,14 @@ struct VulkanHost::Fn {
     PFN_vkDestroySemaphore DestroySemaphore = nullptr;
     PFN_vkImportSemaphoreWin32HandleKHR ImportSemaphoreWin32HandleKHR = nullptr;
     PFN_vkGetMemoryWin32HandlePropertiesKHR GetMemoryWin32HandlePropertiesKHR = nullptr;
+    PFN_vkCreateBuffer CreateBuffer = nullptr;
+    PFN_vkDestroyBuffer DestroyBuffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements = nullptr;
+    PFN_vkBindBufferMemory BindBufferMemory = nullptr;
+    PFN_vkMapMemory MapMemory = nullptr;
+    PFN_vkUnmapMemory UnmapMemory = nullptr;
+    PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
+    PFN_vkInvalidateMappedMemoryRanges InvalidateMappedMemoryRanges = nullptr;
 };
 
 namespace {
@@ -284,12 +292,17 @@ bool VulkanHost::CreateInstance(VulkanProbe& probe, std::string& error) {
           VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME}) {
         if (HasExtension(dev_exts, want_ext)) device_extensions_.emplace_back(want_ext);
     }
-    if (!has_external_memory_) {
+    if (readback_) {
+        // Nothing is shared with D3D12: no external memory/semaphores, and no timeline
+        // semaphores (Azahar then synchronises with plain fences).
+        device_extensions_.clear();
+        ONYX_INFO("Vulkan frames: copied back to memory (no D3D12 sharing)");
+    } else if (!has_external_memory_) {
         error = "Dozen lacks VK_KHR_external_memory_win32, frames cannot reach the screen";
         probe.notes.push_back(error);
         return false;
     }
-    if (!has_external_semaphore_ || !has_timeline_)
+    if (!readback_ && (!has_external_semaphore_ || !has_timeline_))
         probe.notes.push_back("No shared fence support: falling back to CPU frame sync (slower)");
     ONYX_INFO("Vulkan GPU: %s (%s)", probe.device_name.c_str(), probe.driver_info.c_str());
     // A failure here leaves the hardware renderer unavailable, so the session runs games
@@ -370,8 +383,9 @@ bool VulkanHost::CreateDevice(std::string& error) {
     }
     fence_pending_.fill(false);
 
-    gpu_sync_ = ImportSharedFence();
-    ONYX_INFO("Vulkan device ready; frame sync on %s", gpu_sync_ ? "GPU (shared fence)" : "CPU");
+    gpu_sync_ = readback_ ? false : ImportSharedFence();
+    ONYX_INFO("Vulkan device ready; frame sync on %s",
+              readback_ ? "CPU (readback)" : gpu_sync_ ? "GPU (shared fence)" : "CPU");
 
     iface_.instance = instance_;
     iface_.gpu = gpu_;
@@ -413,6 +427,14 @@ bool VulkanHost::LoadDeviceFunctions() {
     LOAD_D(DestroySemaphore);
     LOAD_D(ImportSemaphoreWin32HandleKHR);
     LOAD_D(GetMemoryWin32HandlePropertiesKHR);
+    LOAD_D(CreateBuffer);
+    LOAD_D(DestroyBuffer);
+    LOAD_D(GetBufferMemoryRequirements);
+    LOAD_D(BindBufferMemory);
+    LOAD_D(MapMemory);
+    LOAD_D(UnmapMemory);
+    LOAD_D(CmdCopyImageToBuffer);
+    LOAD_D(InvalidateMappedMemoryRanges);
 #undef LOAD_D
     return f.QueueSubmit && f.CmdCopyImage && f.CreateImage && f.AllocateMemory;
 }
@@ -514,6 +536,10 @@ bool VulkanHost::ImportSlot(int index, const D3D12Presenter::SharedSlot& shared)
 
 void VulkanHost::OnFrame(unsigned width, unsigned height) {
     if (!device_ || !have_image_) return;
+    if (readback_) {
+        OnFrameReadback(width, height);
+        return;
+    }
     auto& f = *fn_;
 
     // The core's output image; video_refresh gives the visible size, which
@@ -667,6 +693,174 @@ void VulkanHost::OnFrame(unsigned width, unsigned height) {
     sync_index_ = (sync_index_ + 1) % kSyncFrames;
 }
 
+bool VulkanHost::EnsureReadback(Readback& rb, VkDeviceSize size) {
+    auto& f = *fn_;
+    if (rb.buffer && rb.size >= size) return true;
+    if (rb.buffer) {
+        if (rb.mapped) f.UnmapMemory(device_, rb.memory);
+        f.DestroyBuffer(device_, rb.buffer, nullptr);
+        f.FreeMemory(device_, rb.memory, nullptr);
+        rb = {};
+    }
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (f.CreateBuffer(device_, &bci, nullptr, &rb.buffer) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{};
+    f.GetBufferMemoryRequirements(device_, rb.buffer, &req);
+    // Host-visible memory, cached if there is such a type (CPU reads it every frame).
+    uint32_t type = UINT32_MAX;
+    for (const VkMemoryPropertyFlags want :
+         {VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT),
+          VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)}) {
+        for (uint32_t i = 0; i < memory_props_.memoryTypeCount && type == UINT32_MAX; ++i)
+            if ((req.memoryTypeBits & (1u << i)) &&
+                (memory_props_.memoryTypes[i].propertyFlags & want) == want)
+                type = i;
+        if (type != UINT32_MAX) break;
+    }
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = type;
+    if (type == UINT32_MAX || f.AllocateMemory(device_, &mai, nullptr, &rb.memory) != VK_SUCCESS ||
+        f.BindBufferMemory(device_, rb.buffer, rb.memory, 0) != VK_SUCCESS ||
+        f.MapMemory(device_, rb.memory, 0, VK_WHOLE_SIZE, 0, &rb.mapped) != VK_SUCCESS) {
+        ONYX_ERROR("Vulkan readback buffer (%llu bytes) could not be created",
+                   static_cast<unsigned long long>(size));
+        if (rb.buffer) f.DestroyBuffer(device_, rb.buffer, nullptr);
+        if (rb.memory) f.FreeMemory(device_, rb.memory, nullptr);
+        rb = {};
+        return false;
+    }
+    rb.size = size;
+    return true;
+}
+
+void VulkanHost::ShowReadback(uint32_t index) {
+    auto& f = *fn_;
+    Readback& rb = readbacks_[index];
+    if (!rb.ready) return;
+    rb.ready = false;
+    if (fence_pending_[index]) {
+        f.WaitForFences(device_, 1, &fences_[index], VK_TRUE, UINT64_MAX);
+        f.ResetFences(device_, 1, &fences_[index]);
+        fence_pending_[index] = false;
+    }
+    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    range.memory = rb.memory;
+    range.size = VK_WHOLE_SIZE;
+    f.InvalidateMappedMemoryRanges(device_, 1, &range);
+    const size_t pitch = static_cast<size_t>(rb.width) * 4;
+    if (rb.bgra) {
+        presenter_.PushCpuFrame(rb.mapped, rb.width, rb.height, pitch);
+        return;
+    }
+    // RGBA -> BGRA for the presenter.
+    readback_pixels_.resize(pitch * rb.height);
+    const auto* src = static_cast<const uint32_t*>(rb.mapped);
+    auto* dst = reinterpret_cast<uint32_t*>(readback_pixels_.data());
+    const size_t n = static_cast<size_t>(rb.width) * rb.height;
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t p = src[i];
+        dst[i] = (p & 0xFF00FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
+    }
+    presenter_.PushCpuFrame(readback_pixels_.data(), rb.width, rb.height, pitch);
+}
+
+void VulkanHost::OnFrameReadback(unsigned width, unsigned height) {
+    auto& f = *fn_;
+    const VkImage src = image_.create_info.image;
+    if (!src || width == 0 || height == 0) return;
+    const uint32_t idx = sync_index_;
+    // This index's previous frame must be finished (and shown) before reuse.
+    ShowReadback(idx);
+    if (fence_pending_[idx]) {
+        f.WaitForFences(device_, 1, &fences_[idx], VK_TRUE, UINT64_MAX);
+        f.ResetFences(device_, 1, &fences_[idx]);
+        fence_pending_[idx] = false;
+    }
+    Readback& rb = readbacks_[idx];
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4;
+    if (!EnsureReadback(rb, bytes)) return;
+
+    VkCommandBuffer cb = cmd_[idx];
+    f.ResetCommandBuffer(cb, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    f.BeginCommandBuffer(cb, &bi);
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier pre{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    pre.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    pre.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    pre.oldLayout = image_.image_layout;
+    pre.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    pre.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.image = src;
+    pre.subresourceRange = range;
+    f.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &pre);
+    VkBufferImageCopy copy{};
+    copy.bufferRowLength = width;
+    copy.bufferImageHeight = height;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    f.CmdCopyImageToBuffer(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, 1, &copy);
+    VkImageMemoryBarrier post = pre;
+    post.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    post.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    post.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    post.newLayout = image_.image_layout;
+    VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.buffer = rb.buffer;
+    host.size = VK_WHOLE_SIZE;
+    f.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+                         nullptr, 1, &host, 1, &post);
+    f.EndCommandBuffer(cb);
+
+    std::vector<VkCommandBuffer> cbs = core_cmds_;
+    cbs.push_back(cb);
+    core_cmds_.clear();
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = static_cast<uint32_t>(wait_semaphores_.size());
+    si.pWaitSemaphores = wait_semaphores_.data();
+    si.pWaitDstStageMask = wait_stages_.data();
+    si.commandBufferCount = static_cast<uint32_t>(cbs.size());
+    si.pCommandBuffers = cbs.data();
+    VkSemaphore signal = signal_semaphore_;
+    signal_semaphore_ = VK_NULL_HANDLE;
+    si.signalSemaphoreCount = signal ? 1 : 0;
+    si.pSignalSemaphores = signal ? &signal : nullptr;
+    VkResult r;
+    {
+        std::lock_guard lock(queue_mutex_);
+        r = f.QueueSubmit(queue_, 1, &si, fences_[idx]);
+    }
+    wait_semaphores_.clear();
+    wait_stages_.clear();
+    if (r != VK_SUCCESS) {
+        static int s_logged = 0;
+        if (s_logged++ < 8) ONYX_ERROR("Frame readback submit failed: %s", VkResultName(r));
+        return;
+    }
+    fence_pending_[idx] = true;
+    rb.width = width;
+    rb.height = height;
+    rb.bgra = image_.create_info.format == VK_FORMAT_B8G8R8A8_UNORM ||
+              image_.create_info.format == VK_FORMAT_B8G8R8A8_SRGB;
+    rb.ready = true;
+    sync_index_ = (sync_index_ + 1) % kSyncFrames;
+    // Show the previous frame now (its copy has most likely finished while this
+    // frame was emulated), keeping one frame of latency instead of a GPU stall.
+    ShowReadback(sync_index_);
+}
+
 void VulkanHost::DestroyDevice() {
     if (!device_) return;
     auto& f = *fn_;
@@ -677,6 +871,12 @@ void VulkanHost::DestroyDevice() {
     fences_.fill(VK_NULL_HANDLE);
     if (pool_) f.DestroyCommandPool(device_, pool_, nullptr);
     pool_ = VK_NULL_HANDLE;
+    for (auto& rb : readbacks_) {
+        if (rb.mapped) f.UnmapMemory(device_, rb.memory);
+        if (rb.buffer) f.DestroyBuffer(device_, rb.buffer, nullptr);
+        if (rb.memory) f.FreeMemory(device_, rb.memory, nullptr);
+        rb = {};
+    }
     if (shared_timeline_) f.DestroySemaphore(device_, shared_timeline_, nullptr);
     shared_timeline_ = VK_NULL_HANDLE;
     // The device belongs to the frontend (Azahar's negotiation interface has

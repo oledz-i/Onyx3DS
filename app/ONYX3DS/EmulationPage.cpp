@@ -180,7 +180,7 @@ void EmulationPage::OnStarted() {
     LoadingOverlay().Visibility(Visibility::Collapsed);
     ONYX_INFO("Game started; loading screen hidden");
     // Software frames are shown by the XAML image view.
-    if (Emu().UsingSoftwareRenderer()) {
+    if (Emu().UsingCpuFrames()) {
         SoftwareView().Visibility(Visibility::Visible);
         Emu().Presenter().SetCpuView(true);
         sw_timer_.Start();

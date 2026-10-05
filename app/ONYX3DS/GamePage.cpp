@@ -338,7 +338,7 @@ void GamePage::ShowGameSettings() {
         {keys::kResolution, "Internal resolution",
          {{"1", "1x native (fastest)"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"5", "5x"}, {"6", "6x"}}},
         {keys::kFrameSkip, "Frame skip",
-         {{"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
+         {{"auto", "Auto (only when slow)"}, {"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
           {"3", "Draw every 4th frame"}}},
         {keys::kCpuClock, "CPU clock",
          {{"50", "50%"}, {"75", "75%"}, {"100", "100% (default)"}, {"125", "125%"}, {"150", "150%"},
