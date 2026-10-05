@@ -52,8 +52,10 @@ function Apply-Patches($repoDir, $patchDir) {
     $sig = ($patches | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }) -join ","
     $stamp = Join-Path $repoDir ".onyx-patched"
     if ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $sig)) { return }
-    if (Test-Path $stamp) {
-        Write-Host "   patch series changed, resetting patched files in $repoDir"
+    # Always start from a clean tree (also when the stamp is missing, e.g. after a
+    # repaired cache): patches add files that would otherwise already exist.
+    if ($true) {
+        Write-Host "   resetting patched files in $repoDir"
         # Refresh first so files that only got new timestamps from the cache
         # restore are not rewritten (that would force a full rebuild).
         git -C $repoDir update-index -q --refresh | Out-Null
