@@ -150,7 +150,7 @@ private:
         bool ready = false; // holds a submitted frame not shown yet
     };
     bool readback_ = true;
-    static constexpr uint32_t kReadbackDiagFrames = 600;
+    static constexpr uint32_t kReadbackDiagFrames = 125;  // frames that get the marker fill
     uint32_t readback_diag_frames_ = 0;
     std::array<Readback, kSyncFrames> readbacks_{};
     std::vector<uint8_t> readback_pixels_;

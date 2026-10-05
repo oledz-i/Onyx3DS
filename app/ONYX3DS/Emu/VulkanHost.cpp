@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
 #include <stdlib.h>
+#include <cstdlib>
+#include <cstring>
 #include "Emu/VulkanHost.h"
 
 #include "Platform/Log.h"
@@ -763,25 +765,35 @@ void VulkanHost::ShowReadback(uint32_t index) {
     range.size = VK_WHOLE_SIZE;
     f.InvalidateMappedMemoryRanges(device_, 1, &range);
     const size_t pitch = static_cast<size_t>(rb.width) * 4;
-    if (readback_diag_frames_ < kReadbackDiagFrames) {
+    {
+        // Frames 1-3, 31, 121, then every 600th: classify a sample of the pixels so
+        // a log tells "nothing reached the image" from "cleared but nothing drawn"
+        // from "drawn, but the 3DS screens are black". On Dozen the core clears to
+        // the ONYX background (16,18,24) instead of black for exactly this reason.
         const uint32_t n = readback_diag_frames_++;
-        if (n < 3 || n == 30 || n == 120 || n == kReadbackDiagFrames - 1) {
+        if (n < 3 || n == 30 || n == 120 || (n + 1) % 600 == 0) {
             const auto* px = static_cast<const uint32_t*>(rb.mapped);
             const size_t count = static_cast<size_t>(rb.width) * rb.height;
-            size_t marker = 0, black = 0, other = 0, samples = 0;
+            size_t marker = 0, zero = 0, black = 0, bg = 0, other = 0, samples = 0;
             uint32_t first_other = 0;
             for (size_t i = 0; i < count; i += 97) {
                 const uint32_t p = px[i];
                 ++samples;
+                // Byte order in memory is R,G,B,A for RGBA images (B,G,R,A for BGRA).
+                const int c0 = p & 0xFF, c1 = (p >> 8) & 0xFF, c2 = (p >> 16) & 0xFF;
+                const int r = rb.bgra ? c2 : c0, b = rb.bgra ? c0 : c2;
                 if (p == 0xCDCDCDCDu) ++marker;
+                else if (p == 0) ++zero;
                 else if ((p & 0x00FFFFFFu) == 0) ++black;
+                else if (std::abs(r - 16) <= 2 && std::abs(c1 - 18) <= 2 && std::abs(b - 24) <= 2) ++bg;
                 else if (other++ == 0) first_other = p;
             }
             ONYX_INFO("Vulkan readback frame %u (%ux%u, format %d, layout %d): %zu samples, "
-                      "%zu untouched, %zu black, %zu with color (first 0x%08X)",
+                      "%zu untouched, %zu zero, %zu opaque black, %zu background, %zu picture "
+                      "(first 0x%08X)",
                       n + 1, rb.width, rb.height, static_cast<int>(image_.create_info.format),
-                      static_cast<int>(image_.image_layout), samples, marker, black, other,
-                      first_other);
+                      static_cast<int>(image_.image_layout), samples, marker, zero, black, bg,
+                      other, first_other);
         }
     }
     // The presenter swaps R and B while it copies, so RGBA frames need no extra pass.
@@ -984,6 +996,177 @@ namespace {
 // hardware renderer is reported unavailable (games run in software).
 constexpr bool kRunVulkanSelfTest = true;
 constexpr uint64_t kSelfTestTimeoutNs = 2'000'000'000ull; // per submission
+
+// Self-test draw shaders (glslangValidator -V). Basic: a full-screen triangle from
+// gl_VertexIndex writing a constant color. Present: Azahar's vulkan_present.vert/.frag,
+// unchanged, so the test draws the way the core puts the 3DS screens on the frame.
+constexpr uint32_t kSelfTestBasicVert[] = {
+	0x07230203,0x00010000,0x0008000b,0x00000028,0x00000000,0x00020011,0x00000001,0x0006000b,
+	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+	0x0007000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000b,0x0000001d,0x00030003,
+	0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00030005,0x00000008,
+	0x00000078,0x00060005,0x0000000b,0x565f6c67,0x65747265,0x646e4978,0x00007865,0x00030005,
+	0x00000012,0x00000079,0x00060005,0x0000001b,0x505f6c67,0x65567265,0x78657472,0x00000000,
+	0x00060006,0x0000001b,0x00000000,0x505f6c67,0x7469736f,0x006e6f69,0x00070006,0x0000001b,
+	0x00000001,0x505f6c67,0x746e696f,0x657a6953,0x00000000,0x00070006,0x0000001b,0x00000002,
+	0x435f6c67,0x4470696c,0x61747369,0x0065636e,0x00070006,0x0000001b,0x00000003,0x435f6c67,
+	0x446c6c75,0x61747369,0x0065636e,0x00030005,0x0000001d,0x00000000,0x00040047,0x0000000b,
+	0x0000000b,0x0000002a,0x00030047,0x0000001b,0x00000002,0x00050048,0x0000001b,0x00000000,
+	0x0000000b,0x00000000,0x00050048,0x0000001b,0x00000001,0x0000000b,0x00000001,0x00050048,
+	0x0000001b,0x00000002,0x0000000b,0x00000003,0x00050048,0x0000001b,0x00000003,0x0000000b,
+	0x00000004,0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,
+	0x00000020,0x00040020,0x00000007,0x00000007,0x00000006,0x00040015,0x00000009,0x00000020,
+	0x00000001,0x00040020,0x0000000a,0x00000001,0x00000009,0x0004003b,0x0000000a,0x0000000b,
+	0x00000001,0x0004002b,0x00000009,0x0000000d,0x00000001,0x0004002b,0x00000009,0x0000000f,
+	0x00000002,0x00040017,0x00000017,0x00000006,0x00000004,0x00040015,0x00000018,0x00000020,
+	0x00000000,0x0004002b,0x00000018,0x00000019,0x00000001,0x0004001c,0x0000001a,0x00000006,
+	0x00000019,0x0006001e,0x0000001b,0x00000017,0x00000006,0x0000001a,0x0000001a,0x00040020,
+	0x0000001c,0x00000003,0x0000001b,0x0004003b,0x0000001c,0x0000001d,0x00000003,0x0004002b,
+	0x00000009,0x0000001e,0x00000000,0x0004002b,0x00000006,0x00000020,0x3f800000,0x0004002b,
+	0x00000006,0x00000024,0x00000000,0x00040020,0x00000026,0x00000003,0x00000017,0x00050036,
+	0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,0x00000007,
+	0x00000008,0x00000007,0x0004003b,0x00000007,0x00000012,0x00000007,0x0004003d,0x00000009,
+	0x0000000c,0x0000000b,0x000500c7,0x00000009,0x0000000e,0x0000000c,0x0000000d,0x000500c4,
+	0x00000009,0x00000010,0x0000000e,0x0000000f,0x0004006f,0x00000006,0x00000011,0x00000010,
+	0x0003003e,0x00000008,0x00000011,0x0004003d,0x00000009,0x00000013,0x0000000b,0x000500c7,
+	0x00000009,0x00000014,0x00000013,0x0000000f,0x000500c4,0x00000009,0x00000015,0x00000014,
+	0x0000000d,0x0004006f,0x00000006,0x00000016,0x00000015,0x0003003e,0x00000012,0x00000016,
+	0x0004003d,0x00000006,0x0000001f,0x00000008,0x00050083,0x00000006,0x00000021,0x0000001f,
+	0x00000020,0x0004003d,0x00000006,0x00000022,0x00000012,0x00050083,0x00000006,0x00000023,
+	0x00000022,0x00000020,0x00070050,0x00000017,0x00000025,0x00000021,0x00000023,0x00000024,
+	0x00000020,0x00050041,0x00000026,0x00000027,0x0000001d,0x0000001e,0x0003003e,0x00000027,
+	0x00000025,0x000100fd,0x00010038
+};
+constexpr uint32_t kSelfTestBasicFrag[] = {
+	0x07230203,0x00010000,0x0008000b,0x0000000f,0x00000000,0x00020011,0x00000001,0x0006000b,
+	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+	0x0006000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000009,0x00030010,0x00000004,
+	0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,
+	0x00040005,0x00000009,0x6f6c6f63,0x00000072,0x00040047,0x00000009,0x0000001e,0x00000000,
+	0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
+	0x00040017,0x00000007,0x00000006,0x00000004,0x00040020,0x00000008,0x00000003,0x00000007,
+	0x0004003b,0x00000008,0x00000009,0x00000003,0x0004002b,0x00000006,0x0000000a,0x3e800000,
+	0x0004002b,0x00000006,0x0000000b,0x3f400000,0x0004002b,0x00000006,0x0000000c,0x3f000000,
+	0x0004002b,0x00000006,0x0000000d,0x3f800000,0x0007002c,0x00000007,0x0000000e,0x0000000a,
+	0x0000000b,0x0000000c,0x0000000d,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,
+	0x000200f8,0x00000005,0x0003003e,0x00000009,0x0000000e,0x000100fd,0x00010038
+};
+constexpr uint32_t kAzaharPresentVert[] = {
+	0x07230203,0x00010000,0x0008000b,0x00000030,0x00000000,0x00020011,0x00000001,0x0006000b,
+	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+	0x0009000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000c,0x00000022,0x0000002d,
+	0x0000002e,0x00030003,0x00000002,0x000001c2,0x00090004,0x415f4c47,0x735f4252,0x72617065,
+	0x5f657461,0x64616873,0x6f5f7265,0x63656a62,0x00007374,0x00040005,0x00000004,0x6e69616d,
+	0x00000000,0x00050005,0x00000009,0x69736f70,0x6e6f6974,0x00000000,0x00060005,0x0000000c,
+	0x74726576,0x736f705f,0x6f697469,0x0000006e,0x00050005,0x00000015,0x77617244,0x6f666e49,
+	0x00000000,0x00080006,0x00000015,0x00000000,0x65646f6d,0x6569766c,0x616d5f77,0x78697274,
+	0x00000000,0x00070006,0x00000015,0x00000001,0x65725f69,0x756c6f73,0x6e6f6974,0x00000000,
+	0x00070006,0x00000015,0x00000002,0x65725f6f,0x756c6f73,0x6e6f6974,0x00000000,0x00060006,
+	0x00000015,0x00000003,0x65726373,0x695f6e65,0x006c5f64,0x00060006,0x00000015,0x00000004,
+	0x65726373,0x695f6e65,0x00725f64,0x00050006,0x00000015,0x00000005,0x6579616c,0x00000072,
+	0x00030005,0x00000017,0x00000000,0x00060005,0x00000020,0x505f6c67,0x65567265,0x78657472,
+	0x00000000,0x00060006,0x00000020,0x00000000,0x505f6c67,0x7469736f,0x006e6f69,0x00070006,
+	0x00000020,0x00000001,0x505f6c67,0x746e696f,0x657a6953,0x00000000,0x00070006,0x00000020,
+	0x00000002,0x435f6c67,0x4470696c,0x61747369,0x0065636e,0x00070006,0x00000020,0x00000003,
+	0x435f6c67,0x446c6c75,0x61747369,0x0065636e,0x00030005,0x00000022,0x00000000,0x00060005,
+	0x0000002d,0x67617266,0x7865745f,0x6f6f635f,0x00006472,0x00060005,0x0000002e,0x74726576,
+	0x7865745f,0x6f6f635f,0x00006472,0x00040047,0x0000000c,0x0000001e,0x00000000,0x00030047,
+	0x00000015,0x00000002,0x00040048,0x00000015,0x00000000,0x00000005,0x00050048,0x00000015,
+	0x00000000,0x00000007,0x00000010,0x00050048,0x00000015,0x00000000,0x00000023,0x00000000,
+	0x00050048,0x00000015,0x00000001,0x00000023,0x00000040,0x00050048,0x00000015,0x00000002,
+	0x00000023,0x00000050,0x00050048,0x00000015,0x00000003,0x00000023,0x00000060,0x00050048,
+	0x00000015,0x00000004,0x00000023,0x00000064,0x00050048,0x00000015,0x00000005,0x00000023,
+	0x00000068,0x00030047,0x00000020,0x00000002,0x00050048,0x00000020,0x00000000,0x0000000b,
+	0x00000000,0x00050048,0x00000020,0x00000001,0x0000000b,0x00000001,0x00050048,0x00000020,
+	0x00000002,0x0000000b,0x00000003,0x00050048,0x00000020,0x00000003,0x0000000b,0x00000004,
+	0x00040047,0x0000002d,0x0000001e,0x00000000,0x00040047,0x0000002e,0x0000001e,0x00000001,
+	0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
+	0x00040017,0x00000007,0x00000006,0x00000004,0x00040020,0x00000008,0x00000007,0x00000007,
+	0x00040017,0x0000000a,0x00000006,0x00000002,0x00040020,0x0000000b,0x00000001,0x0000000a,
+	0x0004003b,0x0000000b,0x0000000c,0x00000001,0x0004002b,0x00000006,0x0000000e,0x00000000,
+	0x0004002b,0x00000006,0x0000000f,0x3f800000,0x00040018,0x00000013,0x00000007,0x00000004,
+	0x00040015,0x00000014,0x00000020,0x00000001,0x0008001e,0x00000015,0x00000013,0x00000007,
+	0x00000007,0x00000014,0x00000014,0x00000014,0x00040020,0x00000016,0x00000009,0x00000015,
+	0x0004003b,0x00000016,0x00000017,0x00000009,0x0004002b,0x00000014,0x00000018,0x00000000,
+	0x00040020,0x00000019,0x00000009,0x00000013,0x00040015,0x0000001d,0x00000020,0x00000000,
+	0x0004002b,0x0000001d,0x0000001e,0x00000001,0x0004001c,0x0000001f,0x00000006,0x0000001e,
+	0x0006001e,0x00000020,0x00000007,0x00000006,0x0000001f,0x0000001f,0x00040020,0x00000021,
+	0x00000003,0x00000020,0x0004003b,0x00000021,0x00000022,0x00000003,0x0004002b,0x0000001d,
+	0x00000023,0x00000000,0x00040020,0x00000024,0x00000007,0x00000006,0x00040020,0x0000002a,
+	0x00000003,0x00000007,0x00040020,0x0000002c,0x00000003,0x0000000a,0x0004003b,0x0000002c,
+	0x0000002d,0x00000003,0x0004003b,0x0000000b,0x0000002e,0x00000001,0x00050036,0x00000002,
+	0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,0x00000008,0x00000009,
+	0x00000007,0x0004003d,0x0000000a,0x0000000d,0x0000000c,0x00050051,0x00000006,0x00000010,
+	0x0000000d,0x00000000,0x00050051,0x00000006,0x00000011,0x0000000d,0x00000001,0x00070050,
+	0x00000007,0x00000012,0x00000010,0x00000011,0x0000000e,0x0000000f,0x00050041,0x00000019,
+	0x0000001a,0x00000017,0x00000018,0x0004003d,0x00000013,0x0000001b,0x0000001a,0x00050090,
+	0x00000007,0x0000001c,0x00000012,0x0000001b,0x0003003e,0x00000009,0x0000001c,0x00050041,
+	0x00000024,0x00000025,0x00000009,0x00000023,0x0004003d,0x00000006,0x00000026,0x00000025,
+	0x00050041,0x00000024,0x00000027,0x00000009,0x0000001e,0x0004003d,0x00000006,0x00000028,
+	0x00000027,0x00070050,0x00000007,0x00000029,0x00000026,0x00000028,0x0000000e,0x0000000f,
+	0x00050041,0x0000002a,0x0000002b,0x00000022,0x00000018,0x0003003e,0x0000002b,0x00000029,
+	0x0004003d,0x0000000a,0x0000002f,0x0000002e,0x0003003e,0x0000002d,0x0000002f,0x000100fd,
+	0x00010038
+};
+constexpr uint32_t kAzaharPresentFrag[] = {
+	0x07230203,0x00010000,0x0008000b,0x0000003e,0x00000000,0x00020011,0x00000001,0x0006000b,
+	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+	0x0007000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000020,0x00000033,0x00030010,
+	0x00000004,0x00000007,0x00030003,0x00000002,0x000001c2,0x00090004,0x415f4c47,0x735f4252,
+	0x72617065,0x5f657461,0x64616873,0x6f5f7265,0x63656a62,0x00007374,0x00040005,0x00000004,
+	0x6e69616d,0x00000000,0x00060005,0x0000000c,0x53746547,0x65657263,0x3169286e,0x0000003b,
+	0x00050005,0x0000000b,0x65726373,0x695f6e65,0x00000064,0x00060005,0x00000019,0x65726373,
+	0x745f6e65,0x75747865,0x00736572,0x00060005,0x00000020,0x67617266,0x7865745f,0x6f6f635f,
+	0x00006472,0x00040005,0x00000033,0x6f6c6f63,0x00000072,0x00050005,0x00000035,0x77617244,
+	0x6f666e49,0x00000000,0x00080006,0x00000035,0x00000000,0x65646f6d,0x6569766c,0x616d5f77,
+	0x78697274,0x00000000,0x00070006,0x00000035,0x00000001,0x65725f69,0x756c6f73,0x6e6f6974,
+	0x00000000,0x00070006,0x00000035,0x00000002,0x65725f6f,0x756c6f73,0x6e6f6974,0x00000000,
+	0x00060006,0x00000035,0x00000003,0x65726373,0x695f6e65,0x006c5f64,0x00060006,0x00000035,
+	0x00000004,0x65726373,0x695f6e65,0x00725f64,0x00050006,0x00000035,0x00000005,0x6579616c,
+	0x00000072,0x00080006,0x00000035,0x00000006,0x65766572,0x5f657372,0x65746e69,0x63616c72,
+	0x00006465,0x00030005,0x00000037,0x00000000,0x00040005,0x00000039,0x61726170,0x0000006d,
+	0x00040047,0x00000019,0x00000021,0x00000000,0x00040047,0x00000019,0x00000022,0x00000000,
+	0x00040047,0x00000020,0x0000001e,0x00000000,0x00040047,0x00000033,0x0000001e,0x00000000,
+	0x00030047,0x00000035,0x00000002,0x00040048,0x00000035,0x00000000,0x00000005,0x00050048,
+	0x00000035,0x00000000,0x00000007,0x00000010,0x00050048,0x00000035,0x00000000,0x00000023,
+	0x00000000,0x00050048,0x00000035,0x00000001,0x00000023,0x00000040,0x00050048,0x00000035,
+	0x00000002,0x00000023,0x00000050,0x00050048,0x00000035,0x00000003,0x00000023,0x00000060,
+	0x00050048,0x00000035,0x00000004,0x00000023,0x00000064,0x00050048,0x00000035,0x00000005,
+	0x00000023,0x00000068,0x00050048,0x00000035,0x00000006,0x00000023,0x0000006c,0x00020013,
+	0x00000002,0x00030021,0x00000003,0x00000002,0x00040015,0x00000006,0x00000020,0x00000001,
+	0x00040020,0x00000007,0x00000007,0x00000006,0x00030016,0x00000008,0x00000020,0x00040017,
+	0x00000009,0x00000008,0x00000004,0x00040021,0x0000000a,0x00000009,0x00000007,0x00090019,
+	0x00000013,0x00000008,0x00000001,0x00000000,0x00000000,0x00000000,0x00000001,0x00000000,
+	0x0003001b,0x00000014,0x00000013,0x00040015,0x00000015,0x00000020,0x00000000,0x0004002b,
+	0x00000015,0x00000016,0x00000003,0x0004001c,0x00000017,0x00000014,0x00000016,0x00040020,
+	0x00000018,0x00000000,0x00000017,0x0004003b,0x00000018,0x00000019,0x00000000,0x0004002b,
+	0x00000006,0x0000001a,0x00000000,0x00040020,0x0000001b,0x00000000,0x00000014,0x00040017,
+	0x0000001e,0x00000008,0x00000002,0x00040020,0x0000001f,0x00000001,0x0000001e,0x0004003b,
+	0x0000001f,0x00000020,0x00000001,0x0004002b,0x00000006,0x00000024,0x00000001,0x0004002b,
+	0x00000006,0x0000002a,0x00000002,0x00040020,0x00000032,0x00000003,0x00000009,0x0004003b,
+	0x00000032,0x00000033,0x00000003,0x00040018,0x00000034,0x00000009,0x00000004,0x0009001e,
+	0x00000035,0x00000034,0x00000009,0x00000009,0x00000006,0x00000006,0x00000006,0x00000006,
+	0x00040020,0x00000036,0x00000009,0x00000035,0x0004003b,0x00000036,0x00000037,0x00000009,
+	0x0004002b,0x00000006,0x00000038,0x00000003,0x00040020,0x0000003a,0x00000009,0x00000006,
+	0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,
+	0x00000007,0x00000039,0x00000007,0x00050041,0x0000003a,0x0000003b,0x00000037,0x00000038,
+	0x0004003d,0x00000006,0x0000003c,0x0000003b,0x0003003e,0x00000039,0x0000003c,0x00050039,
+	0x00000009,0x0000003d,0x0000000c,0x00000039,0x0003003e,0x00000033,0x0000003d,0x000100fd,
+	0x00010038,0x00050036,0x00000009,0x0000000c,0x00000000,0x0000000a,0x00030037,0x00000007,
+	0x0000000b,0x000200f8,0x0000000d,0x0004003d,0x00000006,0x0000000e,0x0000000b,0x000300f7,
+	0x00000012,0x00000000,0x000900fb,0x0000000e,0x00000012,0x00000000,0x0000000f,0x00000001,
+	0x00000010,0x00000002,0x00000011,0x000200f8,0x0000000f,0x00050041,0x0000001b,0x0000001c,
+	0x00000019,0x0000001a,0x0004003d,0x00000014,0x0000001d,0x0000001c,0x0004003d,0x0000001e,
+	0x00000021,0x00000020,0x00050057,0x00000009,0x00000022,0x0000001d,0x00000021,0x000200fe,
+	0x00000022,0x000200f8,0x00000010,0x00050041,0x0000001b,0x00000025,0x00000019,0x00000024,
+	0x0004003d,0x00000014,0x00000026,0x00000025,0x0004003d,0x0000001e,0x00000027,0x00000020,
+	0x00050057,0x00000009,0x00000028,0x00000026,0x00000027,0x000200fe,0x00000028,0x000200f8,
+	0x00000011,0x00050041,0x0000001b,0x0000002b,0x00000019,0x0000002a,0x0004003d,0x00000014,
+	0x0000002c,0x0000002b,0x0004003d,0x0000001e,0x0000002d,0x00000020,0x00050057,0x00000009,
+	0x0000002e,0x0000002c,0x0000002d,0x000200fe,0x0000002e,0x000200f8,0x00000012,0x00030001,
+	0x00000009,0x00000031,0x000200fe,0x00000031,0x00010038
+};
+
 
 // SPIR-V 1.0, glslangValidator -V --target-env vulkan1.0, debug info stripped:
 //   #version 450
@@ -1244,6 +1427,8 @@ private:
     VkResult StepEmptySubmit();
     VkResult StepFillBuffer();
     VkResult StepGpuReadsHostMemory();
+    VkResult StepRenderPassReadback();
+    VkResult StepDraw(bool present);
     VkResult StepClearColorImage();
     VkResult StepComputeDispatch();
     VkResult StepClearDepthStencil();
@@ -1283,6 +1468,10 @@ private:
     std::vector<VkPipelineLayout> pipeline_layouts_;
     std::vector<VkDescriptorPool> descriptor_pools_;
     std::vector<VkPipeline> pipelines_;
+    std::vector<VkImageView> views_;
+    std::vector<VkRenderPass> render_passes_;
+    std::vector<VkFramebuffer> framebuffers_;
+    std::vector<VkSampler> samplers_;
 
     PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties = nullptr;
     PFN_vkCreateDevice CreateDeviceFn = nullptr;
@@ -1317,7 +1506,25 @@ private:
     ST_FN(CmdPipelineBarrier)
     ST_FN(CmdFillBuffer)
     ST_FN(CmdCopyBuffer)
+    ST_FN(CmdCopyImageToBuffer)
+    ST_FN(CreateImageView)
+    ST_FN(DestroyImageView)
+    ST_FN(CreateRenderPass)
+    ST_FN(DestroyRenderPass)
+    ST_FN(CreateFramebuffer)
+    ST_FN(DestroyFramebuffer)
+    ST_FN(CmdBeginRenderPass)
+    ST_FN(CmdEndRenderPass)
     ST_FN(CmdClearColorImage)
+    ST_FN(CreateGraphicsPipelines)
+    ST_FN(CmdSetViewport)
+    ST_FN(CmdSetScissor)
+    ST_FN(CmdSetBlendConstants)
+    ST_FN(CmdPushConstants)
+    ST_FN(CmdBindVertexBuffers)
+    ST_FN(CmdDraw)
+    ST_FN(CreateSampler)
+    ST_FN(DestroySampler)
     ST_FN(CmdClearDepthStencilImage)
     ST_FN(CmdBindPipeline)
     ST_FN(CmdBindDescriptorSets)
@@ -1343,6 +1550,9 @@ const char* const kSelfTestStepNames[] = {
     "vkCmdFillBuffer",
     "GPU reads CPU-written memory",
     "vkCmdClearColorImage (64x64 RGBA8)",
+    "render pass clear, read back like a game frame",
+    "draw a triangle",
+    "draw like Azahar's screen presenter",
     "compute dispatch",
     "vkCmdClearDepthStencilImage",
     "Azahar depth_to_buffer pipeline",
@@ -1362,13 +1572,16 @@ bool VulkanSelfTest::Run(std::string& error) {
         case 2: r = StepFillBuffer(); break;
         case 3: r = StepGpuReadsHostMemory(); break;
         case 4: r = StepClearColorImage(); break;
-        case 5: r = StepComputeDispatch(); break;
-        case 6: r = StepClearDepthStencil(); break;
-        case 7:
+        case 5: r = StepRenderPassReadback(); break;
+        case 6: r = StepDraw(false); break;
+        case 7: r = StepDraw(true); break;
+        case 8: r = StepComputeDispatch(); break;
+        case 9: r = StepClearDepthStencil(); break;
+        case 10:
             r = StepAzaharPipeline(kAzaharDepthToBufferComp, sizeof(kAzaharDepthToBufferComp),
                                    false);
             break;
-        case 8:
+        case 11:
             r = StepAzaharPipeline(kAzaharD24S8ToRgba8Comp, sizeof(kAzaharD24S8ToRgba8Comp),
                                    true);
             break;
@@ -1488,7 +1701,25 @@ VkResult VulkanSelfTest::SetUpDevice() {
     ST_LOAD(CmdPipelineBarrier)
     ST_LOAD(CmdFillBuffer)
     ST_LOAD(CmdCopyBuffer)
+    ST_LOAD(CmdCopyImageToBuffer)
+    ST_LOAD(CreateImageView)
+    ST_LOAD(DestroyImageView)
+    ST_LOAD(CreateRenderPass)
+    ST_LOAD(DestroyRenderPass)
+    ST_LOAD(CreateFramebuffer)
+    ST_LOAD(DestroyFramebuffer)
+    ST_LOAD(CmdBeginRenderPass)
+    ST_LOAD(CmdEndRenderPass)
     ST_LOAD(CmdClearColorImage)
+    ST_LOAD(CreateGraphicsPipelines)
+    ST_LOAD(CmdSetViewport)
+    ST_LOAD(CmdSetScissor)
+    ST_LOAD(CmdSetBlendConstants)
+    ST_LOAD(CmdPushConstants)
+    ST_LOAD(CmdBindVertexBuffers)
+    ST_LOAD(CmdDraw)
+    ST_LOAD(CreateSampler)
+    ST_LOAD(DestroySampler)
     ST_LOAD(CmdClearDepthStencilImage)
     ST_LOAD(CmdBindPipeline)
     ST_LOAD(CmdBindDescriptorSets)
@@ -1852,6 +2083,535 @@ VkResult VulkanSelfTest::StepClearColorImage() {
     return SubmitAndWait();
 }
 
+// What Azahar does with its output image every frame, minus the draws: a render pass
+// that clears it (initial layout UNDEFINED, final SHADER_READ_ONLY), then ONYX's
+// readback copy. Checks the pixels that come back.
+VkResult VulkanSelfTest::StepRenderPassReadback() {
+    VkImage image = VK_NULL_HANDLE;
+    VkResult r = MakeImage(VK_FORMAT_R8G8B8A8_UNORM,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                               VK_IMAGE_USAGE_SAMPLED_BIT,
+                           image);
+    if (r != VK_SUCCESS) return r;
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView view = VK_NULL_HANDLE;
+    if ((r = CreateImageView(device_, &vci, nullptr, &view)) != VK_SUCCESS) {
+        detail_ = "vkCreateImageView";
+        return r;
+    }
+    VkAttachmentDescription att{};
+    att.format = VK_FORMAT_R8G8B8A8_UNORM;
+    att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1;
+    sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1;
+    rpci.pAttachments = &att;
+    rpci.subpassCount = 1;
+    rpci.pSubpasses = &sub;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    if ((r = CreateRenderPass(device_, &rpci, nullptr, &rp)) != VK_SUCCESS) {
+        DestroyImageView(device_, view, nullptr);
+        detail_ = "vkCreateRenderPass";
+        return r;
+    }
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = rp;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &view;
+    fci.width = 64;
+    fci.height = 64;
+    fci.layers = 1;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    if ((r = CreateFramebuffer(device_, &fci, nullptr, &fb)) != VK_SUCCESS) {
+        DestroyRenderPass(device_, rp, nullptr);
+        DestroyImageView(device_, view, nullptr);
+        detail_ = "vkCreateFramebuffer";
+        return r;
+    }
+    auto cleanup = [&] {
+        DestroyFramebuffer(device_, fb, nullptr);
+        DestroyRenderPass(device_, rp, nullptr);
+        DestroyImageView(device_, view, nullptr);
+    };
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if ((r = MakeBuffer(64 * 64 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, buffer, memory)) != VK_SUCCESS) {
+        cleanup();
+        return r;
+    }
+    if ((r = Begin()) != VK_SUCCESS) { cleanup(); return r; }
+    VkClearValue clear{};
+    clear.color.float32[0] = 0.25f;
+    clear.color.float32[1] = 0.5f;
+    clear.color.float32[2] = 0.75f;
+    clear.color.float32[3] = 1.0f;
+    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rbi.renderPass = rp;
+    rbi.framebuffer = fb;
+    rbi.renderArea = {{0, 0}, {64, 64}};
+    rbi.clearValueCount = 1;
+    rbi.pClearValues = &clear;
+    CmdBeginRenderPass(cmd_, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    CmdEndRenderPass(cmd_);
+    VkImageMemoryBarrier pre{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    pre.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    pre.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    pre.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    pre.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    pre.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.image = image;
+    pre.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                       0, nullptr, 0, nullptr, 1, &pre);
+    VkBufferImageCopy copy{};
+    copy.bufferRowLength = 64;
+    copy.bufferImageHeight = 64;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {64, 64, 1};
+    CmdCopyImageToBuffer(cmd_, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
+    VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.buffer = buffer;
+    host.size = VK_WHOLE_SIZE;
+    CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+                       nullptr, 1, &host, 0, nullptr);
+    r = SubmitAndWait();
+    cleanup();
+    if (r != VK_SUCCESS) return r;
+    void* mapped = nullptr;
+    if ((r = MapMemory(device_, memory, 0, VK_WHOLE_SIZE, 0, &mapped)) != VK_SUCCESS || !mapped) {
+        detail_ = "vkMapMemory";
+        return r != VK_SUCCESS ? r : VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    const auto* px = static_cast<const uint32_t*>(mapped);
+    uint32_t good = 0, zero = 0;
+    const uint32_t first = px[0];
+    for (uint32_t i = 0; i < 64 * 64; ++i) {
+        const uint32_t p = px[i];
+        const int rr = p & 0xFF, gg = (p >> 8) & 0xFF, bb = (p >> 16) & 0xFF;
+        if (std::abs(rr - 64) <= 2 && std::abs(gg - 128) <= 2 && std::abs(bb - 191) <= 2) ++good;
+        if ((p & 0x00FFFFFFu) == 0) ++zero;
+    }
+    UnmapMemory(device_, memory);
+    char text[128];
+    std::snprintf(text, sizeof(text), "%u of 4096 pixels right, %u black, first 0x%08X", good,
+                  zero, first);
+    detail_ = text;
+    return good == 64 * 64 ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+}
+
+// Draws into a 64x64 RGBA8 target cleared to the ONYX background, then reads it
+// back. present = false: a full-screen triangle with a constant color (no vertex
+// buffer, descriptors or push constants), i.e. "does rasterizing work at all".
+// present = true: Azahar's present pipeline as the core builds it (vertex buffer
+// in host memory, push-constant matrix, sampled texture array, CONSTANT_ALPHA
+// blending with constants {0,0,0,1}) drawing a 32x32 quad in the middle.
+VkResult VulkanSelfTest::StepDraw(bool present) {
+    constexpr uint32_t kSize = 64;
+    constexpr int kWant[3] = {64, 191, 128}; // 0.25, 0.75, 0.5
+    constexpr int kBg[3] = {16, 18, 24};
+    VkResult r = VK_SUCCESS;
+
+    // Target, render pass (clear, UNDEFINED -> SHADER_READ_ONLY like the core) and framebuffer.
+    VkImage target = VK_NULL_HANDLE;
+    if ((r = MakeImage(VK_FORMAT_R8G8B8A8_UNORM,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                       target)) != VK_SUCCESS)
+        return r;
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = target;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView target_view = VK_NULL_HANDLE;
+    if ((r = CreateImageView(device_, &vci, nullptr, &target_view)) != VK_SUCCESS) {
+        detail_ = "vkCreateImageView";
+        return r;
+    }
+    views_.push_back(target_view);
+    VkAttachmentDescription att{};
+    att.format = VK_FORMAT_R8G8B8A8_UNORM;
+    att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1;
+    sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1;
+    rpci.pAttachments = &att;
+    rpci.subpassCount = 1;
+    rpci.pSubpasses = &sub;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    if ((r = CreateRenderPass(device_, &rpci, nullptr, &rp)) != VK_SUCCESS) {
+        detail_ = "vkCreateRenderPass";
+        return r;
+    }
+    render_passes_.push_back(rp);
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = rp;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &target_view;
+    fci.width = kSize;
+    fci.height = kSize;
+    fci.layers = 1;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    if ((r = CreateFramebuffer(device_, &fci, nullptr, &fb)) != VK_SUCCESS) {
+        detail_ = "vkCreateFramebuffer";
+        return r;
+    }
+    framebuffers_.push_back(fb);
+
+    // Shaders.
+    auto make_module = [&](const uint32_t* code, size_t size, VkShaderModule& m) {
+        VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        smci.codeSize = size;
+        smci.pCode = code;
+        const VkResult res = CreateShaderModule(device_, &smci, nullptr, &m);
+        if (res == VK_SUCCESS) shaders_.push_back(m);
+        else detail_ = "vkCreateShaderModule";
+        return res;
+    };
+    VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+    if ((r = present ? make_module(kAzaharPresentVert, sizeof(kAzaharPresentVert), vs)
+                     : make_module(kSelfTestBasicVert, sizeof(kSelfTestBasicVert), vs)) != VK_SUCCESS ||
+        (r = present ? make_module(kAzaharPresentFrag, sizeof(kAzaharPresentFrag), fs)
+                     : make_module(kSelfTestBasicFrag, sizeof(kSelfTestBasicFrag), fs)) != VK_SUCCESS)
+        return r;
+
+    // Present only: source texture, sampler, descriptor set, vertex buffer.
+    VkImage tex = VK_NULL_HANDLE;
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkBuffer vbuf = VK_NULL_HANDLE;
+    if (present) {
+        if ((r = MakeImage(VK_FORMAT_R8G8B8A8_UNORM,
+                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, tex)) !=
+            VK_SUCCESS)
+            return r;
+        vci.image = tex;
+        VkImageView tex_view = VK_NULL_HANDLE;
+        if ((r = CreateImageView(device_, &vci, nullptr, &tex_view)) != VK_SUCCESS) {
+            detail_ = "vkCreateImageView (texture)";
+            return r;
+        }
+        views_.push_back(tex_view);
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW =
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 1.0f;
+        sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        VkSampler sampler = VK_NULL_HANDLE;
+        if ((r = CreateSampler(device_, &sci, nullptr, &sampler)) != VK_SUCCESS) {
+            detail_ = "vkCreateSampler";
+            return r;
+        }
+        samplers_.push_back(sampler);
+        VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3,
+                                             VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        dslci.bindingCount = 1;
+        dslci.pBindings = &binding;
+        if ((r = CreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout)) != VK_SUCCESS) {
+            detail_ = "vkCreateDescriptorSetLayout";
+            return r;
+        }
+        set_layouts_.push_back(set_layout);
+        VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
+        VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        dpci.maxSets = 1;
+        dpci.poolSizeCount = 1;
+        dpci.pPoolSizes = &pool_size;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        if ((r = CreateDescriptorPool(device_, &dpci, nullptr, &pool)) != VK_SUCCESS) {
+            detail_ = "vkCreateDescriptorPool";
+            return r;
+        }
+        descriptor_pools_.push_back(pool);
+        VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dsai.descriptorPool = pool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &set_layout;
+        if ((r = AllocateDescriptorSets(device_, &dsai, &set)) != VK_SUCCESS) {
+            detail_ = "vkAllocateDescriptorSets";
+            return r;
+        }
+        VkDescriptorImageInfo infos[3];
+        for (auto& info : infos)
+            info = {sampler, tex_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = set;
+        write.dstBinding = 0;
+        write.descriptorCount = 3;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = infos;
+        UpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+
+        // Eight vertices (x, y, u, v); the quad is the second four, drawn with a
+        // first vertex of 4 the way the core draws from its stream buffer.
+        VkDeviceMemory vmem = VK_NULL_HANDLE;
+        if ((r = MakeBuffer(8 * 4 * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, vbuf,
+                            vmem)) != VK_SUCCESS)
+            return r;
+        void* mapped = nullptr;
+        if ((r = MapMemory(device_, vmem, 0, VK_WHOLE_SIZE, 0, &mapped)) != VK_SUCCESS || !mapped) {
+            detail_ = "vkMapMemory (vertices)";
+            return r != VK_SUCCESS ? r : VK_ERROR_MEMORY_MAP_FAILED;
+        }
+        const float verts[8][4] = {
+            {0, 0, 0, 0},       {0, 0, 0, 0},       {0, 0, 0, 0},       {0, 0, 0, 0},
+            {16, 16, 1, 0},     {48, 16, 1, 1},     {16, 48, 0, 0},     {48, 48, 0, 1},
+        };
+        std::memcpy(mapped, verts, sizeof(verts));
+        UnmapMemory(device_, vmem);
+    }
+
+    // Pipeline (Azahar's BuildPipelines state for the present variant).
+    VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 112};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = present ? 1 : 0;
+    plci.pSetLayouts = present ? &set_layout : nullptr;
+    plci.pushConstantRangeCount = present ? 1 : 0;
+    plci.pPushConstantRanges = present ? &push : nullptr;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if ((r = CreatePipelineLayout(device_, &plci, nullptr, &layout)) != VK_SUCCESS) {
+        detail_ = "vkCreatePipelineLayout";
+        return r;
+    }
+    pipeline_layouts_.push_back(layout);
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vs;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs;
+    stages[1].pName = "main";
+    VkVertexInputBindingDescription vb{0, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription va[2] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+                                               {1, 0, VK_FORMAT_R32G32_SFLOAT, 8}};
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    if (present) {
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &vb;
+        vi.vertexAttributeDescriptionCount = 2;
+        vi.pVertexAttributeDescriptions = va;
+    }
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = present ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    const VkViewport placeholder_vp{0, 0, 1, 1, 0, 1};
+    const VkRect2D placeholder_sc{{0, 0}, {1, 1}};
+    VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vps.viewportCount = 1;
+    vps.pViewports = &placeholder_vp;
+    vps.scissorCount = 1;
+    vps.pScissors = &placeholder_sc;
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    dss.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.blendEnable = present ? VK_TRUE : VK_FALSE;
+    cba.srcColorBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    cba.colorBlendOp = VK_BLEND_OP_ADD;
+    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    cba.alphaBlendOp = VK_BLEND_OP_ADD;
+    cba.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cbs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cbs.attachmentCount = 1;
+    cbs.pAttachments = &cba;
+    const VkDynamicState dyn[] = {VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_VIEWPORT,
+                                  VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    ds.dynamicStateCount = 3;
+    ds.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gpci.stageCount = 2;
+    gpci.pStages = stages;
+    gpci.pVertexInputState = &vi;
+    gpci.pInputAssemblyState = &ia;
+    gpci.pViewportState = &vps;
+    gpci.pRasterizationState = &rs;
+    gpci.pMultisampleState = &ms;
+    gpci.pDepthStencilState = &dss;
+    gpci.pColorBlendState = &cbs;
+    gpci.pDynamicState = &ds;
+    gpci.layout = layout;
+    gpci.renderPass = rp;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if ((r = CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gpci, nullptr, &pipeline)) !=
+        VK_SUCCESS) {
+        detail_ = "vkCreateGraphicsPipelines (see the [driver] lines above for why)";
+        return r;
+    }
+    pipelines_.push_back(pipeline);
+
+    VkBuffer out = VK_NULL_HANDLE;
+    VkDeviceMemory out_mem = VK_NULL_HANDLE;
+    if ((r = MakeBuffer(kSize * kSize * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, out, out_mem)) !=
+        VK_SUCCESS)
+        return r;
+
+    if ((r = Begin()) != VK_SUCCESS) return r;
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (present) {
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = tex;
+        b.subresourceRange = range;
+        CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           0, 0, nullptr, 0, nullptr, 1, &b);
+        VkClearColorValue c{};
+        c.float32[0] = 0.25f;
+        c.float32[1] = 0.75f;
+        c.float32[2] = 0.5f;
+        c.float32[3] = 1.0f;
+        CmdClearColorImage(cmd_, tex, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1, &range);
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+    // Dynamic state before the render pass, as the core records it.
+    const VkViewport vp{0, 0, static_cast<float>(kSize), static_cast<float>(kSize), 0, 1};
+    const VkRect2D sc{{0, 0}, {kSize, kSize}};
+    CmdSetViewport(cmd_, 0, 1, &vp);
+    CmdSetScissor(cmd_, 0, 1, &sc);
+    const float blend[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    CmdSetBlendConstants(cmd_, blend);
+    VkClearValue clear{};
+    clear.color.float32[0] = kBg[0] / 255.0f;
+    clear.color.float32[1] = kBg[1] / 255.0f;
+    clear.color.float32[2] = kBg[2] / 255.0f;
+    clear.color.float32[3] = 1.0f;
+    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rbi.renderPass = rp;
+    rbi.framebuffer = fb;
+    rbi.renderArea = {{0, 0}, {kSize, kSize}};
+    rbi.clearValueCount = 1;
+    rbi.pClearValues = &clear;
+    CmdBeginRenderPass(cmd_, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    CmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    if (present) {
+        CmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0,
+                              nullptr);
+        // DrawInfo: column-major mat4 mapping pixels to clip space, then the
+        // resolutions and screen ids (screen_id_l = 0).
+        float info[28] = {};
+        const float sx = 2.0f / kSize, sy = 2.0f / kSize;
+        const float m[16] = {sx, 0, 0, -1, 0, sy, 0, -1, 0, 0, 1, 0, 0, 0, 0, 1};
+        std::memcpy(info, m, sizeof(m));
+        info[16] = info[17] = static_cast<float>(kSize);
+        info[18] = info[19] = 1.0f / kSize;
+        info[20] = info[21] = static_cast<float>(kSize);
+        info[22] = info[23] = 1.0f / kSize;
+        CmdPushConstants(cmd_, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(info), info);
+        const VkDeviceSize offset = 0;
+        CmdBindVertexBuffers(cmd_, 0, 1, &vbuf, &offset);
+        CmdDraw(cmd_, 4, 1, 4, 0);
+    } else {
+        CmdDraw(cmd_, 3, 1, 0, 0);
+    }
+    CmdEndRenderPass(cmd_);
+    VkImageMemoryBarrier pre{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    pre.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    pre.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    pre.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    pre.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    pre.srcQueueFamilyIndex = pre.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.image = target;
+    pre.subresourceRange = range;
+    CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                       0, nullptr, 0, nullptr, 1, &pre);
+    VkBufferImageCopy copy{};
+    copy.bufferRowLength = kSize;
+    copy.bufferImageHeight = kSize;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {kSize, kSize, 1};
+    CmdCopyImageToBuffer(cmd_, target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, out, 1, &copy);
+    VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.buffer = out;
+    host.size = VK_WHOLE_SIZE;
+    CmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+                       nullptr, 1, &host, 0, nullptr);
+    if ((r = SubmitAndWait()) != VK_SUCCESS) return r;
+
+    void* mapped = nullptr;
+    if ((r = MapMemory(device_, out_mem, 0, VK_WHOLE_SIZE, 0, &mapped)) != VK_SUCCESS || !mapped) {
+        detail_ = "vkMapMemory";
+        return r != VK_SUCCESS ? r : VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    const auto* px = static_cast<const uint32_t*>(mapped);
+    auto is = [](uint32_t p, const int (&c)[3]) {
+        return std::abs(static_cast<int>(p & 0xFF) - c[0]) <= 3 &&
+               std::abs(static_cast<int>((p >> 8) & 0xFF) - c[1]) <= 3 &&
+               std::abs(static_cast<int>((p >> 16) & 0xFF) - c[2]) <= 3;
+    };
+    uint32_t drawn = 0, bg = 0, zero = 0;
+    for (uint32_t i = 0; i < kSize * kSize; ++i) {
+        if (is(px[i], kWant)) ++drawn;
+        else if (is(px[i], kBg)) ++bg;
+        else if ((px[i] & 0x00FFFFFFu) == 0) ++zero;
+    }
+    const uint32_t center = px[32 * kSize + 32], corner = px[0];
+    UnmapMemory(device_, out_mem);
+    const uint32_t want_drawn = present ? 32 * 32 : kSize * kSize;
+    char text[200];
+    std::snprintf(text, sizeof(text),
+                  "%u of %u pixels drawn, %u background, %u black; center 0x%08X, corner 0x%08X%s",
+                  drawn, want_drawn, bg, zero, center, corner,
+                  drawn == 0 && bg > 0 ? " - cleared, but the draw left no color" : "");
+    detail_ = text;
+    // Edge pixels of the quad may land either side; allow a one-pixel border.
+    const bool ok = present ? (drawn >= 30 * 30 && drawn <= 34 * 34 && is(corner, kBg))
+                            : drawn == want_drawn;
+    return ok ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+}
+
 VkResult VulkanSelfTest::StepComputeDispatch() {
     constexpr uint32_t kGroups = 4, kCount = kGroups * 64;
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -2108,6 +2868,14 @@ void VulkanSelfTest::Teardown() {
     if (DeviceWaitIdle) DeviceWaitIdle(device_); // result ignored: lost devices still tear down
     if (DestroyPipeline)
         for (VkPipeline p : pipelines_) DestroyPipeline(device_, p, nullptr);
+    if (DestroyFramebuffer)
+        for (VkFramebuffer f : framebuffers_) DestroyFramebuffer(device_, f, nullptr);
+    if (DestroyRenderPass)
+        for (VkRenderPass rp : render_passes_) DestroyRenderPass(device_, rp, nullptr);
+    if (DestroyImageView)
+        for (VkImageView v : views_) DestroyImageView(device_, v, nullptr);
+    if (DestroySampler)
+        for (VkSampler sm : samplers_) DestroySampler(device_, sm, nullptr);
     if (DestroyPipelineLayout)
         for (VkPipelineLayout l : pipeline_layouts_) DestroyPipelineLayout(device_, l, nullptr);
     if (DestroyDescriptorPool)
@@ -2125,6 +2893,10 @@ void VulkanSelfTest::Teardown() {
     if (fence_ && DestroyFence) DestroyFence(device_, fence_, nullptr);
     if (pool_ && DestroyCommandPool) DestroyCommandPool(device_, pool_, nullptr); // frees cmd_
     pipelines_.clear();
+    framebuffers_.clear();
+    render_passes_.clear();
+    views_.clear();
+    samplers_.clear();
     pipeline_layouts_.clear();
     descriptor_pools_.clear();
     set_layouts_.clear();

@@ -44,6 +44,21 @@
 2. Push to GitHub and let `.github/workflows/build.yml` build on Windows; fix MSVC errors.
 3. Install the .msix via Device Portal, set App type to Game, open Settings > System check.
 
+## v2.1.1 (in progress)
+- Hardware renderer boots and runs on Series S (NSMB2 at 60 fps with audio, build #69+).
+  Fixed so far: device removal (mesa/0011 cast guard), Close E_FAIL from
+  SetViewInstanceMask without view instancing (mesa/0013).
+- Black hardware picture (builds #69-#71): readback proved the output image was
+  black. Cause: Azahar's present pipeline blends with CONSTANT_ALPHA and constants
+  {0,0,0,1}; without options13.AlphaBlendFactorSupported Dozen used BLEND_FACTOR,
+  i.e. RGB 0 → every screen draw kept the destination. mesa/0015 broadcasts the
+  alpha constant for such pipelines. Self-test steps 7/8 reproduce the present draw.
+- Crash after ~1 min: D16 depth images were R16_UNORM + ALLOW_DEPTH_STENCIL (needs
+  castable formats). mesa/0015 makes depth images typeless without relaxed casting.
+- ~500 ms stalls every ~2.5 s: dynarmic W^X re-protected the whole code buffer per
+  block; dynarmic/0003 only toggles the pages being written.
+- Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
+
 ## v2.1.0 (Oct 5, 2026 checkpoint)
 - Software renderer: banded parallel rasterizer, texture cache, auto frame skip,
   TEV decoded once per triangle, opaque pixels skip the framebuffer read.

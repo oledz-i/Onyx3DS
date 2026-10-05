@@ -1,0 +1,182 @@
+From a6b989712ce4ac4bb1710746265f074bc0913319 Mon Sep 17 00:00:00 2001
+From: ONYX <onyx@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 19:22:11 -0400
+Subject: [PATCH] x64: W^X on Windows: make only the written pages writable
+
+EnableWriting()/DisableWriting() re-protected the whole committed code
+buffer (16 MB and up) twice for every compiled block and every patch
+batch. On Xbox that is a heavy VirtualProtect each time: a third of the
+emulation thread's time and half-second stalls whenever new code runs.
+Now a window around the insertion point is opened for emission, and
+patch sites and constant-pool slots are opened individually through
+MakeWritable(); everything is set back to read+execute at the end of the
+window. The prelude still opens the whole buffer.
+---
+ src/dynarmic/backend/x64/block_of_code.cpp | 71 +++++++++++++++++++++-
+ src/dynarmic/backend/x64/block_of_code.h   | 11 ++++
+ src/dynarmic/backend/x64/constant_pool.cpp |  1 +
+ 3 files changed, 81 insertions(+), 2 deletions(-)
+
+diff --git a/src/dynarmic/backend/x64/block_of_code.cpp b/src/dynarmic/backend/x64/block_of_code.cpp
+index 5be2af01..e8e448ea 100644
+--- a/src/dynarmic/backend/x64/block_of_code.cpp
++++ b/src/dynarmic/backend/x64/block_of_code.cpp
+@@ -30,6 +30,7 @@
+ #    include <sys/sysctl.h>
+ #endif
+ 
++#include <algorithm>
+ #include <array>
+ #include <cstring>
+ 
+@@ -249,10 +250,41 @@ void BlockOfCode::PreludeComplete() {
+     DisableWriting();
+ }
+ 
++#if defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT) && defined(_WIN32)
++namespace {
++constexpr std::size_t kWxPage = 4096;
++// Room for one compiled block: emission starts at the insertion point and a single
++// block is a few KB, far below this.
++constexpr std::size_t kWxEmitWindow = 1024 * 1024;
++std::uint8_t* WxPageDown(const void* p) {
++    return reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(p) & ~(kWxPage - 1));
++}
++std::uint8_t* WxPageUp(const void* p) {
++    return reinterpret_cast<std::uint8_t*>((reinterpret_cast<std::uintptr_t>(p) + kWxPage - 1) & ~(kWxPage - 1));
++}
++}  // namespace
++#endif
++
+ void BlockOfCode::EnableWriting() {
+ #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
+ #    ifdef _WIN32
+-    ProtectMemory(getCode(), committed_size, false);
++    if (writable_depth++ > 0) {
++        return;
++    }
++    std::uint8_t* const committed_end = top_ + committed_size;
++    if (!prelude_complete) {
++        // The prelude writes all over the start of the buffer: open all of it.
++        window_begin = top_;
++        window_end = committed_end;
++    } else {
++        // Blocks are emitted at the insertion point; patches and constants elsewhere
++        // go through MakeWritable().
++        window_begin = WxPageDown(getCurr());
++        window_end = std::min(committed_end, window_begin + kWxEmitWindow);
++    }
++    if (window_end > window_begin) {
++        ProtectMemory(window_begin, window_end - window_begin, false);
++    }
+ #    else
+     ProtectMemory(getCode(), maxSize_, false);
+ #    endif
+@@ -262,13 +294,46 @@ void BlockOfCode::EnableWriting() {
+ void BlockOfCode::DisableWriting() {
+ #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
+ #    ifdef _WIN32
+-    ProtectMemory(getCode(), committed_size, true);
++    if (writable_depth == 0 || --writable_depth > 0) {
++        return;
++    }
++    // Newly committed pages (EnsureMemoryCommitted) start out read/write too.
++    std::uint8_t* const committed_end = top_ + committed_size;
++    std::uint8_t* end = std::max(window_end, WxPageUp(getCurr()));
++    end = std::min(end, committed_end);
++    if (end > window_begin) {
++        ProtectMemory(window_begin, end - window_begin, true);
++    }
++    for (const auto& [begin, size] : extra_writable) {
++        ProtectMemory(begin, size, true);
++    }
++    extra_writable.clear();
+ #    else
+     ProtectMemory(getCode(), maxSize_, true);
+ #    endif
+ #endif
+ }
+ 
++void BlockOfCode::MakeWritable([[maybe_unused]] const void* ptr, [[maybe_unused]] size_t size) {
++#if defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT) && defined(_WIN32)
++    if (writable_depth == 0 || size == 0) {
++        return;
++    }
++    std::uint8_t* const begin = WxPageDown(ptr);
++    std::uint8_t* const end = WxPageUp(static_cast<const std::uint8_t*>(ptr) + size);
++    if (begin >= window_begin && end <= window_end) {
++        return;
++    }
++    for (const auto& [b, n] : extra_writable) {
++        if (begin >= b && end <= b + n) {
++            return;
++        }
++    }
++    ProtectMemory(begin, static_cast<std::size_t>(end - begin), false);
++    extra_writable.emplace_back(begin, static_cast<std::size_t>(end - begin));
++#endif
++}
++
+ void BlockOfCode::ClearCache() {
+     ASSERT(prelude_complete);
+     SetCodePtr(code_begin);
+@@ -545,6 +610,8 @@ void BlockOfCode::SetCodePtr(CodePtr code_ptr) {
+     // The "size" defines where top_, the insertion point, is.
+     size_t required_size = reinterpret_cast<const u8*>(code_ptr) - getCode();
+     setSize(required_size);
++    // Patches rewrite a few bytes of older blocks here (at most 16, plus padding).
++    MakeWritable(code_ptr, 64);
+ }
+ 
+ void BlockOfCode::EnsurePatchLocationSize(CodePtr begin, size_t size) {
+diff --git a/src/dynarmic/backend/x64/block_of_code.h b/src/dynarmic/backend/x64/block_of_code.h
+index 3f7573af..a3e3e69f 100644
+--- a/src/dynarmic/backend/x64/block_of_code.h
++++ b/src/dynarmic/backend/x64/block_of_code.h
+@@ -9,6 +9,8 @@
+ #include <functional>
+ #include <memory>
+ #include <type_traits>
++#include <utility>
++#include <vector>
+ 
+ #include <mcl/bit/bit_field.hpp>
+ #include <mcl/stdint.hpp>
+@@ -151,6 +153,9 @@ public:
+ 
+     void SetCodePtr(CodePtr code_ptr);
+     void EnsurePatchLocationSize(CodePtr begin, size_t size);
++    /// W^X on Windows: make [ptr, ptr + size) writable for the rest of the current
++    /// EnableWriting()/DisableWriting() window (no-op outside a window or elsewhere).
++    void MakeWritable(const void* ptr, size_t size);
+ 
+     // ABI registers
+ #ifdef _WIN32
+@@ -187,6 +192,12 @@ private:
+ 
+ #ifdef _WIN32
+     size_t committed_size = 0;
++    // W^X: only the pages actually written are made writable, instead of the whole
++    // committed code buffer (tens of MB) twice for every compiled block.
++    int writable_depth = 0;
++    std::uint8_t* window_begin = nullptr;
++    std::uint8_t* window_end = nullptr;
++    std::vector<std::pair<std::uint8_t*, std::size_t>> extra_writable;
+ #endif
+ 
+     ConstantPool constant_pool;
+diff --git a/src/dynarmic/backend/x64/constant_pool.cpp b/src/dynarmic/backend/x64/constant_pool.cpp
+index ba003262..e2b8c69a 100644
+--- a/src/dynarmic/backend/x64/constant_pool.cpp
++++ b/src/dynarmic/backend/x64/constant_pool.cpp
+@@ -28,6 +28,7 @@ Xbyak::Address ConstantPool::GetConstant(const Xbyak::AddressFrame& frame, u64 l
+     if (iter == constant_info.end()) {
+         ASSERT(insertion_point < pool.size());
+         ConstantT& target_constant = pool[insertion_point];
++        code.MakeWritable(&target_constant, sizeof(target_constant));
+         target_constant = constant;
+         iter = constant_info.insert({constant, &target_constant}).first;
+         ++insertion_point;
+-- 
+2.43.0
+

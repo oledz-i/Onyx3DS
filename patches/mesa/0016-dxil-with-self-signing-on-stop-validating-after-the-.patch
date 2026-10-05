@@ -1,0 +1,45 @@
+From 93019d9ff6fce1a8c13784a58529ace6ed07d9d7 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 19:36:25 -0400
+Subject: [PATCH] dxil: with self-signing on, stop validating after the first
+ modules
+
+Every module is signed whatever the validator says, so validation only adds
+log lines. Validate the first 24 (their diagnostics land in the log) and hash
+the rest directly, taking the validator off each later shader compile.
+---
+ src/microsoft/compiler/dxil_validator.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/microsoft/compiler/dxil_validator.cpp b/src/microsoft/compiler/dxil_validator.cpp
+index 3d51155..477b641 100644
+--- a/src/microsoft/compiler/dxil_validator.cpp
++++ b/src/microsoft/compiler/dxil_validator.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include "dxil_validator.h"
+ 
+ #include <windows.h>
+@@ -550,6 +551,19 @@ dxil_validate_module(struct dxil_validator *val, void *data, size_t size, char *
+    if (!val)
+       return false;
+ 
++   /* ONYX: with self-signing on, every module ends up signed whatever the
++    * validator says, so validation only buys log lines. Validate the first
++    * modules (their diagnostics land in the log) and hash the rest directly:
++    * that takes the validator off every later shader compile. */
++   {
++      static const char *const sign_env = getenv("ONYX_DXIL_SELFSIGN");
++      static std::atomic<unsigned> validated{0};
++      if (sign_env && sign_env[0] == '1' && validated.fetch_add(1) >= 24) {
++         onyx_sign_container(data, size);
++         return true;
++      }
++   }
++
+    ShaderBlob source(data, size);
+ 
+    ComPtr<IDxcOperationResult> result;
+-- 
+2.43.0
+

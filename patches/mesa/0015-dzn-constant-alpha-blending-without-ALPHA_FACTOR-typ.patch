@@ -1,0 +1,137 @@
+From 346a48277f90e8b67a522d527491c4ebf39c3a2b Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 19:32:41 -0400
+Subject: [PATCH] dzn: constant-alpha blending without ALPHA_FACTOR; typeless
+ depth images on Xbox
+
+Without options13.AlphaBlendFactorSupported, VK_BLEND_FACTOR_CONSTANT_ALPHA
+became D3D12_BLEND_BLEND_FACTOR, which uses the constant's RGB for the color
+channels. Azahar draws its screens with CONSTANT_ALPHA and constants
+{0,0,0,1}, so every screen draw kept the destination and the frame stayed the
+clear color (black). When a pipeline's color factors only use the constant's
+alpha, send the alpha in all four blend-factor channels.
+
+Depth images got their color-equivalent format (R16_UNORM, R32_FLOAT) plus
+ALLOW_DEPTH_STENCIL, which is only valid with castable formats. Without
+relaxed casting use the typeless format.
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c | 20 +++++++++++++++++++-
+ src/microsoft/vulkan/dzn_image.c      | 10 ++++++++++
+ src/microsoft/vulkan/dzn_pipeline.c   | 24 ++++++++++++++++++++++++
+ src/microsoft/vulkan/dzn_private.h    |  4 ++++
+ 4 files changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index 4eebbfa..66091f8 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -3630,9 +3630,21 @@ dzn_cmd_buffer_update_zsa(struct dzn_cmd_buffer *cmdbuf)
+ static void
+ dzn_cmd_buffer_update_blend_constants(struct dzn_cmd_buffer *cmdbuf)
+ {
+-   if (cmdbuf->state.dirty & DZN_CMD_DIRTY_BLEND_CONSTANTS)
++   if (!(cmdbuf->state.dirty & DZN_CMD_DIRTY_BLEND_CONSTANTS))
++      return;
++
++   const struct dzn_graphics_pipeline *pipeline =
++      cmdbuf->state.pipeline && cmdbuf->state.pipeline->type == VK_PIPELINE_BIND_POINT_GRAPHICS ?
++      (const struct dzn_graphics_pipeline *)cmdbuf->state.pipeline : NULL;
++   if (pipeline && pipeline->blend.broadcast_alpha) {
++      const float a = cmdbuf->state.blend.constants[3];
++      const float factor[4] = { a, a, a, a };
++      ID3D12GraphicsCommandList1_OMSetBlendFactor((dzn_cmd_note(cmdbuf, "OMSetBlendFactor"), cmdbuf->cmdlist),
++                                                  factor);
++   } else {
+       ID3D12GraphicsCommandList1_OMSetBlendFactor((dzn_cmd_note(cmdbuf, "OMSetBlendFactor"), cmdbuf->cmdlist),
+                                                   cmdbuf->state.blend.constants);
++   }
+ }
+ 
+ static void
+@@ -5207,6 +5219,12 @@ dzn_CmdBindPipeline(VkCommandBuffer commandBuffer,
+                 sizeof(cmdbuf->state.blend.constants));
+          cmdbuf->state.dirty |= DZN_CMD_DIRTY_BLEND_CONSTANTS;
+       }
++      /* The factor sent to D3D12 depends on the pipeline (alpha broadcast). */
++      const struct dzn_graphics_pipeline *prev =
++         cmdbuf->state.pipeline && cmdbuf->state.pipeline->type == VK_PIPELINE_BIND_POINT_GRAPHICS ?
++         (const struct dzn_graphics_pipeline *)cmdbuf->state.pipeline : NULL;
++      if (gfx->blend.broadcast_alpha || (prev && prev->blend.broadcast_alpha))
++         cmdbuf->state.dirty |= DZN_CMD_DIRTY_BLEND_CONSTANTS;
+ 
+       for (uint32_t vb = 0; vb < gfx->vb.count; vb++)
+          cmdbuf->state.vb.views[vb].StrideInBytes = gfx->vb.strides[vb];
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index 2eb7ebf..613042f 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -260,6 +260,16 @@ dzn_image_create(struct dzn_device *device,
+       }
+    }
+ 
++   /* ONYX: depth images are created with their color-equivalent format
++    * (D16 -> R16_UNORM, D32 -> R32_FLOAT) and rely on castable formats to get
++    * a DSV. Without relaxed casting / castable formats (Xbox) a non-typeless
++    * format with ALLOW_DEPTH_STENCIL is invalid: the allocation size comes back
++    * 0 and the app fails ("Failed allocating image 256x416 with error -3").
++    * A typeless format accepts both the DSV and the SRV formats. */
++   if ((image->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
++       !pdev->options12.RelaxedFormatCastingSupported)
++      image->desc.Format = dzn_get_typeless_dxgi_format(image->desc.Format);
++
+    if (pCreateInfo->sharingMode == VK_SHARING_MODE_CONCURRENT &&
+        !(image->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+        image->desc.SampleDesc.Count == 1)
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 9880b2e..b2a2e3d 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -1770,6 +1770,30 @@ dzn_graphics_pipeline_translate_blend(struct dzn_graphics_pipeline *pipeline,
+    memcpy(pipeline->blend.constants, in_blend->blendConstants,
+           sizeof(pipeline->blend.constants));
+ 
++   /* ONYX: without ALPHA_FACTOR, CONSTANT_ALPHA maps to BLEND_FACTOR, whose RGB
++    * channels hold the constant's RGB, not its alpha. Azahar blends its screens
++    * with CONSTANT_ALPHA and constants {0,0,0,1}, so every screen draw came out
++    * as "keep the destination" and the picture stayed the clear color. When the
++    * color channels use only the alpha constant, broadcast it instead. */
++   if (!support_alpha_blend_factor && !in_blend->logicOpEnable) {
++      bool uses_alpha = false, uses_color = false;
++      for (uint32_t i = 0; i < in_blend->attachmentCount; i++) {
++         const VkPipelineColorBlendAttachmentState *a = &in_blend->pAttachments[i];
++         if (!a->blendEnable)
++            continue;
++         const VkBlendFactor color_factors[] = { a->srcColorBlendFactor, a->dstColorBlendFactor };
++         for (unsigned f = 0; f < ARRAY_SIZE(color_factors); f++) {
++            if (color_factors[f] == VK_BLEND_FACTOR_CONSTANT_ALPHA ||
++                color_factors[f] == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA)
++               uses_alpha = true;
++            if (color_factors[f] == VK_BLEND_FACTOR_CONSTANT_COLOR ||
++                color_factors[f] == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR)
++               uses_color = true;
++         }
++      }
++      pipeline->blend.broadcast_alpha = uses_alpha && !uses_color;
++   }
++
+    for (uint32_t i = 0; i < in_blend->attachmentCount; i++) {
+       if (i > 0 &&
+           memcmp(&in_blend->pAttachments[i - 1], &in_blend->pAttachments[i],
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index dc16184..74e4d45 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -1017,6 +1017,10 @@ struct dzn_graphics_pipeline {
+ 
+    struct {
+       bool dynamic_constants;
++      /* ONYX: no D3D12_BLEND_ALPHA_FACTOR (options13.AlphaBlendFactorSupported) on
++       * this GPU and the pipeline only uses the constant's alpha: feed the alpha
++       * to all four blend-factor channels so CONSTANT_ALPHA still means alpha. */
++      bool broadcast_alpha;
+       float constants[4];
+    } blend;
+ 
+-- 
+2.43.0
+
