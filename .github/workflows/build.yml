@@ -94,6 +94,39 @@ jobs:
           retention-days: 3
           path: deps/bin/*.dll
 
+  # Optional NES core. The step is allowed to fail: the job still succeeds, no
+  # artifact is uploaded, the package is built without fceumm_libretro.dll and
+  # the app hides NES. A failure shows up as a warning annotation.
+  fceumm:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: deps/fceumm
+          key: fceumm-${{ hashFiles('vendor/fceumm/BASE_COMMIT') }}-restore
+          restore-keys: fceumm-${{ hashFiles('vendor/fceumm/BASE_COMMIT') }}-
+      - name: Build FCEUmm (NES core, UWP)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/build-fceumm.ps1" 2>&1 | tee build.log
+      - if: always()
+        run: |
+          if [ -f deps/bin/fceumm_libretro.dll ]; then echo "NES core built"; else tools/ci-report.sh build.log "NES core (optional)" warning; fi
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: deps/fceumm
+          key: fceumm-${{ hashFiles('vendor/fceumm/BASE_COMMIT') }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fceumm-bin
+          retention-days: 3
+          if-no-files-found: ignore
+          path: deps/bin/fceumm_libretro.dll
+
   # Compiles the app and shell right away (linking needs the other jobs'
   # libraries, so link errors here are expected until the package job).
   app:
@@ -121,7 +154,7 @@ jobs:
             deps/lib/rcheevos.lib
 
   package:
-    needs: [azahar, dozen, app]
+    needs: [azahar, dozen, app, fceumm]
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -133,6 +166,7 @@ jobs:
           mkdir -p deps/lib deps/bin
           cp artifacts/azahar-lib/*.lib artifacts/shell-libs/*.lib deps/lib/
           cp artifacts/dozen-bin/*.dll deps/bin/
+          cp artifacts/fceumm-bin/*.dll deps/bin/ || echo "NES core not built; the package ships without NES"
       - name: Build and sign the Xbox package
         run: |
           set -o pipefail

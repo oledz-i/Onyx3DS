@@ -267,6 +267,10 @@
     <None Include="z-1.dll" Condition="Exists('z-1.dll')">
       <DeploymentContent>true</DeploymentContent>
     </None>
+    <!-- NES core (FCEUmm, vendor\fceumm), optional: build-app.ps1 copies it here when CI built it. -->
+    <None Include="fceumm_libretro.dll" Condition="Exists('fceumm_libretro.dll')">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

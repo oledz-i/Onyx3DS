@@ -38,6 +38,11 @@ foreach ($d in "vulkan_dzn.dll", "dxil.dll") {
     else { Write-Warning "$d not found in deps\bin; graphics will not work in this package" }
 }
 
+# Optional NES core (tools\build-fceumm.ps1): without it the app hides NES.
+$nes = Join-Path $Root "deps\bin\fceumm_libretro.dll"
+if (Test-Path $nes) { Copy-Item $nes (Join-Path $Root "app\ONYX3DS\fceumm_libretro.dll") -Force }
+else { Write-Warning "fceumm_libretro.dll not found in deps\bin; NES will not be available in this package" }
+
 # OpenGL on D3D12 (Mesa, UWP build) for the OpenGL hardware renderer: see vendor\mesa-gl.
 $glZip = Join-Path $Root "vendor\mesa-gl\mesa-uwp-26.1.3.zip"
 $glTmp = Join-Path $Root "out\mesa-gl"
