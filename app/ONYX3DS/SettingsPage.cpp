@@ -150,7 +150,7 @@ void SettingsPage::InitializeComponent() {
         Border icon;
         icon.Width(48);
         icon.Height(48);
-        icon.CornerRadius(CornerRadius{14, 14, 14, 14});
+        icon.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{14, 14, 14, 14});
         icon.Background(Svc().ThemeBrush(kit::WithAlpha(Svc().CurrentTheme().colors.accent, 0x26)));
         auto g = kit::Glyph(s.glyph, 22);
         g.HorizontalAlignment(HorizontalAlignment::Center);
@@ -308,7 +308,7 @@ void SettingsPage::Show(const std::string& section) {
     Border tile;
     tile.Width(72);
     tile.Height(72);
-    tile.CornerRadius(CornerRadius{20, 20, 20, 20});
+    tile.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{20, 20, 20, 20});
     {
         LinearGradientBrush fill;
         GradientStop a, b;
