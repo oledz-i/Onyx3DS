@@ -411,11 +411,18 @@ void SettingsPage::BuildFolders() {
                 Cfg().folders.Set(kind, "");
                 Save();
                 EmulatorSession::Get().UpdateFolders(Cfg().folders);
-                if (auto s = weak.get()) s->Show("folders");
+                if (auto s = weak.get()) {
+                    if (kind == FolderKind::NesRoms) s->library_dirty_ = true;
+                    s->Show("folders");
+                }
             }));
         }
         Add(kit::SettingRow(FolderKindLabel(kind),
-                            std::string(FolderKindHelp(kind)) + "\n" + (current.empty() ? "Not set" : current),
+                            std::string(FolderKindHelp(kind)) +
+                                (kind == FolderKind::NesRoms && !EmulatorSession::NesCoreAvailable()
+                                     ? "\nThe NES core is not part of this build, so NES games stay hidden."
+                                     : "") +
+                                "\n" + (current.empty() ? "Not set" : current),
                             buttons));
     }
 }
@@ -664,13 +671,15 @@ void SettingsPage::BuildInterface() {
     std::vector<GameEntry> hidden;
     for (const auto& g : Svc().Library().All())
         if (g.hidden) hidden.push_back(g);
+    for (const auto& g : Svc().NesLibrary().All())
+        if (g.hidden) hidden.push_back(g);
     if (!hidden.empty()) {
         Add(kit::SectionHeader("Hidden games"));
         for (auto g : hidden) {
             Add(kit::SettingRow(g.DisplayTitle(), FileName(g.path),
                                 kit::ActionButton("Show", kit::glyph::Check, [weak, g]() mutable {
                                     g.hidden = false;
-                                    Svc().Library().Update(g);
+                                    Svc().LibraryFor(g.system).Update(g);
                                     if (auto s = weak.get()) s->Show("interface");
                                 })));
         }
@@ -742,6 +751,11 @@ void SettingsPage::BuildServices() {
                         kit::ActionButton("Download", kit::glyph::Picture, [] {
                             int n = 0;
                             for (const auto& g : Svc().Library().GridView(Cfg().qol))
+                                if (g.grid_art.empty()) {
+                                    Svc().ScrapeArt(g, false, nullptr);
+                                    ++n;
+                                }
+                            for (const auto& g : Svc().NesLibrary().GridView(Cfg().qol))
                                 if (g.grid_art.empty()) {
                                     Svc().ScrapeArt(g, false, nullptr);
                                     ++n;

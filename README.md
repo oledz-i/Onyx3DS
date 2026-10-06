@@ -44,6 +44,7 @@ ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core 
 - **Cheats**: downloads the cheat database for each game; toggle codes from the in-game menu.
 - **Fast forward, screenshots, screen layouts**: all on controller hotkeys.
 - **Custom textures and mods**: texture packs and LayeredFS mods (`romfs/`, `exefs/`, `code.ips`) per game, from folders you choose.
+- **NES (experimental)**: `.nes` / `.unf` games from the `Roms/NES` folder, played with the FCEUmm core in a separate "NES" tab (LT / RT switches between 3DS and NES). Shares save states, battery saves, fast forward and the pause menu. The core is an optional part of the package; if it is not in your build the NES tab is hidden.
 - **Crash protection**: emulator errors stop the game with an explanation instead of closing the app, and everything is written to a log you can share.
 
 ## Supported consoles
@@ -72,6 +73,8 @@ All consoles need **Developer Mode** (see [Requirements](#requirements)). ONYX d
 | Updates & DLC | `.cia` (installed to the emulated SD card from Settings) |
 
 Encrypted dumps are detected and flagged in the library. ONYX cannot decrypt them.
+
+NES games (`.nes`, `.unf`) go in their own folder (default `ONYX3DS/Roms/NES` on a set-up USB drive, or choose one under Settings > Folders > NES games). On NES the face buttons map as on a pad (Xbox B = NES A, Xbox A = NES B), Menu = Start, View tap = Select, X / Y = turbo A / B.
 
 ## Installation
 
@@ -168,6 +171,7 @@ ONYX stands on the work of these projects:
 
 - [Azahar](https://github.com/azahar-emu/azahar): the 3DS emulator core (GPL-3.0-or-later), itself continuing Citra
 - [dynarmic](https://github.com/azahar-emu/dynarmic): ARM dynamic recompiler
+- [FCEUmm](https://github.com/libretro/libretro-fceumm) (libretro): the NES core, built unmodified from a pinned commit as a separate DLL (GPL-2.0-or-later, see [`vendor/fceumm`](vendor/fceumm))
 - [Mesa / Dozen](https://gitlab.freedesktop.org/mesa/mesa): Vulkan on Direct3D 12 (MIT)
 - [SternXD/mesa-uwp](https://github.com/SternXD/mesa-uwp): Mesa's OpenGL on Direct3D 12 for UWP (MIT); the prebuilt runtime in [`vendor/mesa-gl`](vendor/mesa-gl) and the OpenGL renderer fixes in `patches/azahar` come from [danprice142's Azahar-UWP](https://github.com/danprice142/Azahar-UWP) (GPL-2.0-or-later)
 - [rcheevos](https://github.com/RetroAchievements/rcheevos): RetroAchievements client (MIT)

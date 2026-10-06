@@ -20,6 +20,10 @@ private:
     Windows::UI::Xaml::Controls::Button MakeTile(const onyx::GameEntry& game, double w, double h);
     Windows::UI::Xaml::UIElement MakeEmptySlot(double w, double h);
     void ShowEmptyState();
+    void ShowNesEmptyState();
+    Windows::UI::Xaml::UIElement MakeSystemTabs();
+    void UpdateSystemTabs();
+    void SwitchSystem(onyx::GameSystem system);
     void BuildBarButtons();
     void OnTileFocused(Windows::UI::Xaml::Controls::Button const& tile, const onyx::GameEntry& game,
                        bool focused);

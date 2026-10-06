@@ -28,6 +28,9 @@
                         <TextBlock x:Name="TitleText" Text="ONYX 3DS" FontSize="34" FontWeight="SemiBold" />
                         <TextBlock x:Name="GreetingText" FontSize="18" />
                     </StackPanel>
+                    <!-- 3DS | NES tabs, built in MainPage.cpp (hidden when the NES core is not in the package). -->
+                    <Border x:Name="SystemTabsHost" VerticalAlignment="Center" Margin="28,0,0,0"
+                            Visibility="Collapsed" />
                 </StackPanel>
                 <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" MaxWidth="1000">
                     <TextBlock x:Name="SelectedText" FontSize="28" FontWeight="SemiBold"

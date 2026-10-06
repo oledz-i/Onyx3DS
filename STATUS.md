@@ -132,3 +132,18 @@
   which the device was removed. Not yet confirmed on hardware.
 - UI: bundled Rounded M+ 1c font, Dual Screen (3DS-style) theme, new menu music,
   Restart ONYX after a crash (reopens the game).
+
+## NES support (Oct 6, 2026, not yet built with MSVC or run on a console)
+- Second libretro system: FCEUmm built in CI as `fceumm_libretro.dll` (job `fceumm`,
+  `tools/build-fceumm.ps1` + `tools/fceumm/CMakeLists.txt`, source pinned in
+  `vendor/fceumm/BASE_COMMIT`). The job is allowed to fail: no DLL means the package ships
+  without it and the NES tab and folder help say so. Loaded with LoadPackagedLibrary on the
+  emulation thread under the crash guard.
+- `EmulatorSession` calls cores through `CoreApi` (static Azahar symbols or GetProcAddress).
+  NES: software video (XRGB8888 / RGB565 / 0RGB1555 converted in shell/pixel), ROM handed over in
+  memory via GET_GAME_INFO_EXT, battery RAM in LocalState/nes/<name>.srm (flushed every ~10 s,
+  on pause and on quit; mirrored by SaveBackup), save states under states/nes-<hash>/,
+  RetroAchievements/cheats/3DS options skipped.
+- Library: `GameLibrary(fs, cache/nes, GameSystem::Nes)` scans `FolderKind::NesRoms`
+  (default `Roms/NES`); the 3DS library skips that folder. Home page tabs 3DS | NES (LT / RT).
+- Shell tests: 41 cases, 268 assertions.

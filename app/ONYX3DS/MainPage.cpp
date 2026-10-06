@@ -73,7 +73,8 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
 
     if (!initialised_) {
         initialised_ = true;
-        games_ = Svc().Library().GridView(Svc().Config().qol);
+        if (!EmulatorSession::NesCoreAvailable()) Svc().SetHomeSystem(GameSystem::N3DS);
+        games_ = Svc().LibraryFor(Svc().HomeSystem()).GridView(Svc().Config().qol);
         Rebuild(false);
         // Always rescan on launch so new files on the USB drive show up.
         Svc().RescanLibrary([weak](size_t) {
@@ -89,14 +90,16 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
         const auto& cfg = Svc().Config();
         // A restart after a crash reopens the game it was playing.
         if (const std::string resume = Svc().TakeResumePath(); !resume.empty()) {
-            if (auto g = Svc().Library().Find(resume)) {
+            if (auto g = Svc().FindGame(resume)) {
                 ONYX_INFO("Reopening %s after the restart", g->title.c_str());
+                Svc().SetHomeSystem(g->system);
                 Frame().Navigate(xaml_typename<ONYX3DS::EmulationPage>(), box_value(kit::H(g->path)));
                 return;
             }
         }
         if (cfg.qol.resume_last_game && !cfg.last_played_path.empty()) {
-            if (auto g = Svc().Library().Find(cfg.last_played_path)) {
+            if (auto g = Svc().FindGame(cfg.last_played_path)) {
+                Svc().SetHomeSystem(g->system);
                 Frame().Navigate(xaml_typename<ONYX3DS::EmulationPage>(), box_value(kit::H(g->path)));
             }
         }
@@ -132,9 +135,11 @@ void MainPage::ApplyTheme() {
     ClockText().Visibility(t.style.show_clock && Svc().Config().qol.show_clock ? Visibility::Visible
                                                                              : Visibility::Collapsed);
     HintText().Text(L"A Open    Y Favourite    X Details    LB / RB Pages    Menu Tools    View Settings");
-    HintHost().Child(kit::HintBar({{"A", "Open"}, {"Y", "Favourite"}, {"X", "Details"},
-                                   {"LB/RB", "Pages"}, {"Menu", "Tools"}, {"View", "Settings"}},
-                                  t.colors.bar_text));
+    std::vector<std::pair<std::string, std::string>> hints = {
+        {"A", "Open"}, {"Y", "Favourite"}, {"X", "Details"},
+        {"LB/RB", "Pages"}, {"Menu", "Tools"}, {"View", "Settings"}};
+    if (EmulatorSession::NesCoreAvailable()) hints.insert(hints.begin() + 4, std::make_pair(std::string("LT/RT"), std::string("3DS / NES")));
+    HintHost().Child(kit::HintBar(hints, t.colors.bar_text));
     MarkHost().Child(kit::OnyxMark(56));
     for (auto tb : {GreetingText(), InfoText()}) tb.FontFamily(font);
     SelectedText().FontFamily(Svc().ThemeFont(true));
@@ -215,7 +220,9 @@ void MainPage::MoveParallax(float nx, float ny) {
 void MainPage::Rebuild(bool keep_focus) {
     if (!keep_focus) focused_path_.clear();
     if (theme_applied_ != Svc().CurrentTheme().id) ApplyTheme();
-    games_ = Svc().Library().GridView(Svc().Config().qol);
+    if (!EmulatorSession::NesCoreAvailable()) Svc().SetHomeSystem(GameSystem::N3DS);
+    games_ = Svc().LibraryFor(Svc().HomeSystem()).GridView(Svc().Config().qol);
+    UpdateSystemTabs();
     columns_ = std::clamp(Svc().Config().qol.grid_columns, 3, 6);
     rows_ = 3;
     const int per_page = columns_ * rows_;
@@ -227,6 +234,43 @@ void MainPage::Rebuild(bool keep_focus) {
     }
     page_ = std::clamp(page_, 0, pages - 1);
     BuildPage();
+}
+
+// ---------------------------------------------------------------------------
+// 3DS | NES tabs
+
+UIElement MainPage::MakeSystemTabs() {
+    StackPanel tabs;
+    tabs.Orientation(Orientation::Horizontal);
+    tabs.Spacing(10);
+    const GameSystem current = Svc().HomeSystem();
+    auto weak = get_weak();
+    const GameSystem systems[] = {GameSystem::N3DS, GameSystem::Nes};
+    for (const GameSystem system : systems) {
+        auto chip = kit::Chip(system == GameSystem::Nes ? "NES" : "3DS", nullptr, system == current);
+        chip.Tapped([weak, system](auto&&, auto&&) {
+            if (auto self = weak.get()) self->SwitchSystem(system);
+        });
+        tabs.Children().Append(chip);
+    }
+    return tabs;
+}
+
+void MainPage::UpdateSystemTabs() {
+    const bool show = EmulatorSession::NesCoreAvailable();
+    SystemTabsHost().Visibility(show ? Visibility::Visible : Visibility::Collapsed);
+    if (show) SystemTabsHost().Child(MakeSystemTabs());
+}
+
+void MainPage::SwitchSystem(GameSystem system) {
+    if (system == Svc().HomeSystem()) return;
+    if (system == GameSystem::Nes && !EmulatorSession::NesCoreAvailable()) return;
+    Svc().SetHomeSystem(system);
+    Svc().PlaySfx("move");
+    page_ = 0;
+    focused_path_.clear();
+    animate_entrance_ = true;
+    Rebuild(false);
 }
 
 void MainPage::BuildPage() {
@@ -475,12 +519,18 @@ void MainPage::ChangePage(int delta) {
 // Empty state, bar buttons, clock
 
 void MainPage::ShowEmptyState() {
+    if (Svc().HomeSystem() == GameSystem::Nes) {
+        ShowNesEmptyState();
+        return;
+    }
     auto host = EmptyState();
     host.Children().Clear();
     host.Visibility(Visibility::Visible);
     const auto drives = RemovableDriveRoots();
     StackPanel body;
     body.Spacing(18);
+    // The grid (and its tabs) is hidden while empty: keep the way over to the NES list.
+    if (EmulatorSession::NesCoreAvailable()) body.Children().Append(MakeSystemTabs());
     body.Children().Append(kit::Text(Svc().Scanning() ? "Looking for games..." : "No games yet", 44, true));
     body.Children().Append(kit::Text(
         drives.empty()
@@ -509,6 +559,53 @@ void MainPage::ShowEmptyState() {
     buttons.Children().Append(kit::ActionButton("Choose games folder", kit::glyph::Folder, [this] {
         Frame().Navigate(xaml_typename<ONYX3DS::FolderPage>(), box_value(L"roms"));
     }, drives.empty()));
+    buttons.Children().Append(kit::ActionButton("Rescan", kit::glyph::Refresh, [this] {
+        auto weak = get_weak();
+        Svc().RescanLibrary([weak](size_t) {
+            if (auto self = weak.get()) self->Rebuild(false);
+        });
+    }));
+    body.Children().Append(buttons);
+    host.Children().Append(kit::Card(body, 40));
+    if (auto first = buttons.Children().GetAt(0).try_as<Control>()) first.Focus(FocusState::Programmatic);
+}
+
+void MainPage::ShowNesEmptyState() {
+    auto host = EmptyState();
+    host.Children().Clear();
+    host.Visibility(Visibility::Visible);
+    const auto drives = RemovableDriveRoots();
+    StackPanel body;
+    body.Spacing(18);
+    body.Children().Append(MakeSystemTabs());
+    body.Children().Append(kit::Text(Svc().Scanning() ? "Looking for games..." : "No NES games yet", 44, true));
+    const std::string folder = Svc().Config().folders.nes_roms;
+    body.Children().Append(kit::Text(
+        folder.empty()
+            ? "Choose the folder with your NES games (.nes, .unf). \"Set up USB drive\" creates a "
+              "Roms/NES folder inside ONYX3DS on the drive."
+            : "No .nes or .unf files found in " + folder + ". Copy your games there and rescan.",
+        24));
+    StackPanel buttons;
+    buttons.Orientation(Orientation::Horizontal);
+    buttons.Spacing(16);
+    if (!drives.empty() && folder.empty()) {
+        buttons.Children().Append(kit::ActionButton("Set up USB drive", kit::glyph::Usb, [this, drives] {
+            auto& cfg = Svc().Config();
+            cfg.folders.ApplyDriveLayout(drives.front());
+            for (const auto& sub : FolderConfig::DriveLayoutSubfolders())
+                Svc().Fs().CreateDirs(JoinPath(JoinPath(drives.front(), "ONYX3DS"), sub));
+            Svc().SaveSettings();
+            Svc().Toast("Created " + drives.front() + "/ONYX3DS/Roms/NES. Copy your NES games into it.");
+            auto weak = get_weak();
+            Svc().RescanLibrary([weak](size_t) {
+                if (auto self = weak.get()) self->Rebuild(false);
+            });
+        }, true));
+    }
+    buttons.Children().Append(kit::ActionButton("Choose NES folder", kit::glyph::Folder, [this] {
+        Frame().Navigate(xaml_typename<ONYX3DS::FolderPage>(), box_value(L"nes_roms"));
+    }, buttons.Children().Size() == 0));
     buttons.Children().Append(kit::ActionButton("Rescan", kit::glyph::Refresh, [this] {
         auto weak = get_weak();
         Svc().RescanLibrary([weak](size_t) {
@@ -587,8 +684,9 @@ void MainPage::UpdateGreeting() {
     const char* part = st.wHour < 5 ? "Up late" : st.wHour < 12 ? "Good morning"
                        : st.wHour < 18 ? "Good afternoon" : "Good evening";
     const size_t n = games_.size();
+    const bool nes = Svc().HomeSystem() == GameSystem::Nes;
     const std::string text = std::string(part) + "   ·   " + std::to_string(n) +
-                             (n == 1 ? " game" : " games");
+                             (nes ? (n == 1 ? " NES game" : " NES games") : (n == 1 ? " game" : " games"));
     if (kit::S(GreetingText().Text()) != text) GreetingText().Text(kit::H(text));
 }
 
@@ -692,7 +790,7 @@ void MainPage::ShowToolsMenu() {
         });
     });
     item("Download missing artwork", kit::glyph::Picture, [weak] {
-        for (const auto& g : Svc().Library().GridView(Svc().Config().qol)) {
+        for (const auto& g : Svc().LibraryFor(Svc().HomeSystem()).GridView(Svc().Config().qol)) {
             if (!g.grid_art.empty()) continue;
             Svc().ScrapeArt(g, false, [weak](bool ok) {
                 if (auto self = weak.get(); self && ok) self->Rebuild();
@@ -756,6 +854,15 @@ void MainPage::HandleKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
             }
     }
     switch (e.Key()) {
+    // LT / RT: switch between the 3DS and NES lists.
+    case VirtualKey::GamepadLeftTrigger:
+        SwitchSystem(GameSystem::N3DS);
+        e.Handled(true);
+        break;
+    case VirtualKey::GamepadRightTrigger:
+        SwitchSystem(GameSystem::Nes);
+        e.Handled(true);
+        break;
     case VirtualKey::GamepadRightShoulder:
         ChangePage(+1);
         e.Handled(true);
@@ -783,7 +890,7 @@ void MainPage::HandleKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
         if (game) {
             GameEntry g = *game;
             g.favorite = !g.favorite;
-            Svc().Library().Update(g);
+            Svc().LibraryFor(g.system).Update(g);
             Svc().Toast(g.favorite ? g.DisplayTitle() + " added to favourites"
                                    : g.DisplayTitle() + " removed from favourites");
             Rebuild();

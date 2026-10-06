@@ -41,6 +41,8 @@ void AppServices::Initialize() {
 
     library_ = std::make_unique<GameLibrary>(fs_, p.cache);
     library_->Load();
+    nes_library_ = std::make_unique<GameLibrary>(fs_, JoinPath(p.cache, "nes"), GameSystem::Nes);
+    nes_library_->Load();
     cheat_db_ = std::make_unique<CheatDatabase>(http_, fs_, p.cache);
     ra_ = std::make_unique<Achievements>(http_, [](std::function<void()> f) { RunAsync(std::move(f)); });
     Achievements::UseFileSystem(&fs_);
@@ -104,6 +106,9 @@ void AppServices::RescanLibrary(std::function<void(size_t)> done) {
     RunAsync([this, folders, auto_art, done = std::move(done)] {
         library_->Scan(folders);
         const auto games = library_->All();
+        // NES games: a separate, small library (does nothing without a NES folder).
+        nes_library_->Scan(folders);
+        const auto nes_games = nes_library_->All();
         scanning_ = false;
         RunOnUi([done, n = games.size()] {
             if (done) done(n);
@@ -117,6 +122,13 @@ void AppServices::RescanLibrary(std::function<void(size_t)> done) {
                 if (!g.IsLaunchable() || !g.grid_art.empty()) continue;
                 if (scraper.Scrape(g)) {
                     library_->Update(g);
+                    ++fetched;
+                }
+            }
+            for (auto g : nes_games) {
+                if (!g.grid_art.empty()) continue;
+                if (scraper.Scrape(g)) {
+                    nes_library_->Update(g);
                     ++fetched;
                 }
             }
@@ -398,7 +410,7 @@ void AppServices::ScrapeArt(const GameEntry& game, bool overwrite, std::function
         SteamGridDb sgdb(http_, key);
         ArtScraper scraper(sgdb, fs_, Paths().art);
         const bool ok = scraper.Scrape(g, overwrite);
-        if (ok) library_->Update(g);
+        if (ok) LibraryFor(g.system).Update(g);
         const int status = sgdb.LastStatus();
         RunOnUi([this, ok, status, done] {
             if (!ok) {

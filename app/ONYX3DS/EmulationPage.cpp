@@ -70,11 +70,12 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
     const auto nl = param.find('\n');
     const std::string path = param.substr(0, nl);
     launch_mode_ = nl == std::string::npos ? "" : param.substr(nl + 1);
-    if (auto g = Svc().Library().Find(path)) game_ = *g;
+    if (auto g = Svc().FindGame(path)) game_ = *g;
     else {
         game_ = GameEntry{};
         game_.path = path;
         game_.title = CleanFileTitle(FileName(path));
+        if (IsNesRomExtension(Extension(path))) game_.system = GameSystem::Nes;
     }
     show_fps_ = Svc().Config().qol.show_fps;
     started_ = quitting_ = menu_open_ = false;
@@ -90,8 +91,11 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
     });
 
     LoadingTitle().Text(kit::H(game_.DisplayTitle()));
-    LoadingHint().Text(L"First launch of a game builds its shader cache, so it can take a little longer. "
-                       L"Hold View + press Menu any time for the ONYX menu.");
+    if (game_.system == GameSystem::Nes)
+        LoadingHint().Text(L"Hold View + press Menu any time for the ONYX menu.");
+    else
+        LoadingHint().Text(L"First launch of a game builds its shader cache, so it can take a little longer. "
+                           L"Hold View + press Menu any time for the ONYX menu.");
     if (!game_.icon_path.empty())
         LoadingIcon().Source(IconFromRgba(Svc().Fs().ReadAll(game_.icon_path), 48, 48));
     LoadingOverlay().Visibility(Visibility::Visible);
@@ -237,7 +241,8 @@ void EmulationPage::OnStarted() {
     // the running game down with them.
     try {
         auto& session = Emu();
-        Svc().StoreCatalog(session.Catalog());
+        // The cached option catalogue feeds the 3DS Advanced page; the NES core has its own.
+        if (game_.system == GameSystem::N3DS) Svc().StoreCatalog(session.Catalog());
 
         // Launch modes from the channel preview.
         const auto& cfg = Svc().Config();
@@ -247,11 +252,13 @@ void EmulationPage::OnStarted() {
             session.LoadState(std::atoi(launch_mode_.c_str() + 5));
         }
         // Cheats switched on in the cheats file go live through the core.
-        const CheatFile cheats = CheatFile::Parse(Svc().Fs().ReadText(Svc().CheatFilePath(game_.title_id)));
-        for (const auto& c : cheats.cheats) {
-            if (c.enabled) {
-                session.ApplyCheats(cheats);
-                break;
+        if (game_.system == GameSystem::N3DS) {
+            const CheatFile cheats = CheatFile::Parse(Svc().Fs().ReadText(Svc().CheatFilePath(game_.title_id)));
+            for (const auto& c : cheats.cheats) {
+                if (c.enabled) {
+                    session.ApplyCheats(cheats);
+                    break;
+                }
             }
         }
         auto& c = Svc().Config();
@@ -270,8 +277,8 @@ void EmulationPage::OnStopped(const std::string& reason) {
     StopSoftwareView();
     if (started_) {
         // Writes library.json; keep the file system off the UI thread.
-        RunAsync([path = game_.path, secs = Emu().SessionSeconds(), now = NowUnix()] {
-            Svc().Library().RecordSession(path, secs, now);
+        RunAsync([path = game_.path, system = game_.system, secs = Emu().SessionSeconds(), now = NowUnix()] {
+            Svc().LibraryFor(system).RecordSession(path, secs, now);
             BackupSaves(Svc().Config().folders);
         });
     }
@@ -307,8 +314,10 @@ void EmulationPage::OnStopped(const std::string& reason) {
     d.Title(box_value(crashed ? L"The emulator stopped" : L"The game couldn't start"));
     d.Content(box_value(kit::H(
         crashed ? reason
-                : reason + "\n\nCommon fixes: use a decrypted dump, put aes_keys.txt / "
-                           "seeddb.bin in your System folder, and check Settings > System check.")));
+        : game_.system == GameSystem::Nes
+            ? reason + "\n\nCheck that the file is a working .nes or .unf game."
+            : reason + "\n\nCommon fixes: use a decrypted dump, put aes_keys.txt / "
+                       "seeddb.bin in your System folder, and check Settings > System check.")));
     d.CloseButtonText(L"Back to menu");
     if (crashed) {
         // The core can't run twice in one process after a crash: offer a restart
@@ -419,7 +428,8 @@ void EmulationPage::BuildMenu() {
     MenuClock().Text(kit::H(clock));
     MenuHint().Text(kit::H("State slot " + std::to_string(Emu().CurrentSlot()) +
                            "    ·    In game: View + D-pad Up/Down save/load, View + RB fast forward, "
-                           "View + Y screenshot, View + LB layout"));
+                           "View + Y screenshot" +
+                           std::string(game_.system == GameSystem::Nes ? "" : ", View + LB layout")));
     MenuOverlay().Background(SolidColorBrush({0x99, 0, 0, 0}));
 
     auto host = MenuButtons();
@@ -445,10 +455,12 @@ void EmulationPage::BuildMenu() {
     }));
     r1.Children().Append(kit::ActionButton("Screenshot", kit::glyph::Camera, [] { Emu().Screenshot(); }));
     auto r2 = row();
-    r2.Children().Append(kit::ActionButton("Screen layout", kit::glyph::Layout, [] { Emu().CycleLayout(); }));
-    r2.Children().Append(kit::ActionButton("Cheats", kit::glyph::Cheat, [weak] {
-        if (auto s = weak.get()) s->ShowMenuCheats();
-    }));
+    if (game_.system == GameSystem::N3DS) {
+        r2.Children().Append(kit::ActionButton("Screen layout", kit::glyph::Layout, [] { Emu().CycleLayout(); }));
+        r2.Children().Append(kit::ActionButton("Cheats", kit::glyph::Cheat, [weak] {
+            if (auto s = weak.get()) s->ShowMenuCheats();
+        }));
+    }
     r2.Children().Append(kit::ActionButton("Quick settings", kit::glyph::Settings, [weak] {
         if (auto s = weak.get()) s->ShowMenuQuickSettings();
     }));
@@ -551,8 +563,10 @@ void EmulationPage::ShowMenuQuickSettings() {
     auto panel = MenuSide();
     panel.Children().Clear();
     panel.Children().Append(kit::SectionHeader("Quick settings"));
-    panel.Children().Append(kit::Text("Changes apply now, for this session. Use Game settings on the "
-                                      "channel page to keep them.", 18));
+    panel.Children().Append(kit::Text(game_.system == GameSystem::Nes
+                                          ? "Changes apply now, for this session."
+                                          : "Changes apply now, for this session. Use Game settings on the "
+                                            "channel page to keep them.", 18));
     const CoreOptions current = Emu().CurrentCoreOptions();
     const CoreOptionCatalog catalog = Emu().Catalog();
     auto pick = [&](const char* key, const char* label) {
@@ -566,12 +580,22 @@ void EmulationPage::ShowMenuQuickSettings() {
                                  [k](const std::string& v) { Emu().ApplyCoreOptions({{k, v}}); });
         panel.Children().Append(kit::SettingRow(label, "", combo));
     };
-    pick(keys::kResolution, "Internal resolution");
-    pick(keys::kFrameSkip, "Frame skip");
-    pick(keys::kLayout, "Screen layout");
-    pick(keys::kLargeScreenProportion, "Big screen size");
-    pick(keys::kTextureFilter, "Texture filter");
-    pick(keys::kCpuClock, "CPU clock");
+    if (game_.system == GameSystem::Nes) {
+        // FCEUmm's own options (only the ones this core version offers are shown).
+        pick("fceumm_region", "Region");
+        pick("fceumm_palette", "Palette");
+        pick("fceumm_ntsc_filter", "NTSC filter");
+        pick("fceumm_overscan", "Hide overscan");
+        pick("fceumm_nospritelimit", "Sprite limit");
+        pick("fceumm_turbo_enable", "Turbo buttons");
+    } else {
+        pick(keys::kResolution, "Internal resolution");
+        pick(keys::kFrameSkip, "Frame skip");
+        pick(keys::kLayout, "Screen layout");
+        pick(keys::kLargeScreenProportion, "Big screen size");
+        pick(keys::kTextureFilter, "Texture filter");
+        pick(keys::kCpuClock, "CPU clock");
+    }
     auto filter = kit::Choice({{"sharp", "Sharp pixels"}, {"smooth", "Smooth"}, {"crt", "CRT"}},
                               Svc().Config().qol.screen_filter == ScreenFilter::Sharp ? "sharp"
                               : Svc().Config().qol.screen_filter == ScreenFilter::Crt ? "crt"
@@ -584,7 +608,10 @@ void EmulationPage::ShowMenuQuickSettings() {
                                   Svc().SaveSettings();
                                   Emu().Presenter().SetFilter(f);
                               });
-    panel.Children().Append(kit::SettingRow("Upscaling look", "How the 3DS image is scaled to your TV", filter));
+    panel.Children().Append(kit::SettingRow("Upscaling look",
+                                            game_.system == GameSystem::Nes ? "How the NES image is scaled to your TV"
+                                                                            : "How the 3DS image is scaled to your TV",
+                                            filter));
     MenuSideScroll().Visibility(Visibility::Visible);
 }
 

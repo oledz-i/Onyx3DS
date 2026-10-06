@@ -35,7 +35,7 @@ void GamePage::InitializeComponent() {
 
 void GamePage::OnNavigatedTo(NavigationEventArgs const& e) {
     const std::string path = kit::S(unbox_value_or<hstring>(e.Parameter(), L""));
-    if (auto g = Svc().Library().Find(path)) game_ = *g;
+    if (auto g = Svc().FindGame(path)) game_ = *g;
     auto weak = get_weak();
     Svc().SetToastSink([weak](const std::string& text) {
         if (auto self = weak.get()) kit::ShowToast(self->ToastHost(), text);
@@ -83,6 +83,7 @@ void GamePage::Build() {
     auto info = InfoPanel();
     info.Children().Clear();
     const std::string white = "#FFFFFF", soft = "#D8DEE6";
+    const bool nes = game_.system == GameSystem::Nes;
 
     if (!game_.logo_art.empty() && Svc().Fs().Exists(game_.logo_art)) {
         Image logo;
@@ -125,8 +126,8 @@ void GamePage::Build() {
     add(FormatSize(game_.file_size));
     info.Children().Append(kit::Text(meta, 22, false, soft));
     info.Children().Append(kit::Text(FormatLastPlayed(game_.last_played) + "   ·   Play time " +
-                                         FormatPlayTime(game_.play_seconds) + "   ·   Title ID " +
-                                         game_.TitleIdHex(),
+                                         FormatPlayTime(game_.play_seconds) +
+                                         (nes ? "   ·   NES" : "   ·   Title ID " + game_.TitleIdHex()),
                                      20, false, soft));
     if (!game_.note.empty()) {
         StackPanel warn;
@@ -136,7 +137,7 @@ void GamePage::Build() {
         warn.Children().Append(kit::Text(game_.note, 20, false, "#FFC857"));
         info.Children().Append(warn);
     }
-    if (Svc().RetroAchievements().LoggedIn()) {
+    if (!nes && Svc().RetroAchievements().LoggedIn()) {
         info.Children().Append(kit::Text(
             "RetroAchievements: signed in as " + Svc().RetroAchievements().UserName() +
                 ". Sets for 3DS games appear here once the site publishes them.",
@@ -155,7 +156,7 @@ void GamePage::Build() {
     row1.Children().Append(start);
     EmulatorSession& session = EmulatorSession::Get();
     // Resume is offered when an auto-save exists for this title.
-    const std::string auto_state = JoinPath(Paths().local_state, "states/" + game_.TitleIdHex() + "/auto.state");
+    const std::string auto_state = JoinPath(Paths().local_state, "states/" + game_.SaveKey() + "/auto.state");
     if (Svc().Fs().Exists(auto_state)) {
         row1.Children().Append(kit::ActionButton("Resume", kit::glyph::Load, [weak] {
             if (auto self = weak.get()) self->Launch("resume");
@@ -164,25 +165,29 @@ void GamePage::Build() {
     row1.Children().Append(kit::ActionButton("Save states", kit::glyph::Save, [weak] {
         if (auto self = weak.get()) self->ShowStates();
     }));
-    row1.Children().Append(kit::ActionButton("Cheats", kit::glyph::Cheat, [weak] {
-        if (auto self = weak.get()) self->ShowCheats();
-    }));
+    if (!nes) {
+        row1.Children().Append(kit::ActionButton("Cheats", kit::glyph::Cheat, [weak] {
+            if (auto self = weak.get()) self->ShowCheats();
+        }));
+    }
     (void)session;
     info.Children().Append(row1);
 
     StackPanel row2;
     row2.Orientation(Orientation::Horizontal);
     row2.Spacing(16);
-    row2.Children().Append(kit::ActionButton("Game settings", kit::glyph::Settings, [weak] {
-        if (auto self = weak.get()) self->ShowGameSettings();
-    }));
+    if (!nes) {
+        row2.Children().Append(kit::ActionButton("Game settings", kit::glyph::Settings, [weak] {
+            if (auto self = weak.get()) self->ShowGameSettings();
+        }));
+    }
     row2.Children().Append(kit::ActionButton("Get artwork", kit::glyph::Picture, [weak] {
         auto self = weak.get();
         if (!self) return;
         Svc().Toast("Searching SteamGridDB...");
         Svc().ScrapeArt(self->game_, true, [weak](bool ok) {
             if (auto s = weak.get(); s && ok) {
-                if (auto g = Svc().Library().Find(s->game_.path)) s->game_ = *g;
+                if (auto g = Svc().FindGame(s->game_.path)) s->game_ = *g;
                 s->Build();
                 Svc().Toast("Artwork updated");
             }
@@ -193,7 +198,7 @@ void GamePage::Build() {
         auto self = weak.get();
         if (!self) return;
         self->game_.favorite = !self->game_.favorite;
-        Svc().Library().Update(self->game_);
+        Svc().LibraryFor(self->game_.system).Update(self->game_);
         self->Build();
     }));
     row2.Children().Append(kit::ActionButton("Hide", kit::glyph::Hide, [weak] {
@@ -204,7 +209,7 @@ void GamePage::Build() {
                      [weak] {
                          if (auto s = weak.get()) {
                              s->game_.hidden = true;
-                             Svc().Library().Update(s->game_);
+                             Svc().LibraryFor(s->game_.system).Update(s->game_);
                              s->Frame().GoBack();
                          }
                      });
@@ -236,7 +241,7 @@ void GamePage::ShowStates() {
     auto weak = get_weak();
     bool any = false;
     for (int slot = 0; slot <= 9; ++slot) {
-        const std::string dir = JoinPath(Paths().local_state, "states/" + game_.TitleIdHex());
+        const std::string dir = JoinPath(Paths().local_state, "states/" + game_.SaveKey());
         const std::string file = JoinPath(dir, slot == 0 ? "auto.state" : "slot" + std::to_string(slot) + ".state");
         if (!Svc().Fs().Exists(file)) continue;
         any = true;
