@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
 #include "App.h"
+#include "Platform/SaveBackup.h"
 
 #include "MainPage.h"
 #include "Platform/CrashHandler.h"
@@ -121,6 +122,9 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e) {
         if (!root.Content()) root.Navigate(xaml_typename<ONYX3DS::MainPage>());
         Window::Current().Activate();
     }
+
+    // A reinstall wipes LocalState; bring saves back from the USB backup first.
+    RunAsync([] { RestoreSavesIfFresh(AppServices::Get().Config().folders); });
 
     // Bring up graphics and run the Dozen self-test without blocking the menu.
     RunAsync([] {

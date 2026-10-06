@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
+#include "Platform/SaveBackup.h"
 #include "EmulationPage.h"
 #if __has_include("EmulationPage.g.cpp")
 #include "EmulationPage.g.cpp"
@@ -271,6 +272,7 @@ void EmulationPage::OnStopped(const std::string& reason) {
         // Writes library.json; keep the file system off the UI thread.
         RunAsync([path = game_.path, secs = Emu().SessionSeconds(), now = NowUnix()] {
             Svc().Library().RecordSession(path, secs, now);
+            BackupSaves(Svc().Config().folders);
         });
     }
     auto weak = get_weak();
