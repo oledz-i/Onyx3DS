@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
+#include <mutex>
 #include "Platform/SaveBackup.h"
 
 #include "Platform/Log.h"
@@ -8,6 +9,9 @@
 
 namespace onyx::app {
 namespace {
+
+std::mutex g_sync; // restore and backup never overlap each other or a game start
+
 
 struct Item { const char* rel_local; const char* backup_name; };
 // Relative to LocalState.
@@ -29,8 +33,9 @@ int Mirror(UwpFileSystem& fs, const std::string& from, const std::string& to) {
     for (const auto& e : fs.List(from)) {
         const std::string a = JoinPath(from, e.name), b = JoinPath(to, e.name);
         if (e.is_dir) { n += Mirror(fs, a, b); continue; }
-        // Small files (saves) are always refreshed; big ones only when the size changed.
-        if (e.size > (2u << 20)) {
+        // Saves and states are always refreshed (no mtime to compare); installed titles
+        // are big and never change, so those are copied only when the size differs.
+        if (a.find("/title/") != std::string::npos || a.find("\\title\\") != std::string::npos) {
             if (auto sz = fs.Size(b); sz && *sz == e.size) continue;
         }
         if (fs.Copy(a, b)) ++n;
@@ -57,6 +62,7 @@ std::string SaveBackupDir(const FolderConfig& folders) {
 void BackupSaves(const FolderConfig& folders) {
     const std::string dest = SaveBackupDir(folders);
     if (dest.empty()) return;
+    std::lock_guard lock(g_sync);
     auto& fs = AppServices::Get().Fs();
     int n = 0;
     for (const auto& it : kItems)
@@ -67,6 +73,7 @@ void BackupSaves(const FolderConfig& folders) {
 void RestoreSavesIfFresh(const FolderConfig& folders) {
     const std::string src = SaveBackupDir(folders);
     if (src.empty()) return;
+    std::lock_guard lock(g_sync);
     auto& fs = AppServices::Get().Fs();
     int n = 0;
     for (const auto& it : kItems) {
@@ -78,4 +85,8 @@ void RestoreSavesIfFresh(const FolderConfig& folders) {
     if (n) ONYX_INFO("Restored %d save files from %s", n, src.c_str());
 }
 
+} // namespace onyx::app
+
+namespace onyx::app {
+void WaitForSaveSync() { std::lock_guard lock(g_sync); }
 } // namespace onyx::app

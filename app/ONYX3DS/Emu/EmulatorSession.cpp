@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
 #include "Emu/EmulatorSession.h"
+#include "Platform/SaveBackup.h"
 
 #include <cstdarg>
 
@@ -547,6 +548,7 @@ void EmulatorSession::LogGpuRemovedReason() {
 }
 
 void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
+    WaitForSaveSync(); // a save restore from USB must finish before the game opens its saves
 
     std::string fail_reason;
     auto fail = [&](const std::string& why) {

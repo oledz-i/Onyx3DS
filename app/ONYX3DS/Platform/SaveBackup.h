@@ -12,4 +12,6 @@ std::string SaveBackupDir(const FolderConfig& folders);
 void BackupSaves(const FolderConfig& folders);
 // If the app has no saves of its own but a backup exists, copy it back.
 void RestoreSavesIfFresh(const FolderConfig& folders);
+// Blocks while a restore or backup is running (call before a game opens its saves).
+void WaitForSaveSync();
 } // namespace onyx::app
