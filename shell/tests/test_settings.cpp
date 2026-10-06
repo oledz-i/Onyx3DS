@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <doctest/doctest.h>
 
 #include "onyx/core_options.h"
@@ -179,4 +180,30 @@ TEST_CASE("Direct display: on by default, older files switched on once") {
     CHECK(Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS).qol.direct_display);
     s.version = 4;
     CHECK_FALSE(Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS).qol.direct_display);
+}
+
+TEST_CASE("NES games folder: drive layout, accessors and JSON round trip") {
+    Settings s = Settings::Defaults(ConsoleModel::SeriesS);
+    s.folders.ApplyDriveLayout("E:");
+    CHECK(s.folders.nes_roms == "E:/ONYX3DS/Roms/NES");
+    CHECK(s.folders.roms == std::vector<std::string>{"E:/ONYX3DS/Roms"});
+    CHECK(s.folders.Get(FolderKind::NesRoms) == "E:/ONYX3DS/Roms/NES");
+    const auto subs = FolderConfig::DriveLayoutSubfolders();
+    CHECK(std::find(subs.begin(), subs.end(), "Roms/NES") != subs.end());
+    CHECK(std::string(FolderKindKey(FolderKind::NesRoms)) == "nes_roms");
+    CHECK(std::string(FolderKindLabel(FolderKind::NesRoms)) == "NES games");
+
+    // An existing choice is not overwritten by the drive layout.
+    FolderConfig custom;
+    custom.Set(FolderKind::NesRoms, "G:\\Retro\\NES");
+    custom.ApplyDriveLayout("E:");
+    CHECK(custom.nes_roms == "G:/Retro/NES");
+
+    const Settings r = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
+    CHECK(r.folders.nes_roms == "E:/ONYX3DS/Roms/NES");
+
+    // Settings written before NES existed load with the folder empty.
+    const Settings old = Settings::FromJson(R"({"folders":{"roms":["E:/ONYX3DS/Roms"]}})", ConsoleModel::SeriesS);
+    CHECK(old.folders.nes_roms.empty());
+    CHECK(old.folders.roms.size() == 1);
 }

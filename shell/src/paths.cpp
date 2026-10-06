@@ -17,6 +17,7 @@ const char* FolderKindKey(FolderKind kind) {
     case FolderKind::Screenshots: return "screenshots";
     case FolderKind::Music: return "music";
     case FolderKind::Themes: return "themes";
+    case FolderKind::NesRoms: return "nes_roms";
     default: return "unknown";
     }
 }
@@ -33,6 +34,7 @@ const char* FolderKindLabel(FolderKind kind) {
     case FolderKind::Screenshots: return "Screenshots";
     case FolderKind::Music: return "Menu music";
     case FolderKind::Themes: return "Themes";
+    case FolderKind::NesRoms: return "NES games";
     default: return "?";
     }
 }
@@ -56,6 +58,7 @@ const char* FolderKindHelp(FolderKind kind) {
     case FolderKind::Screenshots: return "Where View + Y screenshots are written.";
     case FolderKind::Music: return "Your own menu music. Leave empty to use the built-in track.";
     case FolderKind::Themes: return "Extra theme folders, each with a theme.json.";
+    case FolderKind::NesRoms: return "NES games (.nes, .unf). Subfolders are scanned too.";
     default: return "";
     }
 }
@@ -73,6 +76,7 @@ const std::string& FolderConfig::Get(FolderKind kind) const {
     case FolderKind::Screenshots: return screenshots;
     case FolderKind::Music: return music;
     case FolderKind::Themes: return themes;
+    case FolderKind::NesRoms: return nes_roms;
     default: return empty;
     }
 }
@@ -92,13 +96,14 @@ void FolderConfig::Set(FolderKind kind, std::string path) {
     case FolderKind::Screenshots: screenshots = path; break;
     case FolderKind::Music: music = path; break;
     case FolderKind::Themes: themes = path; break;
+    case FolderKind::NesRoms: nes_roms = path; break;
     default: break;
     }
 }
 
 std::vector<std::string> FolderConfig::DriveLayoutSubfolders() {
     return {"Roms",  "Updates & DLC", "Textures", "Mods",  "Cheats",
-            "System", "Screenshots",  "Music",    "Themes"};
+            "System", "Screenshots",  "Music",    "Themes",  "Roms/NES"};
 }
 
 void FolderConfig::ApplyDriveLayout(const std::string& drive_root) {
@@ -115,6 +120,7 @@ void FolderConfig::ApplyDriveLayout(const std::string& drive_root) {
     fill(screenshots, "Screenshots");
     fill(music, "Music");
     fill(themes, "Themes");
+    fill(nes_roms, "Roms/NES");
     // saves intentionally stays on the console unless the user opts in
 }
 

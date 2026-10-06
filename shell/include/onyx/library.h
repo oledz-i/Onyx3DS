@@ -17,7 +17,12 @@
 
 namespace onyx {
 
+// Which emulator core plays a game. The 3DS library and the NES library are two
+// separate GameLibrary instances (own cache folder, own scan).
+enum class GameSystem { N3DS, Nes };
+
 struct GameEntry {
+    GameSystem system = GameSystem::N3DS;
     std::string path;
     std::string title;          // best SMDH name, or a cleaned-up file name
     std::string long_title;
@@ -46,11 +51,17 @@ struct GameEntry {
 
     std::string DisplayTitle() const { return user_title.empty() ? title : user_title; }
     std::string TitleIdHex() const { return TitleIdToHex(title_id); }
+    // Folder name for per-game data such as save states: the title ID for 3DS
+    // games (unchanged), "nes-<hash of the file name>" for NES games.
+    std::string SaveKey() const;
     bool IsLaunchable() const {
-        return kind == n3ds::TitleKind::Application || kind == n3ds::TitleKind::Demo ||
+        return system == GameSystem::Nes || kind == n3ds::TitleKind::Application || kind == n3ds::TitleKind::Demo ||
                kind == n3ds::TitleKind::System || kind == n3ds::TitleKind::Unknown;
     }
 };
+
+// .nes and .unf (UNIF) files are the NES library's content.
+bool IsNesRomExtension(std::string_view ext);
 
 // Turns "Mario Kart 7 (USA) (En,Fr,Es) [!].3ds" into "Mario Kart 7".
 std::string CleanFileTitle(std::string_view file_name);
@@ -63,9 +74,11 @@ struct ScanProgress {
 
 class GameLibrary {
 public:
-    GameLibrary(IFileSystem& fs, std::string cache_dir);
+    GameLibrary(IFileSystem& fs, std::string cache_dir, GameSystem system = GameSystem::N3DS);
+    GameSystem System() const { return system_; }
 
-    // Rebuilds the list from the ROM folders. Entries whose path and size match
+    // Rebuilds the list from the ROM folders (the NES library reads only
+    // folders.nes_roms; the 3DS library skips that folder when it sits inside a 3DS one). Entries whose path and size match
     // the cache are reused without opening the file. Safe to call off-thread.
     void Scan(const FolderConfig& folders,
               const std::function<void(const ScanProgress&)>& progress = {},
@@ -92,11 +105,14 @@ public:
 
 private:
     GameEntry Build(const std::string& path, const DirEntry& file);
+    GameEntry BuildNes(const std::string& path, const DirEntry& file);
     void Walk(const std::string& dir, int depth, std::vector<std::pair<std::string, DirEntry>>& out,
               const std::atomic<bool>* cancel);
 
     IFileSystem& fs_;
     std::string cache_dir_;
+    GameSystem system_;
+    std::string skip_dir_; // lower-case folder the 3DS scan must not enter
     mutable std::mutex mutex_;
     std::vector<GameEntry> games_;
 };
