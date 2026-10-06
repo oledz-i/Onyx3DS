@@ -346,7 +346,7 @@ void D3D12Presenter::UpdateSrv(int slot) {
 }
 
 D3D12Presenter::SharedSlot* D3D12Presenter::BeginWrite(uint32_t width, uint32_t height,
-                                                       int& slot_index) {
+                                                       int& slot_index, bool same_queue) {
     int s = -1;
     uint64_t wait_value = 0;
     {
@@ -362,11 +362,15 @@ D3D12Presenter::SharedSlot* D3D12Presenter::BeginWrite(uint32_t width, uint32_t 
         wait_value = slots_[s].last_read_value;
     }
     // The render thread may still have GPU work in flight that samples this
-    // slot from before it moved on; wait for that work, not for vsync.
-    WaitFence(fence_.get(), wait_value, nullptr, 2000);
-
+    // slot from before it moved on. A write from another device (Vulkan) must
+    // wait for it. A copy on our own queue is ordered after it already: waiting
+    // here tied the emulator to vsync (a 16.7 / 33.3 ms rhythm, 40 fps).
     SharedSlot& slot = slots_[s];
-    if (!slot.texture || slot.width != width || slot.height != height) {
+    const bool recreate = !slot.texture || slot.width != width || slot.height != height;
+    // Releasing the old texture (size change) always needs the GPU to be done with it.
+    if (!same_queue || (recreate && slot.texture)) WaitFence(fence_.get(), wait_value, nullptr, 2000);
+
+    if (recreate) {
         if (slot.shared_handle) {
             CloseHandle(slot.shared_handle);
             slot.shared_handle = nullptr;
@@ -463,7 +467,7 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
             return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
 
         int s = -1;
-        SharedSlot* slot = BeginWrite(width, height, s);
+        SharedSlot* slot = BeginWrite(width, height, s, /*same_queue=*/true);
         if (!slot) return fail("no frame slot", device_->GetDeviceRemovedReason());
 
         const D3D12_RESOURCE_DESC desc = slot->texture->GetDesc();

@@ -465,10 +465,10 @@ void SettingsPage::BuildEmulation() {
         if (effective != PerfProfile::Custom && owned.count(key)) combo.IsEnabled(false);
         Add(kit::SettingRow(c.label, c.help, combo));
     }
-    Add(kit::SettingRow("Direct display (experimental)",
-                        "Shows the game through a DirectX swap chain instead of a XAML image, which "
-                        "skips a full-frame copy into XAML every frame. If the game screen stays "
-                        "black, turn this off.",
+    Add(kit::SettingRow("Direct display",
+                        "Draws the game straight to the screen with DirectX. Off hands every frame "
+                        "to XAML as a picture, which causes a freeze every couple of seconds; only "
+                        "turn it off if the game screen stays black.",
                         kit::Toggle(Cfg().qol.direct_display, [](bool on) {
                             Cfg().qol.direct_display = on;
                             Save();

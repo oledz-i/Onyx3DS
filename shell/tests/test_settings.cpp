@@ -145,7 +145,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
 
     s.version = 1;
     const Settings back = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
-    CHECK(back.version == 3);
+    CHECK(back.version == 4);
     CHECK(back.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 
     // v2 hardware users move to OpenGL once; after that Vulkan stays a choice.
@@ -154,7 +154,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
     v2.core[keys::kGraphicsApi] = "Vulkan";
     v2.per_game["0004000000055D00"][keys::kGraphicsApi] = "Vulkan";
     const Settings moved = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
-    CHECK(moved.version == 3);
+    CHECK(moved.version == 4);
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "OpenGL");
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000055D00").at(keys::kGraphicsApi) ==
           "OpenGL");
@@ -169,4 +169,14 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
     CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "OpenGL");
     gl.core[keys::kGraphicsApi] = "Direct3D";
     CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
+}
+
+TEST_CASE("Direct display: on by default, older files switched on once") {
+    Settings s = Settings::Defaults(ConsoleModel::SeriesS);
+    CHECK(s.qol.direct_display);
+    s.qol.direct_display = false;
+    s.version = 3;
+    CHECK(Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS).qol.direct_display);
+    s.version = 4;
+    CHECK_FALSE(Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS).qol.direct_display);
 }

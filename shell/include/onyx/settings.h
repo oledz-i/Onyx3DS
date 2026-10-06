@@ -69,8 +69,9 @@ struct QolSettings {
     bool show_clock = true;
     bool clock_24h = false;
     bool show_fps = false;
-    // Show the game through the DirectX swap chain instead of a XAML image.
-    bool direct_display = false;
+    // Show the game through the DirectX swap chain instead of a XAML image
+    // (handing every frame to XAML caused the periodic half-second freezes).
+    bool direct_display = true;
     bool show_battery_style_status = true; // controller battery in the top bar
     bool resume_last_game = false;         // jump straight into the last game on launch
     bool quick_launch = false;             // A on a channel starts the game (skip the preview)
@@ -103,7 +104,7 @@ struct ServiceSettings {
 };
 
 struct Settings {
-    int version = 3;
+    int version = 4;
     FolderConfig folders;
     QolSettings qol;
     ServiceSettings services;

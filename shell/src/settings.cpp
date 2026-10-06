@@ -326,6 +326,11 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         }
         s.version = 3;
     }
+    // v4: Direct display ended the periodic freezes; switch everyone to it once.
+    if (s.version < 4) {
+        s.qol.direct_display = true;
+        s.version = 4;
+    }
     return s;
 }
 

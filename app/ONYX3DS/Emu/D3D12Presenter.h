@@ -53,8 +53,11 @@ public:
 
     // --- producer side (emulation thread) ---------------------------------
     // Returns a slot the producer may overwrite, (re)creating its texture for
-    // the given size. Blocks briefly if the GPU is still reading it.
-    SharedSlot* BeginWrite(uint32_t width, uint32_t height, int& slot_index);
+    // the given size. Blocks briefly if the GPU is still reading it, unless the
+    // write is queued on the presenter's own queue (CPU uploads), where it runs
+    // after those reads anyway.
+    SharedSlot* BeginWrite(uint32_t width, uint32_t height, int& slot_index,
+                           bool same_queue = false);
     // The copy into `slot_index` signals the shared fence with `ready_value`
     // (0 when the producer already waited on the CPU).
     void EndWrite(int slot_index, uint64_t ready_value);
