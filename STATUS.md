@@ -89,6 +89,11 @@
   in lit scenes. Next build: azahar/0037 timestamps every core submission and logs
   stream-buffer wraps; azahar/0038 disables geometry shaders on Dozen; mesa/0022
   logs the stages and DXIL validation verdict of a refused pipeline.
+- Build #78: mesa/0023 keeps DEFAULT-heap internal buffers (triangle-fan index
+  rewrites, format-changing copies) across command buffer resets instead of a
+  CreateCommittedResource + release per use, and logs a 5 s summary of every GPU
+  memory call (count, total and max time) plus fan conversions, to test whether
+  kernel memory mapping lines up with the stalls.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

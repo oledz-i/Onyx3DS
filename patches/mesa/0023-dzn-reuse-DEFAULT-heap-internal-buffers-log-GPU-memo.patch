@@ -1,0 +1,364 @@
+From efcc2c8d0d4d655382e24a807318f690ef6663f6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 09:00:27 -0400
+Subject: [PATCH] dzn: reuse DEFAULT-heap internal buffers, log GPU memory call
+ stats
+
+Triangle-fan index rewrites and format-changing image copies created a
+committed resource each time and released it on reset. Keep up to 8 per
+command buffer for reuse with the same initial state. Count and time every
+call that makes the kernel map or unmap GPU memory (internal buffers,
+descriptor heaps, memory allocation/free, image bind/destroy) plus fan
+conversions, and log a summary every 5 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c     | 44 ++++++++++++++
+ src/microsoft/vulkan/dzn_descriptor_set.c |  9 ++-
+ src/microsoft/vulkan/dzn_device.c         | 72 ++++++++++++++++++++++-
+ src/microsoft/vulkan/dzn_image.c          |  7 +++
+ src/microsoft/vulkan/dzn_private.h        | 21 +++++++
+ 5 files changed, 149 insertions(+), 4 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index e287762..c3cfe67 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include "dzn_private.h"
++#include "util/os_time.h"
+ 
+ #include "vk_alloc.h"
+ #include "vk_debug_report.h"
+@@ -413,6 +414,11 @@ dzn_cmd_buffer_destroy(struct vk_command_buffer *cbuf)
+       ID3D12Resource_Release(res->res);
+       vk_free(&cbuf->pool->alloc, res);
+    }
++   list_for_each_entry_safe(struct dzn_internal_resource, res, &cmdbuf->free_default_bufs, link) {
++      list_del(&res->link);
++      ID3D12Resource_Release(res->res);
++      vk_free(&cbuf->pool->alloc, res);
++   }
+ 
+    dzn_descriptor_heap_pool_finish(&cmdbuf->cbv_srv_uav_pool);
+    dzn_descriptor_heap_pool_finish(&cmdbuf->sampler_pool);
+@@ -488,6 +494,24 @@ dzn_cmd_buffer_reset(struct vk_command_buffer *cbuf, VkCommandBufferResetFlags f
+          vk_free(&cmdbuf->vk.pool->alloc, res);
+       }
+    }
++   /* ONYX: the same for DEFAULT-heap buffers (triangle-fan index rewrites,
++    * staging for format-changing image copies). Each is reused only for the
++    * same initial state: buffers decay to COMMON when a command list finishes
++    * and get promoted to that state again on first use. */
++   unsigned kept_default = 0;
++   list_for_each_entry(struct dzn_internal_resource, res, &cmdbuf->free_default_bufs, link)
++      kept_default++;
++   list_for_each_entry_safe(struct dzn_internal_resource, res,
++                            &cmdbuf->internal_bufs[DZN_INTERNAL_BUF_DEFAULT], link) {
++      list_del(&res->link);
++      if (kept_default < 8 && res->size <= 16 * 1024 * 1024) {
++         list_addtail(&res->link, &cmdbuf->free_default_bufs);
++         kept_default++;
++      } else {
++         ID3D12Resource_Release(res->res);
++         vk_free(&cmdbuf->vk.pool->alloc, res);
++      }
++   }
+    for (uint32_t bucket = 0; bucket < DZN_INTERNAL_BUF_BUCKET_COUNT; ++bucket) {
+       list_for_each_entry_safe(struct dzn_internal_resource, res, &cmdbuf->internal_bufs[bucket], link) {
+          list_del(&res->link);
+@@ -677,6 +701,7 @@ dzn_cmd_buffer_create(const VkCommandBufferAllocateInfo *info,
+    for (uint32_t bucket = 0; bucket < DZN_INTERNAL_BUF_BUCKET_COUNT; ++bucket)
+       list_inithead(&cmdbuf->internal_bufs[bucket]);
+    list_inithead(&cmdbuf->free_upload_bufs);
++   list_inithead(&cmdbuf->free_default_bufs);
+    cmdbuf->events.signal = UTIL_DYNARRAY_INIT;
+    cmdbuf->queries.reset = UTIL_DYNARRAY_INIT;
+    cmdbuf->queries.signal = UTIL_DYNARRAY_INIT;
+@@ -1884,6 +1909,19 @@ dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
+             *offset = 0;
+          cmdbuf->cur_upload_buf = res;
+          cmdbuf->cur_upload_buf_offset = size;
++         dzn_onyx_alloc_note(DZN_ONYX_ALLOC_INTERNAL_REUSED, 0);
++         return VK_SUCCESS;
++      }
++   } else {
++      list_for_each_entry_safe(struct dzn_internal_resource, res, &cmdbuf->free_default_bufs, link) {
++         if (res->size < alloc_size || res->state != init_state)
++            continue;
++         list_del(&res->link);
++         list_addtail(&res->link, &cmdbuf->internal_bufs[bucket]);
++         *out = res->res;
++         if (offset)
++            *offset = 0;
++         dzn_onyx_alloc_note(DZN_ONYX_ALLOC_INTERNAL_REUSED, 0);
+          return VK_SUCCESS;
+       }
+    }
+@@ -1902,12 +1940,15 @@ dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
+       .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    };
+ 
++   const int64_t onyx_t0 = os_time_get_nano();
+    HRESULT hres =
+       DZN_HR(device->dev, "CreateCommittedResource", ID3D12Device1_CreateCommittedResource(device->dev, &hprops,
+                                             D3D12_HEAP_FLAG_NONE, &rdesc,
+                                             init_state, NULL,
+                                             &IID_ID3D12Resource,
+                                             (void **)&res));
++   dzn_onyx_alloc_note(bucket == DZN_INTERNAL_BUF_UPLOAD ? DZN_ONYX_ALLOC_INTERNAL_UPLOAD :
++                       DZN_ONYX_ALLOC_INTERNAL_DEFAULT, onyx_t0);
+    if (FAILED(hres)) {
+       return vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+@@ -1922,6 +1963,7 @@ dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
+ 
+    entry->res = res;
+    entry->size = alloc_size;
++   entry->state = init_state;
+    list_addtail(&entry->link, &cmdbuf->internal_bufs[bucket]);
+    *out = entry->res;
+    if (offset)
+@@ -3719,6 +3761,7 @@ dzn_cmd_buffer_triangle_fan_create_index(struct dzn_cmd_buffer *cmdbuf, uint32_t
+    *vertex_count = triangle_count * 3;
+    if (!*vertex_count)
+       return VK_SUCCESS;
++   dzn_onyx_alloc_note(DZN_ONYX_FAN_INDEX_CPU, 0);
+ 
+    ID3D12Resource *index_buf;
+    uint64_t index_offset;
+@@ -3772,6 +3815,7 @@ dzn_cmd_buffer_triangle_fan_rewrite_index(struct dzn_cmd_buffer *cmdbuf,
+    *index_count = triangle_count * 3;
+    if (!*index_count)
+       return VK_SUCCESS;
++   dzn_onyx_alloc_note(DZN_ONYX_FAN_REWRITE_GPU, 0);
+ 
+    /* New index is always 32bit to make the compute shader rewriting the
+     * index simpler */
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index 98295e6..4b1ad58 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include "dzn_private.h"
++#include "util/os_time.h"
+ 
+ #include "vk_alloc.h"
+ #include "vk_descriptors.h"
+@@ -951,9 +952,13 @@ dzn_descriptor_heap_init(struct dzn_descriptor_heap *heap,
+                D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+    };
+ 
+-   if (FAILED(DZN_HR(device->dev, "CreateDescriptorHeap", ID3D12Device1_CreateDescriptorHeap(device->dev, &desc,
++   const int64_t onyx_t0 = os_time_get_nano();
++   const HRESULT onyx_hr = DZN_HR(device->dev, "CreateDescriptorHeap", ID3D12Device1_CreateDescriptorHeap(device->dev, &desc,
+                                                  &IID_ID3D12DescriptorHeap,
+-                                                 (void **)&heap->heap)))) {
++                                                 (void **)&heap->heap));
++   dzn_onyx_alloc_note(shader_visible ? DZN_ONYX_ALLOC_DESC_HEAP_GPU : DZN_ONYX_ALLOC_DESC_HEAP_CPU,
++                       onyx_t0);
++   if (FAILED(onyx_hr)) {
+       return vk_error(device,
+                       shader_visible ?
+                       VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_OUT_OF_HOST_MEMORY);
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index e911ea5..d0f99ef 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -22,6 +22,8 @@
+  */
+ 
+ #include "dzn_private.h"
++#include "util/simple_mtx.h"
++#include "util/os_time.h"
+ 
+ #include "vk_alloc.h"
+ #include "vk_common_entrypoints.h"
+@@ -2164,6 +2166,7 @@ dzn_queue_submit(struct vk_queue *q,
+    if (FAILED(DZN_HR(device->dev, "ID3D12CommandQueue::Signal", ID3D12CommandQueue_Signal(queue->cmdqueue, queue->fence, ++queue->fence_point))))
+       return vk_error(device, VK_ERROR_UNKNOWN);
+ 
++   dzn_onyx_alloc_report();
+    return VK_SUCCESS;
+ }
+ 
+@@ -3023,6 +3026,64 @@ cleanup:
+    return vk_error(device, error);
+ }
+ 
++static simple_mtx_t onyx_alloc_mtx = SIMPLE_MTX_INITIALIZER;
++static struct {
++   uint32_t count;
++   uint64_t ns, max_ns;
++} onyx_alloc_stats[DZN_ONYX_ALLOC_KINDS];
++static int64_t onyx_alloc_last_report;
++
++void
++dzn_onyx_alloc_note(enum dzn_onyx_alloc_kind kind, int64_t t0_ns)
++{
++   const uint64_t ns = t0_ns ? (uint64_t)(os_time_get_nano() - t0_ns) : 0;
++   simple_mtx_lock(&onyx_alloc_mtx);
++   onyx_alloc_stats[kind].count++;
++   onyx_alloc_stats[kind].ns += ns;
++   if (ns > onyx_alloc_stats[kind].max_ns)
++      onyx_alloc_stats[kind].max_ns = ns;
++   simple_mtx_unlock(&onyx_alloc_mtx);
++}
++
++void
++dzn_onyx_alloc_report(void)
++{
++   static const char *const names[DZN_ONYX_ALLOC_KINDS] = {
++      [DZN_ONYX_ALLOC_INTERNAL_UPLOAD] = "internal upload buffers",
++      [DZN_ONYX_ALLOC_INTERNAL_DEFAULT] = "internal GPU buffers",
++      [DZN_ONYX_ALLOC_INTERNAL_REUSED] = "internal buffers reused",
++      [DZN_ONYX_ALLOC_DESC_HEAP_GPU] = "shader-visible descriptor heaps",
++      [DZN_ONYX_ALLOC_DESC_HEAP_CPU] = "CPU descriptor heaps",
++      [DZN_ONYX_ALLOC_MEMORY] = "memory allocations",
++      [DZN_ONYX_ALLOC_FREE_MEMORY] = "memory frees",
++      [DZN_ONYX_ALLOC_BIND_IMAGE] = "image binds",
++      [DZN_ONYX_ALLOC_DESTROY_IMAGE] = "image destroys",
++      [DZN_ONYX_FAN_REWRITE_GPU] = "triangle fans re-indexed on the GPU",
++      [DZN_ONYX_FAN_INDEX_CPU] = "triangle fans indexed on the CPU",
++   };
++   const int64_t now = os_time_get_nano();
++   if (now - p_atomic_read(&onyx_alloc_last_report) < 5000000000ll)
++      return;
++   char line[1024];
++   size_t len = 0;
++   simple_mtx_lock(&onyx_alloc_mtx);
++   if (now - onyx_alloc_last_report < 5000000000ll) {
++      simple_mtx_unlock(&onyx_alloc_mtx);
++      return;
++   }
++   onyx_alloc_last_report = now;
++   for (unsigned k = 0; k < DZN_ONYX_ALLOC_KINDS && len < sizeof(line) - 96; k++) {
++      if (!onyx_alloc_stats[k].count)
++         continue;
++      len += snprintf(line + len, sizeof(line) - len, "%s%s %u (%.1f ms, max %.1f)",
++                      len ? ", " : "", names[k], onyx_alloc_stats[k].count,
++                      onyx_alloc_stats[k].ns / 1e6, onyx_alloc_stats[k].max_ns / 1e6);
++   }
++   memset(onyx_alloc_stats, 0, sizeof(onyx_alloc_stats));
++   simple_mtx_unlock(&onyx_alloc_mtx);
++   mesa_logi("dzn: last 5 s of GPU memory calls and triangle fans: %s", len ? line : "none");
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ dzn_AllocateMemory(VkDevice device,
+                    const VkMemoryAllocateInfo *pAllocateInfo,
+@@ -3030,8 +3091,11 @@ dzn_AllocateMemory(VkDevice device,
+                    VkDeviceMemory *pMem)
+ {
+    DZN_TRACE("vkAllocateMemory");
+-   return dzn_device_memory_create(dzn_device_from_handle(device),
+-                                   pAllocateInfo, pAllocator, pMem);
++   const int64_t t0 = os_time_get_nano();
++   VkResult result = dzn_device_memory_create(dzn_device_from_handle(device),
++                                              pAllocateInfo, pAllocator, pMem);
++   dzn_onyx_alloc_note(DZN_ONYX_ALLOC_MEMORY, t0);
++   return result;
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -3040,7 +3104,11 @@ dzn_FreeMemory(VkDevice device,
+                const VkAllocationCallbacks *pAllocator)
+ {
+    DZN_TRACE("vkFreeMemory");
++   if (mem == VK_NULL_HANDLE)
++      return;
++   const int64_t t0 = os_time_get_nano();
+    dzn_device_memory_destroy(dzn_device_memory_from_handle(mem), pAllocator);
++   dzn_onyx_alloc_note(DZN_ONYX_ALLOC_FREE_MEMORY, t0);
+ }
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index fa7ed20..712e9d1 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include "dzn_private.h"
++#include "util/os_time.h"
+ 
+ #include "vk_alloc.h"
+ #include "vk_debug_report.h"
+@@ -800,7 +801,11 @@ dzn_DestroyImage(VkDevice device, VkImage image,
+                  const VkAllocationCallbacks *pAllocator)
+ {
+    DZN_TRACE("vkDestroyImage");
++   if (image == VK_NULL_HANDLE)
++      return;
++   const int64_t onyx_t0 = os_time_get_nano();
+    dzn_image_destroy(dzn_image_from_handle(image), pAllocator);
++   dzn_onyx_alloc_note(DZN_ONYX_ALLOC_DESTROY_IMAGE, onyx_t0);
+ }
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
+@@ -810,6 +815,7 @@ dzn_BindImageMemory2(VkDevice dev,
+ {
+    DZN_TRACE("vkBindImageMemory2");
+    VK_FROM_HANDLE(dzn_device, device, dev);
++   const int64_t onyx_t0 = os_time_get_nano();
+ 
+    for (uint32_t i = 0; i < bindInfoCount; i++) {
+       const VkBindImageMemoryInfo *bind_info = &pBindInfos[i];
+@@ -870,6 +876,7 @@ dzn_BindImageMemory2(VkDevice dev,
+          return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+ 
++   dzn_onyx_alloc_note(DZN_ONYX_ALLOC_BIND_IMAGE, onyx_t0);
+    return VK_SUCCESS;
+ }
+ 
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index d13fa06..2a9dd05 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -567,8 +567,28 @@ struct dzn_internal_resource {
+    struct list_head link;
+    ID3D12Resource *res;
+    uint64_t size;
++   D3D12_RESOURCE_STATES state; /* ONYX: initial state, for reuse */
+ };
+ 
++/* ONYX: count and time the calls that make Xbox's kernel map or unmap GPU
++ * memory, and log a summary every few seconds from queue submission. */
++enum dzn_onyx_alloc_kind {
++   DZN_ONYX_ALLOC_INTERNAL_UPLOAD,
++   DZN_ONYX_ALLOC_INTERNAL_DEFAULT,
++   DZN_ONYX_ALLOC_INTERNAL_REUSED,
++   DZN_ONYX_ALLOC_DESC_HEAP_GPU,
++   DZN_ONYX_ALLOC_DESC_HEAP_CPU,
++   DZN_ONYX_ALLOC_MEMORY,
++   DZN_ONYX_ALLOC_FREE_MEMORY,
++   DZN_ONYX_ALLOC_BIND_IMAGE,
++   DZN_ONYX_ALLOC_DESTROY_IMAGE,
++   DZN_ONYX_FAN_REWRITE_GPU,
++   DZN_ONYX_FAN_INDEX_CPU,
++   DZN_ONYX_ALLOC_KINDS,
++};
++void dzn_onyx_alloc_note(enum dzn_onyx_alloc_kind kind, int64_t t0_ns);
++void dzn_onyx_alloc_report(void);
++
+ enum dzn_event_state {
+    DZN_EVENT_STATE_RESET = 0,
+    DZN_EVENT_STATE_SET = 1,
+@@ -730,6 +750,7 @@ struct dzn_cmd_buffer {
+    struct list_head internal_bufs[DZN_INTERNAL_BUF_BUCKET_COUNT];
+    /* ONYX: upload buffers kept across resets for reuse (see alloc_internal_buf). */
+    struct list_head free_upload_bufs;
++   struct list_head free_default_bufs; /* ONYX: kept DEFAULT-heap internal buffers */
+    struct dzn_internal_resource *cur_upload_buf;
+    uint64_t cur_upload_buf_offset;
+ 
+-- 
+2.43.0
+
