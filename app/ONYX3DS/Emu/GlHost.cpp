@@ -67,7 +67,7 @@ struct PixelFormat {
     DWORD dwLayerMask, dwVisibleMask, dwDamageMask;
 };
 static_assert(sizeof(PixelFormat) == 40, "PIXELFORMATDESCRIPTOR layout");
-constexpr DWORD PFD_DOUBLEBUFFER = 0x1, PFD_DRAW_TO_WINDOW = 0x4, PFD_SUPPORT_OPENGL = 0x20;
+constexpr DWORD kPfdDoubleBuffer = 0x1, kPfdDrawToWindow = 0x4, kPfdSupportOpenGL = 0x20;
 
 // wglGetProcAddress reports failure with several sentinel values, not just NULL.
 bool ValidProc(PROC p) {
@@ -217,7 +217,7 @@ bool GlHost::CreateContext(unsigned max_width, unsigned max_height, bool depth, 
     PixelFormat pfd{};
     pfd.nSize = sizeof(pfd);
     pfd.nVersion = 1;
-    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.dwFlags = kPfdDrawToWindow | kPfdSupportOpenGL | kPfdDoubleBuffer;
     pfd.iPixelType = 0; // PFD_TYPE_RGBA
     pfd.cColorBits = 32;
     pfd.cDepthBits = 24;
