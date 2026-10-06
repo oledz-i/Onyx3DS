@@ -18,11 +18,39 @@
 #include "onyx/core_options.h"
 #include "onyx/library.h"
 #include "onyx/paths.h"
+#include "onyx/pixel.h"
 #include "onyx/settings.h"
 
 namespace onyx::app {
 
 struct GuardedCrash;
+
+// The libretro entry points of one core. The Azahar core is linked statically
+// (filled from the retro_* symbols); the NES core is a DLL (filled with
+// GetProcAddress). Everything that calls into a core goes through one of these.
+struct CoreApi {
+    void (RETRO_CALLCONV* init)() = nullptr;
+    void (RETRO_CALLCONV* set_environment)(retro_environment_t) = nullptr;
+    void (RETRO_CALLCONV* set_video_refresh)(retro_video_refresh_t) = nullptr;
+    void (RETRO_CALLCONV* set_audio_sample)(retro_audio_sample_t) = nullptr;
+    void (RETRO_CALLCONV* set_audio_sample_batch)(retro_audio_sample_batch_t) = nullptr;
+    void (RETRO_CALLCONV* set_input_poll)(retro_input_poll_t) = nullptr;
+    void (RETRO_CALLCONV* set_input_state)(retro_input_state_t) = nullptr;
+    bool (RETRO_CALLCONV* load_game)(const retro_game_info*) = nullptr;
+    void (RETRO_CALLCONV* unload_game)() = nullptr;
+    void (RETRO_CALLCONV* get_system_av_info)(retro_system_av_info*) = nullptr;
+    void (RETRO_CALLCONV* run)() = nullptr;
+    void (RETRO_CALLCONV* reset)() = nullptr;
+    size_t (RETRO_CALLCONV* serialize_size)() = nullptr;
+    bool (RETRO_CALLCONV* serialize)(void*, size_t) = nullptr;
+    bool (RETRO_CALLCONV* unserialize)(const void*, size_t) = nullptr;
+    void (RETRO_CALLCONV* cheat_reset)() = nullptr;
+    void (RETRO_CALLCONV* cheat_set)(unsigned, bool, const char*) = nullptr;
+    void* (RETRO_CALLCONV* get_memory_data)(unsigned) = nullptr;
+    size_t (RETRO_CALLCONV* get_memory_size)(unsigned) = nullptr;
+    bool initialised = false; // retro_init has run (once per process)
+    bool Complete() const { return run && load_game && serialize && get_memory_data; }
+};
 
 enum class SessionState { Idle, Starting, Running, Paused, Stopping, Failed };
 
@@ -48,6 +76,9 @@ public:
     // The last game stopped because the hardware (Vulkan) renderer crashed.
     bool CrashedInGpu() const { return crashed_in_gpu_.load(); }
     bool UsingSoftwareRenderer() const { return software_.load(); }
+    // fceumm_libretro.dll is in the package (CI builds it separately and may skip it).
+    static bool NesCoreAvailable();
+    GameSystem System() const { return system_; }
     // Frames arrive as CPU pixels (software renderer, or hardware frames read back).
     bool UsingCpuFrames() const;
 
@@ -115,6 +146,11 @@ private:
     EmulatorSession();
     void EmulationThread(std::string rom_path);
     void EmulationThreadBody(const std::string& rom_path);
+    bool EnsureNesCore(std::string& error);
+    bool RaActive() const { return ra_ && system_ == GameSystem::N3DS; }
+    void LoadSram();
+    void FlushSram();
+    std::string SramPath() const;
     void OnCoreCrashed(const GuardedCrash& crash);
     // If the D3D12 device was removed, logs why (and DRED data when available).
     void LogGpuRemovedReason();
@@ -138,7 +174,19 @@ private:
     Achievements* ra_ = nullptr;
     VulkanProbe probe_{};
     bool ready_ = false;
-    bool core_initialised_ = false;
+    // Core in use: Azahar (static) for 3DS games, FCEUmm (DLL) for NES games.
+    CoreApi azahar_api_;
+    CoreApi nes_api_;
+    CoreApi* api_ = &azahar_api_;
+    GameSystem system_ = GameSystem::N3DS;
+    double core_fps_ = 60.0;                        // pacing; the NES runs at ~60.1
+    retro_pixel_format pixel_format_ = RETRO_PIXEL_FORMAT_XRGB8888;
+    std::vector<uint32_t> convert_frame_;           // NES frames widened to XRGB8888
+    std::vector<uint8_t> rom_data_;                 // NES: the ROM, handed to the core in memory
+    std::string rom_path_, rom_dir_, rom_name_, rom_ext_;
+    retro_game_info_ext game_info_ext_{};
+    std::vector<uint8_t> sram_last_;                // battery save as last written
+    bool sram_active_ = false;
     // Set when the core crashed. Its state is undefined afterwards, so it is
     // never called again in this process; the user restarts the app.
     std::atomic<bool> core_crashed_{false};

@@ -12,7 +12,7 @@ namespace {
 struct Item { const char* rel_local; const char* backup_name; };
 // Relative to LocalState.
 const Item kItems[] = {{"system/Azahar/sdmc", "sdmc"}, {"system/Azahar/nand", "nand"},
-                       {"states", "states"}};
+                       {"states", "states"}, {"nes", "nes"}}; // nes: battery saves (.srm)
 
 std::string Parent(std::string p) {
     for (auto& c : p) if (c == '\\') c = '/';

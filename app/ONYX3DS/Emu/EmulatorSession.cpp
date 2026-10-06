@@ -23,6 +23,9 @@ std::string RemapForAzahar(const std::string& path) {
     return remapper ? remapper->Map(path) : path;
 }
 
+// Prefix of the core's own log lines ("azahar" or "fceumm").
+const char* g_core_tag = "azahar";
+
 // ---- libretro C trampolines -------------------------------------------------
 bool RETRO_CALLCONV EnvCb(unsigned cmd, void* data) {
     return EmulatorSession::Get().Environment(cmd, data);
@@ -55,7 +58,32 @@ void RETRO_CALLCONV CoreLogCb(enum retro_log_level level, const char* fmt, ...) 
                         : level == RETRO_LOG_WARN ? LogLevel::Warning
                         : level == RETRO_LOG_INFO ? LogLevel::Info
                                                   : LogLevel::Debug;
-    Log(lv, "[azahar] %s", buf);
+    Log(lv, "[%s] %s", g_core_tag, buf);
+}
+
+// The statically linked Azahar core.
+CoreApi StaticAzaharApi() {
+    CoreApi a;
+    a.init = &retro_init;
+    a.set_environment = &retro_set_environment;
+    a.set_video_refresh = &retro_set_video_refresh;
+    a.set_audio_sample = &retro_set_audio_sample;
+    a.set_audio_sample_batch = &retro_set_audio_sample_batch;
+    a.set_input_poll = &retro_set_input_poll;
+    a.set_input_state = &retro_set_input_state;
+    a.load_game = &retro_load_game;
+    a.unload_game = &retro_unload_game;
+    a.get_system_av_info = &retro_get_system_av_info;
+    a.run = &retro_run;
+    a.reset = &retro_reset;
+    a.serialize_size = &retro_serialize_size;
+    a.serialize = &retro_serialize;
+    a.unserialize = &retro_unserialize;
+    a.cheat_reset = &retro_cheat_reset;
+    a.cheat_set = &retro_cheat_set;
+    a.get_memory_data = &retro_get_memory_data;
+    a.get_memory_size = &retro_get_memory_size;
+    return a;
 }
 
 // Sleeping with ~0.5 ms accuracy; the default timer tick on Windows is 15.6 ms.
@@ -111,7 +139,65 @@ EmulatorSession& EmulatorSession::Get() {
     return session;
 }
 
-EmulatorSession::EmulatorSession() = default;
+EmulatorSession::EmulatorSession() {
+    azahar_api_ = StaticAzaharApi();
+}
+
+bool EmulatorSession::NesCoreAvailable() {
+    static const bool available = [] {
+        UwpFileSystem fs;
+        return fs.Exists(JoinPath(Paths().install, "fceumm_libretro.dll"));
+    }();
+    return available;
+}
+
+// Loads fceumm_libretro.dll and fills nes_api_ (emulation thread, under the crash
+// guard). A missing or broken DLL only costs the NES: the 3DS core is untouched.
+bool EmulatorSession::EnsureNesCore(std::string& error) {
+    if (nes_api_.Complete()) return true;
+    static HMODULE module = nullptr;
+    if (!module) {
+        module = LoadPackagedLibrary(L"fceumm_libretro.dll", 0);
+        if (!module) {
+            error = "The NES core (fceumm_libretro.dll) could not be loaded (error " +
+                    std::to_string(GetLastError()) + "). This build may not include NES support.";
+            return false;
+        }
+    }
+    CoreApi a;
+    std::string missing;
+    auto load = [&](auto& fn, const char* name) {
+        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(GetProcAddress(module, name));
+        if (!fn) missing += std::string(missing.empty() ? "" : ", ") + name;
+    };
+    load(a.init, "retro_init");
+    load(a.set_environment, "retro_set_environment");
+    load(a.set_video_refresh, "retro_set_video_refresh");
+    load(a.set_audio_sample, "retro_set_audio_sample");
+    load(a.set_audio_sample_batch, "retro_set_audio_sample_batch");
+    load(a.set_input_poll, "retro_set_input_poll");
+    load(a.set_input_state, "retro_set_input_state");
+    load(a.load_game, "retro_load_game");
+    load(a.unload_game, "retro_unload_game");
+    load(a.get_system_av_info, "retro_get_system_av_info");
+    load(a.run, "retro_run");
+    load(a.reset, "retro_reset");
+    load(a.serialize_size, "retro_serialize_size");
+    load(a.serialize, "retro_serialize");
+    load(a.unserialize, "retro_unserialize");
+    load(a.cheat_reset, "retro_cheat_reset");
+    load(a.cheat_set, "retro_cheat_set");
+    load(a.get_memory_data, "retro_get_memory_data");
+    load(a.get_memory_size, "retro_get_memory_size");
+    if (!missing.empty()) {
+        error = "The NES core is incomplete (missing " + missing + ")";
+        return false;
+    }
+    a.initialised = nes_api_.initialised;
+    nes_api_ = a;
+    ONYX_INFO("NES core loaded (fceumm_libretro.dll)");
+    return true;
+}
 
 bool EmulatorSession::Initialize(std::string& error) {
     std::lock_guard lock(init_mutex_);
@@ -240,54 +326,73 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         error = "The emulator stopped after an error earlier. Restart ONYX 3DS to play again.";
         return false;
     }
+    const bool nes = game.system == GameSystem::Nes;
+    if (nes && !NesCoreAvailable()) {
+        error = "NES support is not included in this build (fceumm_libretro.dll is missing).";
+        return false;
+    }
     if (thread_.joinable()) thread_.join();
 
     game_ = game;
     model_ = model;
+    system_ = game.system;
+    api_ = nes ? &nes_api_ : &azahar_api_; // the NES table is filled on the emulation thread
+    g_core_tag = nes ? "fceumm" : "azahar";
+    core_fps_ = kCoreFps;
+    pixel_format_ = RETRO_PIXEL_FORMAT_XRGB8888;
     {
         std::lock_guard lock(options_mutex_);
-        options_ = settings.EffectiveCoreOptions(model, game.TitleIdHex());
+        options_ = nes ? CoreOptions{} : settings.EffectiveCoreOptions(model, game.TitleIdHex());
         catalog_ = {};
-        // OpenGL falls back to Vulkan and Vulkan to OpenGL before software.
-        const std::string want = options_[keys::kGraphicsApi];
-        std::string api = "Software";
-        if (want == "OpenGL") api = gl_ok_ ? "OpenGL" : vulkan_ok_ ? "Vulkan" : "Software";
-        else if (want == "Vulkan") api = vulkan_ok_ ? "Vulkan" : gl_ok_ ? "OpenGL" : "Software";
-        if (api != want && want != "Software")
-            ONYX_WARN("%s renderer requested but unavailable; using %s", want.c_str(), api.c_str());
-        options_[keys::kGraphicsApi] = api;
-        use_gl_ = api == "OpenGL";
-        software_ = api == "Software";
-        if (software_) {
-            options_[keys::kGraphicsApi] = "Software";
-            // The software renderer draws at native 3DS size whatever the scale,
-            // and a bigger output only makes the per-frame copy slower.
-            options_[keys::kResolution] = "1";
+        if (nes) {
+            // The NES core runs with its own option defaults (the catalog it registers).
+            use_gl_ = false;
+            software_ = true;
+            custom_textures_allowed_ = false;
+            frame_lock_ = 60;
+            ONYX_INFO("Core: FCEUmm (NES), software video");
+        } else {
+            // OpenGL falls back to Vulkan and Vulkan to OpenGL before software.
+            const std::string want = options_[keys::kGraphicsApi];
+            std::string api = "Software";
+            if (want == "OpenGL") api = gl_ok_ ? "OpenGL" : vulkan_ok_ ? "Vulkan" : "Software";
+            else if (want == "Vulkan") api = vulkan_ok_ ? "Vulkan" : gl_ok_ ? "OpenGL" : "Software";
+            if (api != want && want != "Software")
+                ONYX_WARN("%s renderer requested but unavailable; using %s", want.c_str(), api.c_str());
+            options_[keys::kGraphicsApi] = api;
+            use_gl_ = api == "OpenGL";
+            software_ = api == "Software";
+            if (software_) {
+                options_[keys::kGraphicsApi] = "Software";
+                // The software renderer draws at native 3DS size whatever the scale,
+                // and a bigger output only makes the per-frame copy slower.
+                options_[keys::kResolution] = "1";
+            }
+            // Custom textures: with the option on, the core hashes every texture it
+            // decodes and looks it up in the pack (a warning per miss). Only pay for
+            // that when this game actually has a pack installed.
+            custom_textures_allowed_ = true;
+            if (options_[keys::kCustomTextures] == "enabled") {
+                // Through the remapper: packs usually live in the USB drive's Textures folder.
+                UpdateFolders(settings.folders);
+                const std::string pack = RemapForAzahar(
+                    JoinPath(Paths().azahar_root, "Azahar/load/textures/" + game.TitleIdHex()));
+                std::wstring wpack = Wide(pack);
+                for (auto& ch : wpack)
+                    if (ch == L'/') ch = L'\\';
+                WIN32_FILE_ATTRIBUTE_DATA d{};
+                const bool has_pack =
+                    GetFileAttributesExFromAppW(wpack.c_str(), GetFileExInfoStandard, &d) &&
+                    (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+                if (!has_pack) options_[keys::kCustomTextures] = "disabled";
+                custom_textures_allowed_ = has_pack;
+                ONYX_INFO("Custom textures: %s", has_pack ? "pack found, on" : "no pack for this game, off");
+            }
+            UpdateFrameLockLocked();
+            ONYX_INFO("Renderer: %s, CPU: %s, frame rate lock %d",
+                      software_ ? "software" : use_gl_ ? "hardware (OpenGL)" : "hardware (Vulkan)",
+                      options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT", frame_lock_.load());
         }
-        // Custom textures: with the option on, the core hashes every texture it
-        // decodes and looks it up in the pack (a warning per miss). Only pay for
-        // that when this game actually has a pack installed.
-        custom_textures_allowed_ = true;
-        if (options_[keys::kCustomTextures] == "enabled") {
-            // Through the remapper: packs usually live in the USB drive's Textures folder.
-            UpdateFolders(settings.folders);
-            const std::string pack = RemapForAzahar(
-                JoinPath(Paths().azahar_root, "Azahar/load/textures/" + game.TitleIdHex()));
-            std::wstring wpack = Wide(pack);
-            for (auto& ch : wpack)
-                if (ch == L'/') ch = L'\\';
-            WIN32_FILE_ATTRIBUTE_DATA d{};
-            const bool has_pack =
-                GetFileAttributesExFromAppW(wpack.c_str(), GetFileExInfoStandard, &d) &&
-                (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-            if (!has_pack) options_[keys::kCustomTextures] = "disabled";
-            custom_textures_allowed_ = has_pack;
-            ONYX_INFO("Custom textures: %s", has_pack ? "pack found, on" : "no pack for this game, off");
-        }
-        UpdateFrameLockLocked();
-        ONYX_INFO("Renderer: %s, CPU: %s, frame rate lock %d",
-                  software_ ? "software" : use_gl_ ? "hardware (OpenGL)" : "hardware (Vulkan)",
-                  options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT", frame_lock_.load());
     }
     UpdateFolders(settings.folders);
     ff_speed_ = settings.qol.fast_forward_speed;
@@ -449,15 +554,33 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         fail_reason = why;
     };
 
-    retro_set_environment(&EnvCb);
-    retro_set_video_refresh(&VideoCb);
-    retro_set_audio_sample(&AudioSampleCb);
-    retro_set_audio_sample_batch(&AudioBatchCb);
-    retro_set_input_poll(&InputPollCb);
-    retro_set_input_state(&InputStateCb);
-    if (!core_initialised_) {
-        retro_init();
-        core_initialised_ = true;
+    const bool nes = system_ == GameSystem::Nes;
+    if (nes) {
+        // Load the NES core here, under the crash guard. If it is missing or broken
+        // only this game fails to start.
+        std::string load_error;
+        if (!EnsureNesCore(load_error)) {
+            ONYX_ERROR("Game failed to start: %s", load_error.c_str());
+            state_ = SessionState::Failed;
+            std::function<void(const std::string&)> stopped;
+            {
+                std::lock_guard lock(events_mutex_);
+                stopped = events_.stopped;
+            }
+            if (stopped) stopped(load_error);
+            return;
+        }
+    }
+    CoreApi& core = *api_;
+    core.set_environment(&EnvCb);
+    core.set_video_refresh(&VideoCb);
+    core.set_audio_sample(&AudioSampleCb);
+    core.set_audio_sample_batch(&AudioBatchCb);
+    core.set_input_poll(&InputPollCb);
+    core.set_input_state(&InputStateCb);
+    if (!core.initialised) {
+        core.init();
+        core.initialised = true;
     }
 
     hw_render_set_ = false;
@@ -481,12 +604,40 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     };
     retro_game_info info{};
     info.path = rom_path.c_str();
-    bool loaded = retro_load_game(&info);
+    if (nes) {
+        // FCEUmm asks for the ROM in memory (GET_GAME_INFO_EXT), so it never opens
+        // the file itself: the USB path needs no file-system patch.
+        UwpFileSystem fs;
+        rom_data_ = fs.ReadAll(rom_path);
+        rom_path_ = NormalizeSlashes(rom_path);
+        const std::string file = FileName(rom_path_);
+        rom_dir_ = rom_path_.substr(0, rom_path_.size() - file.size());
+        while (rom_dir_.size() > 1 && rom_dir_.back() == '/') rom_dir_.pop_back();
+        rom_name_ = Stem(file);
+        rom_ext_ = Extension(file).empty() ? std::string() : Extension(file).substr(1);
+        game_info_ext_ = {};
+        game_info_ext_.full_path = rom_path_.c_str();
+        game_info_ext_.dir = rom_dir_.c_str();
+        game_info_ext_.name = rom_name_.c_str();
+        game_info_ext_.ext = rom_ext_.c_str();
+        game_info_ext_.data = rom_data_.data();
+        game_info_ext_.size = rom_data_.size();
+        game_info_ext_.persistent_data = true;
+        info.data = rom_data_.data();
+        info.size = rom_data_.size();
+    }
+    bool loaded = !nes || !rom_data_.empty() ? core.load_game(&info) : false;
     std::string err;
     retro_system_av_info av{};
-    if (loaded) retro_get_system_av_info(&av);
+    if (loaded) core.get_system_av_info(&av);
+    if (loaded && nes) {
+        const double fps = av.timing.fps;
+        if (fps > 30.0 && fps < 130.0) core_fps_ = fps;
+    }
     if (!loaded) {
-        fail(core_reason("The emulator could not open this game. Is it a decrypted dump?"));
+        fail(nes ? (rom_data_.empty() ? "The game file could not be read"
+                                      : core_reason("The NES core could not open this game. Is it a valid .nes file?"))
+                 : core_reason("The emulator could not open this game. Is it a decrypted dump?"));
     } else if (!software_ && !hw_render_set_) {
         fail(use_gl_ ? "The emulator did not request OpenGL rendering"
                      : "The emulator did not request Vulkan rendering");
@@ -504,14 +655,14 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         // retro_load_game already did.
         if (!software_ && hw_render_.context_reset) hw_render_.context_reset();
         // context_reset is where Azahar actually boots the game.
-        const std::string reason = core_reason({});
+        const std::string reason = nes ? std::string() : core_reason({});
         if (!reason.empty()) fail(reason);
     }
 
     DrainStderrToLog();
     if (!fail_reason.empty()) {
         LogGpuRemovedReason();
-        if (loaded) retro_unload_game();
+        if (loaded) core.unload_game();
         if (vulkan_ && !software_ && !use_gl_) vulkan_->DestroyDevice();
         if (gl_ && use_gl_) gl_->DestroyContext();
         audio_.Stop();
@@ -526,8 +677,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     }
 
     // Achievements: identify the game in the background; memory reads come
-    // from the core's memory map on this thread.
-    if (ra_) {
+    // from the core's memory map on this thread. (3DS only: the memory reader
+    // and hashing rules are for 3DS games.)
+    if (RaActive()) {
         ra_->SetMemoryReader([this](u32 a, u8* b, u32 n) { return ReadMemory(a, b, n); });
         ra_->LoadGame(rom_path, [this](bool ok, const std::string& msg) {
             if (ok && ra_->GameLoaded()) Message(ra_->Summary());
@@ -535,6 +687,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         });
     }
 
+    if (nes) LoadSram();
     started_at_ = std::chrono::steady_clock::now();
     state_ = SessionState::Running;
     {
@@ -552,23 +705,30 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     auto perf_start = std::chrono::steady_clock::now();
     double run_total_ms = 0, run_max_ms = 0;
     int perf_frames = 0;
+    int sram_frames = 0;
+    bool pause_flushed = false;
     while (!stop_requested_) {
         RunCommands();
         if (pause_requested_) {
             state_ = SessionState::Paused;
             presenter_.SetPaused(true);
-            if (ra_) ra_->Idle();
+            if (nes && !pause_flushed) { // the menu is open: a good moment to write the battery save
+                pause_flushed = true;
+                FlushSram();
+            }
+            if (RaActive()) ra_->Idle();
             timer.SleepUntil(std::chrono::steady_clock::now() + std::chrono::milliseconds(16));
             deadline = std::chrono::steady_clock::now();
             continue;
         }
+        pause_flushed = false;
         if (state_ == SessionState::Paused) {
             state_ = SessionState::Running;
             presenter_.SetPaused(false);
         }
         const auto run_begin = std::chrono::steady_clock::now();
         ProfilerFrameBegin();
-        retro_run();
+        core.run();
         ProfilerFrameEnd();
         const double run_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - run_begin).count();
@@ -592,7 +752,11 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             while (gap > prev && !worst_frame_us_.compare_exchange_weak(prev, gap)) {
             }
         }
-        if (ra_ && ra_->GameLoaded()) ra_->DoFrame();
+        if (RaActive() && ra_->GameLoaded()) ra_->DoFrame();
+        if (nes && ++sram_frames >= 600) { // ~10 s: keep the battery save on disk
+            sram_frames = 0;
+            FlushSram();
+        }
         if (++frames_since_drain_ >= 120) { // ~2 s: surface driver warnings
             frames_since_drain_ = 0;
             DrainStderrToLog();
@@ -605,7 +769,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             deadline = std::chrono::steady_clock::now();
         } else {
             const double speed = ffw ? ff / 100.0 : 1.0;
-            deadline += std::chrono::nanoseconds(static_cast<long long>(1e9 / kCoreFps / speed));
+            deadline += std::chrono::nanoseconds(static_cast<long long>(1e9 / core_fps_ / speed));
             const auto now = std::chrono::steady_clock::now();
             // Frame limiter: a late frame never makes the next ones rush to catch up
             // (that burst above 60 fps is what showed as hitches), so pacing stays even.
@@ -624,8 +788,10 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     state_ = SessionState::Stopping;
     RunCommands();
     if (write_auto_on_stop_) DoSaveState(0);
-    if (ra_) ra_->UnloadGame();
-    retro_unload_game();
+    if (RaActive()) ra_->UnloadGame();
+    if (nes) FlushSram();
+    core.unload_game();
+    sram_active_ = false;
     if (!software_ && hw_render_.context_destroy) hw_render_.context_destroy();
     if (vulkan_ && !software_ && !use_gl_) vulkan_->DestroyDevice();
     if (gl_ && use_gl_) gl_->DestroyContext();
@@ -646,14 +812,14 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
 
 void EmulatorSession::Reset() {
     Post([this] {
-        retro_reset();
-        if (ra_) ra_->Reset();
+        api_->reset();
+        if (RaActive()) ra_->Reset();
         Message("Reset");
     });
 }
 
 std::string EmulatorSession::StatePath(int slot) const {
-    const std::string dir = JoinPath(Paths().local_state, "states/" + game_.TitleIdHex());
+    const std::string dir = JoinPath(Paths().local_state, "states/" + game_.SaveKey());
     return JoinPath(dir, slot == 0 ? "auto.state" : "slot" + std::to_string(slot) + ".state");
 }
 
@@ -676,17 +842,17 @@ void EmulatorSession::LoadState(int slot) {
 }
 
 void EmulatorSession::DoSaveState(int slot) {
-    if (ra_ && ra_->Hardcore() && slot != 0) {
+    if (RaActive() && ra_->Hardcore() && slot != 0) {
         Message("Save states are off in RetroAchievements hardcore mode");
         return;
     }
-    const size_t size = retro_serialize_size();
+    const size_t size = api_->serialize_size();
     if (size == 0) {
         Message("This game cannot be saved right now");
         return;
     }
     std::vector<uint8_t> data(size);
-    if (!retro_serialize(data.data(), size)) {
+    if (!api_->serialize(data.data(), size)) {
         Message("Saving the state failed");
         return;
     }
@@ -707,7 +873,7 @@ void EmulatorSession::DoSaveState(int slot) {
 }
 
 void EmulatorSession::DoLoadState(int slot) {
-    if (ra_ && ra_->Hardcore()) {
+    if (RaActive() && ra_->Hardcore()) {
         Message("Loading states is off in RetroAchievements hardcore mode");
         return;
     }
@@ -717,11 +883,11 @@ void EmulatorSession::DoLoadState(int slot) {
         Message(slot == 0 ? "No auto save yet" : "Slot " + std::to_string(slot) + " is empty");
         return;
     }
-    if (!retro_unserialize(data.data(), data.size())) {
+    if (!api_->unserialize(data.data(), data.size())) {
         Message("That save state belongs to a different version of the game or emulator");
         return;
     }
-    if (ra_) ra_->Reset();
+    if (RaActive()) ra_->Reset();
     Message(slot == 0 ? "Resumed where you left off" : "Loaded slot " + std::to_string(slot));
 }
 
@@ -733,6 +899,10 @@ void EmulatorSession::SetFastForward(bool on) {
 void EmulatorSession::ApplyCoreOptions(const CoreOptions& options) {
     std::lock_guard lock(options_mutex_);
     for (const auto& [k, v] : options) options_[k] = v;
+    if (system_ == GameSystem::Nes) { // none of the 3DS renderer rules apply
+        options_dirty_ = true;
+        return;
+    }
     // The renderer cannot change while a game runs.
     options_[keys::kGraphicsApi] = software_ ? "Software" : use_gl_ ? "OpenGL" : "Vulkan";
     if (software_) options_[keys::kResolution] = "1";
@@ -762,6 +932,10 @@ CoreOptionCatalog EmulatorSession::Catalog() const {
 }
 
 void EmulatorSession::CycleLayout() {
+    if (system_ == GameSystem::Nes) {
+        Message("The NES has a single screen");
+        return;
+    }
     static const char* layouts[] = {"large_screen", "default", "side_by_side", "single_screen"};
     std::string current;
     {
@@ -781,14 +955,14 @@ void EmulatorSession::CycleLayout() {
 
 void EmulatorSession::ApplyCheats(const CheatFile& cheats) {
     Post([this, cheats] {
-        retro_cheat_reset();
+        api_->cheat_reset();
         unsigned index = 0;
         int enabled = 0;
         for (const auto& c : cheats.cheats) {
             if (!c.enabled || !c.IsValid()) continue;
             std::string code;
             for (const auto& l : c.lines) code += l + "\n";
-            retro_cheat_set(index++, true, code.c_str());
+            api_->cheat_set(index++, true, code.c_str());
             ++enabled;
         }
         Message(enabled ? std::to_string(enabled) + (enabled == 1 ? " cheat on" : " cheats on")
@@ -839,6 +1013,46 @@ bool EmulatorSession::InstallCia(const std::string& path, const std::function<vo
 }
 
 // ---------------------------------------------------------------------------
+// NES battery saves (SRAM): the core exposes the RAM, ONYX keeps <name>.srm in
+// LocalState/nes (mirrored to the USB drive by SaveBackup).
+
+std::string EmulatorSession::SramPath() const {
+    return JoinPath(JoinPath(Paths().local_state, "nes"),
+                    SafeFileName(Stem(FileName(game_.path))) + ".srm");
+}
+
+void EmulatorSession::LoadSram() {
+    sram_active_ = false;
+    sram_last_.clear();
+    const size_t size = api_->get_memory_size(RETRO_MEMORY_SAVE_RAM);
+    auto* ram = static_cast<uint8_t*>(api_->get_memory_data(RETRO_MEMORY_SAVE_RAM));
+    if (!size || !ram) return; // this cartridge has no battery
+    UwpFileSystem fs;
+    fs.CreateDirs(JoinPath(Paths().local_state, "nes"));
+    const Bytes saved = fs.ReadAll(SramPath());
+    if (!saved.empty()) {
+        std::memcpy(ram, saved.data(), std::min(saved.size(), size));
+        ONYX_INFO("Battery save loaded (%zu bytes)", saved.size());
+    }
+    sram_last_.assign(ram, ram + size);
+    sram_active_ = true;
+}
+
+void EmulatorSession::FlushSram() {
+    if (!sram_active_) return;
+    const size_t size = api_->get_memory_size(RETRO_MEMORY_SAVE_RAM);
+    auto* ram = static_cast<const uint8_t*>(api_->get_memory_data(RETRO_MEMORY_SAVE_RAM));
+    if (!size || !ram || size != sram_last_.size()) return;
+    if (std::memcmp(ram, sram_last_.data(), size) == 0) return; // unchanged
+    UwpFileSystem fs;
+    if (fs.WriteAll(SramPath(), std::span<const u8>(ram, size))) {
+        sram_last_.assign(ram, ram + size);
+    } else {
+        ONYX_WARN("Could not write the battery save");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // libretro callbacks
 
 void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned height,
@@ -847,7 +1061,18 @@ void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned he
         static uint64_t s_calls = 0, s_null = 0;
         ++s_calls;
         if (data && data != RETRO_HW_FRAME_BUFFER_VALID) {
-            presenter_.PushCpuFrame(data, width, height, pitch);
+            if (system_ == GameSystem::Nes && pixel_format_ != RETRO_PIXEL_FORMAT_XRGB8888) {
+                // 0RGB1555 / RGB565 -> XRGB8888 rows, as PushCpuFrame expects.
+                convert_frame_.resize(static_cast<size_t>(width) * height);
+                ConvertToXrgb8888(data, width, height, pitch,
+                                  pixel_format_ == RETRO_PIXEL_FORMAT_RGB565 ? FramePixelFormat::Rgb565
+                                                                             : FramePixelFormat::Xrgb1555,
+                                  convert_frame_.data());
+                presenter_.PushCpuFrame(convert_frame_.data(), width, height,
+                                        static_cast<size_t>(width) * 4);
+            } else {
+                presenter_.PushCpuFrame(data, width, height, pitch);
+            }
         } else {
             ++s_null;
         }
@@ -989,16 +1214,31 @@ void EmulatorSession::ParseVariables(const retro_variable* vars) {
 }
 
 bool EmulatorSession::Environment(unsigned cmd, void* data) {
-    static std::string system_dir;
+    static std::string system_dir, save_dir;
     switch (cmd) {
     case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
     case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
     case RETRO_ENVIRONMENT_GET_CORE_ASSETS_DIRECTORY:
         system_dir = Paths().azahar_root;
-        *static_cast<const char**>(data) = system_dir.c_str();
+        // NES battery saves are kept by ONYX itself (LoadSram/FlushSram), in LocalState/nes.
+        save_dir = system_ == GameSystem::Nes ? JoinPath(Paths().local_state, "nes") : system_dir;
+        *static_cast<const char**>(data) =
+            (cmd == RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY ? save_dir : system_dir).c_str();
         return true;
-    case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
-        return *static_cast<const retro_pixel_format*>(data) == RETRO_PIXEL_FORMAT_XRGB8888;
+    case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: {
+        const auto format = *static_cast<const retro_pixel_format*>(data);
+        if (system_ != GameSystem::Nes) return format == RETRO_PIXEL_FORMAT_XRGB8888;
+        // The NES core is software-only and may pick any of the three formats; VideoRefresh converts.
+        if (format != RETRO_PIXEL_FORMAT_XRGB8888 && format != RETRO_PIXEL_FORMAT_RGB565 &&
+            format != RETRO_PIXEL_FORMAT_0RGB1555)
+            return false;
+        pixel_format_ = format;
+        return true;
+    }
+    case RETRO_ENVIRONMENT_GET_GAME_INFO_EXT:
+        if (system_ != GameSystem::Nes || rom_data_.empty()) return false;
+        *static_cast<const retro_game_info_ext**>(data) = &game_info_ext_;
+        return true;
     case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
         *static_cast<unsigned*>(data) = use_gl_ ? RETRO_HW_CONTEXT_OPENGL_CORE : RETRO_HW_CONTEXT_VULKAN;
         return true;
@@ -1045,7 +1285,8 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         // One reusable frame buffer instead of the core allocating and freeing
         // a multi-megabyte frame every time it presents.
         auto* fb = static_cast<retro_framebuffer*>(data);
-        if (!software_ || !fb || fb->width == 0 || fb->height == 0) return false;
+        if (!software_ || system_ == GameSystem::Nes || !fb || fb->width == 0 || fb->height == 0)
+            return false;
         sw_frame_.resize(static_cast<size_t>(fb->width) * fb->height);
         fb->data = sw_frame_.data();
         fb->pitch = static_cast<size_t>(fb->width) * 4;
@@ -1141,6 +1382,10 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         }
         return true;
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
+        if (system_ == GameSystem::Nes && data) { // e.g. the region option switched NTSC <-> PAL
+            const double fps = static_cast<const retro_system_av_info*>(data)->timing.fps;
+            if (fps > 30.0 && fps < 130.0) core_fps_ = fps;
+        }
         if (use_gl_ && gl_ && gl_->HasContext() && data) {
             const auto* av = static_cast<const retro_system_av_info*>(data);
             gl_->EnsureSize(av->geometry.base_width, av->geometry.base_height);
