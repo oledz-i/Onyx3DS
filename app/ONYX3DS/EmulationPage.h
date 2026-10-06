@@ -35,7 +35,13 @@ private:
     bool started_ = false;
     Windows::UI::Xaml::DispatcherTimer fps_timer_{nullptr};
     // Software frames drawn through a XAML Image.
-    Windows::UI::Xaml::DispatcherTimer sw_timer_{nullptr};
+    // Software-view frames are pulled once per XAML composition frame (vsync),
+    // not on a 16 ms timer: a timer drifts against the 60 Hz display and shows
+    // a duplicated or skipped frame every half second or so (visible judder).
+    winrt::event_token sw_render_token_{};
+    bool sw_render_active_ = false;
+    void StartSoftwareView();
+    void StopSoftwareView();
     Windows::UI::Xaml::Media::Imaging::WriteableBitmap sw_bitmap_{nullptr};
     std::vector<uint8_t> sw_pixels_;
     uint64_t sw_seq_ = 0;

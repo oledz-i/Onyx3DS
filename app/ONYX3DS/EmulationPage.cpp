@@ -40,11 +40,7 @@ void EmulationPage::InitializeComponent() {
     fps_timer_.Tick([weak = get_weak()](auto&&, auto&&) {
         if (auto self = weak.get()) self->UpdateFps();
     });
-    sw_timer_ = DispatcherTimer();
-    sw_timer_.Interval(std::chrono::milliseconds(16));
-    sw_timer_.Tick([weak = get_weak()](auto&&, auto&&) {
-        if (auto self = weak.get()) self->UpdateSoftwareView();
-    });
+
     Panel().SizeChanged([](IInspectable const& sender, SizeChangedEventArgs const& e) {
         auto panel = sender.as<SwapChainPanel>();
         Emu().Presenter().OnPanelResized(static_cast<float>(e.NewSize().Width),
@@ -109,7 +105,7 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
 
 void EmulationPage::OnNavigatedFrom(NavigationEventArgs const&) {
     fps_timer_.Stop();
-    if (sw_timer_) sw_timer_.Stop();
+    StopSoftwareView();
     Emu().SetEvents({});
     Emu().Presenter().Detach();
     Emu().Presenter().SetCpuView(false);
@@ -153,6 +149,21 @@ void EmulationPage::StartGame() {
     fps_timer_.Start();
 }
 
+void EmulationPage::StartSoftwareView() {
+    if (sw_render_active_) return;
+    sw_render_active_ = true;
+    sw_render_token_ = Windows::UI::Xaml::Media::CompositionTarget::Rendering(
+        [weak = get_weak()](auto&&, auto&&) {
+            if (auto self = weak.get()) self->UpdateSoftwareView();
+        });
+}
+
+void EmulationPage::StopSoftwareView() {
+    if (!sw_render_active_) return;
+    sw_render_active_ = false;
+    Windows::UI::Xaml::Media::CompositionTarget::Rendering(sw_render_token_);
+}
+
 void EmulationPage::UpdateSoftwareView() {
     uint32_t w = 0, h = 0;
     if (!Emu().Presenter().TakeMirror(sw_pixels_, w, h, sw_seq_)) return;
@@ -170,7 +181,7 @@ void EmulationPage::UpdateSoftwareView() {
             ONYX_INFO("Software view: %llu frames shown", static_cast<unsigned long long>(sw_shown_));
     } catch (hresult_error const& e) {
         ONYX_ERROR("Software view failed: %s", Utf8(e.message()).c_str());
-        sw_timer_.Stop();
+        StopSoftwareView();
     }
 }
 
@@ -183,7 +194,7 @@ void EmulationPage::OnStarted() {
     if (Emu().UsingCpuFrames()) {
         SoftwareView().Visibility(Visibility::Visible);
         Emu().Presenter().SetCpuView(true);
-        sw_timer_.Start();
+        StartSoftwareView();
     }
     // No system cursor over the game. (Mouse mode itself is turned off once, in
     // the App constructor; changing RequiresPointerMode later throws.)
@@ -225,7 +236,7 @@ void EmulationPage::OnStarted() {
 
 void EmulationPage::OnStopped(const std::string& reason) {
     fps_timer_.Stop();
-    if (sw_timer_) sw_timer_.Stop();
+    StopSoftwareView();
     if (started_) {
         // Writes library.json; keep the file system off the UI thread.
         RunAsync([path = game_.path, secs = Emu().SessionSeconds(), now = NowUnix()] {
@@ -314,8 +325,10 @@ void EmulationPage::UpdateFps() {
     if (!show_fps_ || !started_) return;
     const auto st = Emu().Presenter().GetStats();
     char buf[160];
-    std::snprintf(buf, sizeof(buf), "%.0f FPS   %ux%u%s", st.emu_fps, st.frame_width, st.frame_height,
-                  Emu().FastForward() ? "   ▶▶" : "");
+    // Worst frame gap in the last half second: 16-17 ms is perfectly smooth.
+    const double worst = Emu().TakeWorstFrameMs();
+    std::snprintf(buf, sizeof(buf), "%.0f FPS   worst %.0f ms   %ux%u%s", st.emu_fps, worst,
+                  st.frame_width, st.frame_height, Emu().FastForward() ? "   ▶▶" : "");
     FpsText().Text(kit::H(buf));
 }
 

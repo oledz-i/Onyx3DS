@@ -90,6 +90,15 @@ TEST_CASE("Path remapper sends Azahar's folders to the USB drive") {
     CHECK(m.Map("C:/Data/LocalState/Azahar/sdmc/foo") == "C:/Data/LocalState/Azahar/sdmc/foo");
 }
 
+TEST_CASE("System folder also keeps the shader caches") {
+    FolderConfig f;
+    f.system_files = "E:/ONYX3DS/System";
+    const PathRemapper m("L:/Azahar/", f);
+    CHECK(m.Map("L:/Azahar/shaders/vulkan/transferable/a_vs.vkch") ==
+          "E:/ONYX3DS/System/ShaderCache/vulkan/transferable/a_vs.vkch");
+    CHECK(m.Map("L:/Azahar/sysdata/x") == "E:/ONYX3DS/System/x");
+}
+
 TEST_CASE("Saves folder remaps sdmc, nand and states") {
     FolderConfig f;
     f.saves = "E:/Saves";

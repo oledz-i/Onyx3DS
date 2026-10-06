@@ -1,0 +1,34 @@
+From 24aec480ba86a5fc5fa04649acf555c3d8eeefee Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 23:20:07 -0400
+Subject: [PATCH] renderer_vulkan: don't block on small draws' pipelines on
+ Dozen
+
+Small draws (<= 6 vertices) waited for their pipeline to build even with
+async compilation; on Dozen a build takes 0.4-3 s, so each new effect froze
+the game. They are skipped until ready instead.
+---
+ src/video_core/renderer_vulkan/vk_rasterizer.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 707fcac..b0341b8 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -487,7 +487,12 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+         SetupIndexArray();
+     }
+ 
+-    const bool wait_built = !async_shaders || regs.pipeline.num_vertices <= 6;
++    // Upstream waits for small draws (UI quads) so they never flicker in. On Dozen a
++    // pipeline takes the Xbox driver 0.4-3 s to build, so waiting froze the game each
++    // time a new effect appeared; skip those draws until their pipeline is ready.
++    const bool is_dozen = static_cast<u32>(instance.GetDriverID()) == 23u;
++    const bool wait_built =
++        !async_shaders || (regs.pipeline.num_vertices <= 6 && !is_dozen);
+     if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+         return true;
+     }
+-- 
+2.43.0
+

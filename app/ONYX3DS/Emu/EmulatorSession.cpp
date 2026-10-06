@@ -224,8 +224,10 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         // that when this game actually has a pack installed.
         custom_textures_allowed_ = true;
         if (options_[keys::kCustomTextures] == "enabled") {
-            const std::string pack = JoinPath(Paths().azahar_root,
-                                              "Azahar/load/textures/" + game.TitleIdHex());
+            // Through the remapper: packs usually live in the USB drive's Textures folder.
+            UpdateFolders(settings.folders);
+            const std::string pack = RemapForAzahar(
+                JoinPath(Paths().azahar_root, "Azahar/load/textures/" + game.TitleIdHex()));
             std::wstring wpack = Wide(pack);
             for (auto& ch : wpack)
                 if (ch == L'/') ch = L'\\';
@@ -526,6 +528,16 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             perf_start = std::chrono::steady_clock::now();
             run_total_ms = run_max_ms = 0;
             perf_frames = 0;
+        }
+        {
+            static auto s_last = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            const long long gap =
+                std::chrono::duration_cast<std::chrono::microseconds>(now - s_last).count();
+            s_last = now;
+            long long prev = worst_frame_us_.load();
+            while (gap > prev && !worst_frame_us_.compare_exchange_weak(prev, gap)) {
+            }
         }
         if (ra_ && ra_->GameLoaded()) ra_->DoFrame();
         if (++frames_since_drain_ >= 120) { // ~2 s: surface driver warnings

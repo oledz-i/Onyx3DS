@@ -76,6 +76,9 @@ public:
 
     void SetFastForward(bool on);
     bool FastForward() const { return fast_forward_.load(); }
+    // Longest gap between two emulated frames since the last call (ms), for the
+    // FPS overlay: a stutter shows up here even when the average FPS looks fine.
+    double TakeWorstFrameMs() { return worst_frame_us_.exchange(0) / 1000.0; }
     void SetFastForwardSpeed(int percent) { ff_speed_ = percent; }
 
     // Live option changes (resolution, layout, ...). Applied between frames.
@@ -147,6 +150,7 @@ private:
     // Frame rate lock (keys::kFrameLock): 60, or 30 = show every 2nd frame at an
     // even pace while the game keeps running at full speed.
     std::atomic<int> frame_lock_{60};
+    std::atomic<long long> worst_frame_us_{0};
     uint64_t hw_frames_ = 0;
     bool custom_textures_allowed_ = true; // false: no pack for this game
     void UpdateFrameLockLocked(); // options_mutex_ held

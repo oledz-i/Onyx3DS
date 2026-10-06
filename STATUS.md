@@ -68,9 +68,17 @@
 - Build #73 stall stacks: 96% of stalled-frame samples in VulkanHost::ShowReadback
   waiting on the previous frame's fence (GPU ~0.5 s late), right after
   RasterizerCache::RunGarbageCollector -> vmaDestroyImage -> D3D12 kernel call.
-  Next build: azahar/0035 recycles texture images (no create/destroy churn) and skips
-  small draws while their pipeline builds on Dozen; mesa/0018 skips draws for refused
+  Next build: azahar/0035 skips small draws while their pipeline builds on Dozen; mesa/0018 skips draws for refused
   pipeline variants (E_INVALIDARG crash); readback shows finished frames without waiting.
+- Build #75: the texture recycler corrupted screens (stale views showing other
+  surfaces) and did not stop the stall; removed. Stall stacks then pointed at fence
+  waits (WaitSyncIndex, MasterSemaphore) ~480 ms every ~2 s, and the presenter
+  thread stalls at the same moments in software mode too -> completion events
+  arriving late. mesa/0019 + presenter poll fence values while waiting; presenter
+  idles under the XAML view; XAML view updates on CompositionTarget.Rendering;
+  azahar/0036 frees images on a background thread; mesa/0020 bigger CBV/SRV/UAV
+  pool heaps; shader caches remapped to the USB System folder. Navy background
+  reverted (azahar/0033 dropped).
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

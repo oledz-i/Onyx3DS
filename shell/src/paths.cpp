@@ -131,6 +131,10 @@ PathRemapper::PathRemapper(std::string user_dir, const FolderConfig& f) {
     add("load/mods/", f.mods);
     add("cheats/", f.cheats);
     add("sysdata/", f.system_files);
+    // Shader caches next to the system files on the USB drive: they survive
+    // reinstalling ONYX (which wipes LocalState), so a game's shaders are built
+    // once instead of after every update.
+    if (!f.system_files.empty()) add("shaders/", JoinPath(f.system_files, "ShaderCache"));
     add("screenshots/", f.screenshots);
     if (!f.saves.empty()) {
         add("sdmc/", JoinPath(f.saves, "sdmc"));

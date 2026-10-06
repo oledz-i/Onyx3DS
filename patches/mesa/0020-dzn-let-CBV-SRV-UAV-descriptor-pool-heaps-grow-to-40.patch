@@ -1,0 +1,30 @@
+From db92f6bf33b9ffc9ba2eccd17e00cda0a6eef21c Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 23:24:45 -0400
+Subject: [PATCH] dzn: let CBV/SRV/UAV descriptor pool heaps grow to 4096
+
+Every pool Azahar has to add after OUT_OF_POOL_MEMORY is a kernel call on
+Xbox; stall stacks showed AppendDescriptorPool. Samplers stay capped at 1024.
+---
+ src/microsoft/vulkan/dzn_descriptor_set.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/microsoft/vulkan/dzn_descriptor_set.c b/src/microsoft/vulkan/dzn_descriptor_set.c
+index ba9124f..98295e6 100644
+--- a/src/microsoft/vulkan/dzn_descriptor_set.c
++++ b/src/microsoft/vulkan/dzn_descriptor_set.c
+@@ -1926,7 +1926,10 @@ dzn_descriptor_pool_create(struct dzn_device *device,
+        * pool heap small: a full pool reports VK_ERROR_OUT_OF_POOL_MEMORY and the
+        * app creates another one. */
+       dzn_foreach_pool_type(type) {
+-         const uint32_t cap = ONYX_MAX_POOL_HEAP_DESCS;
++         /* CBV/SRV/UAV heaps up to 4096 (each pool the app has to add is a kernel
++          * call on Xbox, which showed in stall stacks); samplers stay at 1024. */
++         const uint32_t cap = type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ?
++            4 * ONYX_MAX_POOL_HEAP_DESCS : ONYX_MAX_POOL_HEAP_DESCS;
+          if (pool->desc_count[type] > cap) {
+             static int logged = 0;
+             if (logged++ < 4)
+-- 
+2.43.0
+

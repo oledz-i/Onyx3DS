@@ -11,6 +11,28 @@
 namespace onyx::app {
 
 namespace {
+// Waits until `fence` reaches `value`: on the event in 1 ms slices, checking the
+// fence value in between. On Xbox a completion event sometimes fires ~0.5 s late;
+// trusting it alone froze the display for that long every couple of seconds.
+bool WaitFence(ID3D12Fence* fence, uint64_t value, HANDLE event, DWORD max_ms) {
+    if (fence->GetCompletedValue() >= value) return true;
+    if (event) fence->SetEventOnCompletion(value, event);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
+    for (int spins = 0;; ++spins) {
+        if (fence->GetCompletedValue() >= value) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (spins < 32) {
+            SwitchToThread();
+        } else if (event) {
+            if (WaitForSingleObjectEx(event, 1, FALSE) == WAIT_OBJECT_0) return true;
+        } else {
+            Sleep(1);
+        }
+    }
+}
+} // namespace
+
+namespace {
 
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 
@@ -295,10 +317,7 @@ void D3D12Presenter::WaitForGpu() {
     if (!queue_ || !fence_) return;
     const uint64_t v = ++fence_value_;
     queue_->Signal(fence_.get(), v);
-    if (fence_->GetCompletedValue() < v) {
-        fence_->SetEventOnCompletion(v, fence_event_);
-        WaitForSingleObjectEx(fence_event_, 2000, FALSE);
-    }
+    WaitFence(fence_.get(), v, fence_event_, 2000);
 }
 
 void D3D12Presenter::UpdateSrv(int slot) {
@@ -330,9 +349,7 @@ D3D12Presenter::SharedSlot* D3D12Presenter::BeginWrite(uint32_t width, uint32_t 
     }
     // The render thread may still have GPU work in flight that samples this
     // slot from before it moved on; wait for that work, not for vsync.
-    if (fence_->GetCompletedValue() < wait_value) {
-        fence_->SetEventOnCompletion(wait_value, nullptr); // blocks until reached
-    }
+    WaitFence(fence_.get(), wait_value, nullptr, 2000);
 
     SharedSlot& slot = slots_[s];
     if (!slot.texture || slot.width != width || slot.height != height) {
@@ -489,8 +506,7 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         const uint64_t v = ++upload_fence_value_;
         queue_->Signal(upload_fence_.get(), v);
         if (upload_fence_->GetCompletedValue() < v) {
-            upload_fence_->SetEventOnCompletion(v, upload_event_);
-            if (WaitForSingleObject(upload_event_, 1000) != WAIT_OBJECT_0) {
+            if (!WaitFence(upload_fence_.get(), v, upload_event_, 1000)) {
                 AbortWrite(s);
                 return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
             }
@@ -568,6 +584,32 @@ uint32_t D3D12Presenter::SlotGeneration(int slot_index) const {
 void D3D12Presenter::RenderLoop() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     while (running_) {
+        // Frames shown through the XAML image view: the swap chain under it would
+        // only present blank frames, competing with XAML for the GPU and the
+        // compositor. Keep just the frame-rate statistics running.
+        if (cpu_view_.load() && !resize_pending_.load()) {
+            Sleep(16);
+            const auto now = std::chrono::steady_clock::now();
+            const double secs = std::chrono::duration<double>(now - window_start_).count();
+            if (secs >= 0.5) {
+                std::lock_guard lock(stats_mutex_);
+                stats_.present_fps = 0;
+                std::lock_guard slock(slot_mutex_);
+                stats_.emu_fps = frames_in_window_ / secs;
+                frames_in_window_ = 0;
+                if (cpu_w_.load() && cpu_h_.load()) {
+                    stats_.frame_width = cpu_w_.load();
+                    stats_.frame_height = cpu_h_.load();
+                }
+                window_start_ = now;
+            }
+            static auto s_last_report = std::chrono::steady_clock::now();
+            if (now - s_last_report > std::chrono::seconds(5)) {
+                s_last_report = now;
+                ONYX_INFO("Display: XAML image view, %.1f game frames/s", stats_.emu_fps);
+            }
+            continue;
+        }
         if (frame_waitable_) WaitForSingleObjectEx(frame_waitable_, 100, TRUE);
         if (!running_) break;
 
@@ -586,12 +628,22 @@ void D3D12Presenter::RenderLoop() {
             slot = displaying_;
         }
         const UINT back = swapchain_->GetCurrentBackBufferIndex();
-        if (fence_->GetCompletedValue() < allocator_fence_[back]) {
-            fence_->SetEventOnCompletion(allocator_fence_[back], fence_event_);
-            WaitForSingleObjectEx(fence_event_, 1000, FALSE);
-        }
+        const auto t_fence = std::chrono::steady_clock::now();
+        WaitFence(fence_.get(), allocator_fence_[back], fence_event_, 1000);
+        const auto t_draw = std::chrono::steady_clock::now();
         DrawFrame(slot, back);
         const HRESULT phr = swapchain_->Present(1, 0);
+        {
+            // Which step a display stall is in (fence wait or Present), for the log.
+            const auto t_end = std::chrono::steady_clock::now();
+            const double fence_ms = std::chrono::duration<double, std::milli>(t_draw - t_fence).count();
+            const double present_ms = std::chrono::duration<double, std::milli>(t_end - t_draw).count();
+            static int s_stalls = 0;
+            if ((fence_ms > 100 || present_ms > 100) && (s_stalls < 10 || s_stalls % 100 == 0))
+                ONYX_WARN("Display stall: %.0f ms waiting for the GPU, %.0f ms drawing and presenting",
+                          fence_ms, present_ms);
+            if (fence_ms > 100 || present_ms > 100) ++s_stalls;
+        }
         if (FAILED(phr) && phr != last_present_hr_)
             ONYX_ERROR("Present failed: 0x%08X (device: 0x%08X)", static_cast<unsigned>(phr),
                        static_cast<unsigned>(device_->GetDeviceRemovedReason()));

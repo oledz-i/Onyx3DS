@@ -1,0 +1,184 @@
+From b4e16f1ccabef7862ac7b19621f848f23a363eed Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 23:24:20 -0400
+Subject: [PATCH] renderer_vulkan: destroy texture images on a background
+ thread
+
+Freeing an image is a kernel call on Xbox (10-20 ms in stall stacks) and the
+texture cache frees them from the emulation thread mid-frame. Queue the
+destruction to a worker; the runtime drains it before the device goes away.
+---
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 134 ++++++++++++++----
+ 1 file changed, 108 insertions(+), 26 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index 73162ab..c34cd45 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -2,7 +2,12 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <condition_variable>
++#include <deque>
++#include <functional>
++#include <mutex>
+ #include <stdexcept>
++#include <thread>
+ #include "video_core/renderer_vulkan/vk_texture_runtime.h"
+ 
+ #include <limits>
+@@ -258,37 +263,109 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
+     }
+ }
+ 
+-void Handle::Destroy() {
+-    const auto device = instance.GetDevice();
+-
+-    // Image views
+-    if (auto view = image_views[ViewType::Sample]) {
+-        device.destroyImageView(view);
+-    }
+-    if (auto view = image_views[ViewType::Mip0]; view && view != image_views[ViewType::Sample]) {
+-        device.destroyImageView(view);
+-    }
+-    if (auto view = image_views[ViewType::Storage]) {
+-        device.destroyImageView(view);
++namespace {
++// Destroys texture images on a background thread. Freeing an image is a kernel
++// call on Xbox (10-20 ms seen in stall stacks), and the texture cache frees them
++// from the emulation thread in the middle of a frame.
++class ImageDeleter {
++public:
++    using Job = std::function<void()>;
++    void Start() {
++        std::scoped_lock lock{mutex};
++        if (thread.joinable()) {
++            return;
++        }
++        stop = false;
++        thread = std::thread([this] { Run(); });
+     }
+-    if (auto view = image_views[ViewType::Depth]) {
+-        device.destroyImageView(view);
++    // Runs everything queued, then stops the thread (before the device goes away).
++    void Stop() {
++        {
++            std::scoped_lock lock{mutex};
++            if (!thread.joinable()) {
++                return;
++            }
++            stop = true;
++        }
++        cv.notify_all();
++        thread.join();
+     }
+-    if (auto view = image_views[ViewType::Stencil]) {
+-        device.destroyImageView(view);
++    bool Queue(Job job) {
++        {
++            std::scoped_lock lock{mutex};
++            if (!thread.joinable() || stop) {
++                return false;
++            }
++            jobs.push_back(std::move(job));
++        }
++        cv.notify_one();
++        return true;
+     }
+ 
+-    image_views = {};
+-
+-    if (framebuffer) {
+-        device.destroyFramebuffer(framebuffer);
+-        framebuffer = VK_NULL_HANDLE;
++private:
++    void Run() {
++        for (;;) {
++            std::deque<Job> batch;
++            {
++                std::unique_lock lock{mutex};
++                cv.wait(lock, [this] { return stop || !jobs.empty(); });
++                batch.swap(jobs);
++                if (batch.empty() && stop) {
++                    return;
++                }
++            }
++            for (auto& job : batch) {
++                job();
++            }
++        }
+     }
++    std::mutex mutex;
++    std::condition_variable cv;
++    std::deque<Job> jobs;
++    std::thread thread;
++    bool stop = false;
++};
++ImageDeleter g_image_deleter;
++} // Anonymous namespace
+ 
+-    if (allocation) {
+-        vmaDestroyImage(instance.GetAllocator(), image, allocation);
++void Handle::Destroy() {
++    if (allocation || framebuffer || image_views[ViewType::Sample]) {
++        const vk::Device dev = instance.GetDevice();
++        const VmaAllocator allocator = instance.GetAllocator();
++        auto views = image_views;
++        const vk::Framebuffer fb = framebuffer;
++        const vk::Image img = image;
++        const VmaAllocation alloc = allocation;
++        auto job = [dev, allocator, views, fb, img, alloc] {
++            for (u32 i = 0; i < views.size(); i++) {
++                if (!views[i]) {
++                    continue;
++                }
++                // Mip0 may alias Sample; destroy each view once.
++                bool seen = false;
++                for (u32 j = 0; j < i; j++) {
++                    seen |= views[j] == views[i];
++                }
++                if (!seen) {
++                    dev.destroyImageView(views[i]);
++                }
++            }
++            if (fb) {
++                dev.destroyFramebuffer(fb);
++            }
++            if (alloc) {
++                vmaDestroyImage(allocator, img, alloc);
++            }
++        };
++        image_views = {};
++        framebuffer = VK_NULL_HANDLE;
++        image = VK_NULL_HANDLE;
++        allocation = VK_NULL_HANDLE;
++        if (!g_image_deleter.Queue(job)) {
++            job();
++        }
++        return;
+     }
+-
+     image = VK_NULL_HANDLE;
+     allocation = VK_NULL_HANDLE;
+ }
+@@ -304,9 +381,14 @@ TextureRuntime::TextureRuntime(const Instance& instance, Scheduler& scheduler,
+                       vk::BufferUsageFlagBits::eTransferDst |
+                           vk::BufferUsageFlagBits::eStorageBuffer,
+                       DOWNLOAD_BUFFER_SIZE, BufferType::Download},
+-      num_swapchain_images{num_swapchain_images_} {}
++      num_swapchain_images{num_swapchain_images_} {
++    g_image_deleter.Start();
++}
+ 
+-TextureRuntime::~TextureRuntime() = default;
++TextureRuntime::~TextureRuntime() {
++    // Every queued image is destroyed before the device can go away.
++    g_image_deleter.Stop();
++}
+ 
+ VideoCore::StagingData TextureRuntime::FindStaging(u32 size, bool upload) {
+     StreamBuffer& buffer = upload ? upload_buffer : download_buffer;
+-- 
+2.43.0
+

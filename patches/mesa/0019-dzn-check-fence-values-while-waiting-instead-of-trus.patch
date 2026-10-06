@@ -1,0 +1,81 @@
+From f4b24c65cbe84b7dd45a32822b81a4d9f4f0c974 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 23:19:15 -0400
+Subject: [PATCH] dzn: check fence values while waiting instead of trusting the
+ event alone
+
+Logs show the emulator regularly waiting ~0.5 s for a frame's fence, and the
+display thread (a separate D3D12 queue) stalling at the same moments, as if
+completion events arrive late. Wait on the event in 1 ms slices and check the
+fence values in between (after a few yields for the common short wait), and
+log how often a fence was complete before its event fired.
+---
+ src/microsoft/vulkan/dzn_sync.c | 52 +++++++++++++++++++++++++++++++--
+ 1 file changed, 50 insertions(+), 2 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_sync.c b/src/microsoft/vulkan/dzn_sync.c
+index 31d2521..1488c80 100644
+--- a/src/microsoft/vulkan/dzn_sync.c
++++ b/src/microsoft/vulkan/dzn_sync.c
+@@ -201,8 +201,56 @@ dzn_sync_wait(struct vk_device *device,
+    }
+ 
+ #ifdef _WIN32
+-   DWORD res =
+-      WaitForSingleObject(event, timeout_ms);
++   /* ONYX: don't rely on the completion event alone. On Xbox the event for an
++    * already-completed fence sometimes arrives ~0.5 s late, which showed up as
++    * a regular half-second freeze (the emulator waiting for a frame the GPU had
++    * finished). Wait on the event in 1 ms slices and check the fence values
++    * directly in between. */
++   (void)timeout_ms;
++   DWORD res = WAIT_TIMEOUT;
++   unsigned spins = 0;
++   bool waited_on_event = false;
++   for (;;) {
++      bool any = false, all = true;
++      for (uint32_t i = 0; i < wait_count; i++) {
++         const bool done = ID3D12Fence_GetCompletedValue(fences[i]) >= values[i];
++         any |= done;
++         all &= done;
++      }
++      if ((flags == D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY) ? any : all) {
++         if (waited_on_event && WaitForSingleObject(event, 2) != WAIT_OBJECT_0) {
++            static unsigned late;
++            const unsigned n = ++late;
++            if (n <= 4 || (n % 500) == 0)
++               mesa_logw("dzn: a fence had completed before its event fired (%u times so far)", n);
++         }
++         res = WAIT_OBJECT_0;
++         break;
++      }
++      DWORD slice = 1;
++      if (abs_timeout_ns != OS_TIMEOUT_INFINITE) {
++         const uint64_t now = os_time_get_nano();
++         if (now >= abs_timeout_ns) {
++            res = WAIT_TIMEOUT;
++            break;
++         }
++         const uint64_t left_ms = (abs_timeout_ns - now + 999999) / 1000000;
++         if (left_ms < slice)
++            slice = (DWORD)left_ms;
++      }
++      /* Short waits are the common case: yield a few times before sleeping. */
++      if (spins < 32) {
++         spins++;
++         SwitchToThread();
++         continue;
++      }
++      res = WaitForSingleObject(event, slice);
++      if (res == WAIT_OBJECT_0)
++         break;
++      if (res != WAIT_TIMEOUT)
++         break;
++      waited_on_event = true;
++   }
+ 
+    CloseHandle(event);
+    VkResult ret = VK_SUCCESS;
+-- 
+2.43.0
+
