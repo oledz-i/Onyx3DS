@@ -10,6 +10,7 @@
 
 #include "Emu/AudioOutput.h"
 #include "Emu/D3D12Presenter.h"
+#include "Emu/GlHost.h"
 #include "Emu/InputManager.h"
 #include "Emu/VulkanHost.h"
 #include "onyx/achievements.h"
@@ -131,6 +132,7 @@ private:
     D3D12Presenter presenter_;
     DozenDriver dozen_;
     std::unique_ptr<VulkanHost> vulkan_;
+    std::unique_ptr<GlHost> gl_;
     AudioOutput audio_;
     InputManager input_;
     Achievements* ra_ = nullptr;
@@ -144,8 +146,12 @@ private:
     std::atomic<bool> crashed_in_gpu_{false};
     // Vulkan (Dozen) came up at startup. Without it only the software renderer runs.
     bool vulkan_ok_ = false;
+    // Mesa's OpenGL on D3D12 made a working context at startup.
+    bool gl_ok_ = false;
     // This game uses Azahar's software renderer: frames arrive as CPU pixels.
     std::atomic<bool> software_{true};
+    // This game uses the OpenGL hardware renderer (else, when not software, Vulkan).
+    std::atomic<bool> use_gl_{false};
     int frames_since_drain_ = 0;
     // Frame rate lock (keys::kFrameLock): 60, or 30 = show every 2nd frame at an
     // even pace while the game keeps running at full speed.

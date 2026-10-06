@@ -31,9 +31,9 @@ TEST_CASE("Profiles own their keys; Custom lets global values through") {
     CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kResolution) == "5");
 }
 
-TEST_CASE("Per-game overrides win, but never the renderer") {
+TEST_CASE("Per-game overrides win, but never an unknown renderer") {
     Settings s = Settings::Defaults(ConsoleModel::SeriesS);
-    s.per_game["0004000000030800"] = {{keys::kResolution, "3"}, {keys::kGraphicsApi, "OpenGL"}};
+    s.per_game["0004000000030800"] = {{keys::kResolution, "3"}, {keys::kGraphicsApi, "Direct3D"}};
     const auto o = s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000030800");
     CHECK(o.at(keys::kResolution) == "3");
     CHECK(o.at(keys::kGraphicsApi) == "Software");
@@ -145,11 +145,28 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
 
     s.version = 1;
     const Settings back = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
-    CHECK(back.version == 2);
+    CHECK(back.version == 3);
     CHECK(back.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 
+    // v2 hardware users move to OpenGL once; after that Vulkan stays a choice.
     Settings v2 = Settings::Defaults(ConsoleModel::SeriesS);
+    v2.version = 2;
     v2.core[keys::kGraphicsApi] = "Vulkan";
-    const Settings kept = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
+    v2.per_game["0004000000055D00"][keys::kGraphicsApi] = "Vulkan";
+    const Settings moved = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
+    CHECK(moved.version == 3);
+    CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "OpenGL");
+    CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000055D00").at(keys::kGraphicsApi) ==
+          "OpenGL");
+
+    Settings v3 = Settings::Defaults(ConsoleModel::SeriesS);
+    v3.core[keys::kGraphicsApi] = "Vulkan";
+    const Settings kept = Settings::FromJson(v3.ToJson(), ConsoleModel::SeriesS);
     CHECK(kept.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
+
+    Settings gl = Settings::Defaults(ConsoleModel::SeriesS);
+    gl.core[keys::kGraphicsApi] = "OpenGL";
+    CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "OpenGL");
+    gl.core[keys::kGraphicsApi] = "Direct3D";
+    CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 }

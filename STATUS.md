@@ -94,6 +94,16 @@
   CreateCommittedResource + release per use, and logs a 5 s summary of every GPU
   memory call (count, total and max time) plus fan conversions, to test whether
   kernel memory mapping lines up with the stalls.
+- Build #79: OpenGL hardware renderer. Mesa GL-on-D3D12 for UWP (SternXD/mesa-uwp
+  26.1.3 + three patches, prebuilt archive from danprice142/Azahar-UWP, vendored in
+  vendor/mesa-gl with licences) loaded with LoadPackagedLibrary. GlHost makes a
+  window-less WGL context on the emulation thread (Mesa then uses a 1x1 offscreen
+  framebuffer, never a CoreWindow swap chain), gives the core an RGBA8 FBO, and reads
+  frames back through a 3-slot PBO ring one frame behind, flipped by the presenter.
+  A guarded startup probe decides availability; OpenGL falls back to Vulkan, then
+  Software. Settings v3 moves Vulkan users to OpenGL once. azahar/0039 carries his
+  renderer_opengl fixes (vendor detection, no-binary shader cache, single-context
+  shader load, opacity skip). Core built with ENABLE_OPENGL=ON.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

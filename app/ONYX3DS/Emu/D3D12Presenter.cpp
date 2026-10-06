@@ -406,9 +406,9 @@ void D3D12Presenter::AbortWrite(int slot_index) {
 }
 
 bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t height,
-                                  size_t pitch, bool rgba) {
+                                  size_t pitch, bool rgba, bool flip_y) {
     if (!data || width == 0 || height == 0 || !device_) return false;
-    Mirror(data, width, height, pitch, rgba);
+    Mirror(data, width, height, pitch, rgba, flip_y);
     cpu_w_ = width;
     cpu_h_ = height;
     if (cpu_view_.load()) {
@@ -479,7 +479,8 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         // XRGB8888 (bytes B,G,R,X) -> RGBA8 with opaque alpha.
         const auto* src = static_cast<const uint8_t*>(data);
         for (uint32_t y = 0; y < height; ++y) {
-            const uint32_t* in = reinterpret_cast<const uint32_t*>(src + y * pitch);
+            const uint32_t* in =
+                reinterpret_cast<const uint32_t*>(src + (flip_y ? height - 1 - y : y) * pitch);
             uint32_t* out = reinterpret_cast<uint32_t*>(upload_mapped_ + fp.Offset +
                                                         static_cast<size_t>(y) * fp.Footprint.RowPitch);
             for (uint32_t x = 0; x < width; ++x) {
@@ -535,12 +536,13 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
 }
 
 void D3D12Presenter::Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch,
-                            bool rgba) {
+                            bool rgba, bool flip_y) {
     std::lock_guard lock(mirror_mutex_);
     mirror_.resize(static_cast<size_t>(width) * height * 4);
     const auto* src = static_cast<const uint8_t*>(data);
     for (uint32_t y = 0; y < height; ++y) {
-        const uint32_t* in = reinterpret_cast<const uint32_t*>(src + y * pitch);
+        const uint32_t* in =
+            reinterpret_cast<const uint32_t*>(src + (flip_y ? height - 1 - y : y) * pitch);
         uint32_t* out = reinterpret_cast<uint32_t*>(mirror_.data() + static_cast<size_t>(y) * width * 4);
         if (rgba) {
             // Hardware frames read back as R,G,B,A bytes: swap to B,G,R and make opaque

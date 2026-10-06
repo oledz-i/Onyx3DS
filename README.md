@@ -167,6 +167,7 @@ ONYX stands on the work of these projects:
 - [Azahar](https://github.com/azahar-emu/azahar): the 3DS emulator core (GPL-3.0-or-later), itself continuing Citra
 - [dynarmic](https://github.com/azahar-emu/dynarmic): ARM dynamic recompiler
 - [Mesa / Dozen](https://gitlab.freedesktop.org/mesa/mesa): Vulkan on Direct3D 12 (MIT)
+- [SternXD/mesa-uwp](https://github.com/SternXD/mesa-uwp): Mesa's OpenGL on Direct3D 12 for UWP (MIT); the prebuilt runtime in [`vendor/mesa-gl`](vendor/mesa-gl) and the OpenGL renderer fixes in `patches/azahar` come from [danprice142's Azahar-UWP](https://github.com/danprice142/Azahar-UWP) (GPL-2.0-or-later)
 - [rcheevos](https://github.com/RetroAchievements/rcheevos): RetroAchievements client (MIT)
 - [SteamGridDB](https://www.steamgriddb.com): box art
 - [nlohmann/json](https://github.com/nlohmann/json) and [doctest](https://github.com/doctest/doctest) (MIT)

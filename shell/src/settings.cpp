@@ -133,9 +133,10 @@ CoreOptions Settings::EffectiveCoreOptions(ConsoleModel model,
     }
     if (auto it = per_game.find(title_id_hex); it != per_game.end())
         for (const auto& [k, v] : it->second) out[k] = v;
-    // Never let a saved value pick a renderer the console cannot run.
-    // Only the two renderers the Xbox build has: Vulkan (via Dozen) or Software.
-    if (out[keys::kGraphicsApi] != "Vulkan") out[keys::kGraphicsApi] = "Software";
+    // Never let a saved value pick a renderer the console cannot run. The Xbox
+    // build has OpenGL (Mesa on D3D12), Vulkan (Dozen) and Software.
+    const std::string& api = out[keys::kGraphicsApi];
+    if (api != "OpenGL" && api != "Vulkan") out[keys::kGraphicsApi] = "Software";
     out[keys::kUseLibretroSavePath] = "LibRetro Default";
     return out;
 }
@@ -312,6 +313,16 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         s.core[keys::kGraphicsApi] = "Software";
         for (auto& [title, opts] : s.per_game) opts.erase(keys::kGraphicsApi);
         s.version = 2;
+    }
+    // v3: OpenGL became the main hardware renderer. Move hardware users onto it
+    // once; Vulkan stays selectable.
+    if (s.version < 3) {
+        if (s.core[keys::kGraphicsApi] == "Vulkan") s.core[keys::kGraphicsApi] = "OpenGL";
+        for (auto& [title, opts] : s.per_game) {
+            auto it = opts.find(keys::kGraphicsApi);
+            if (it != opts.end() && it->second == "Vulkan") it->second = "OpenGL";
+        }
+        s.version = 3;
     }
     return s;
 }

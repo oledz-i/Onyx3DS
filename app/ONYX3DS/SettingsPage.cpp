@@ -104,8 +104,10 @@ std::vector<Curated> CuratedOptions() {
          {{"English", "English"}, {"Japanese", "Japanese"}, {"French", "French"}, {"Spanish", "Spanish"},
           {"German", "German"}, {"Italian", "Italian"}, {"Dutch", "Dutch"}}},
         {keys::kGraphicsApi, "Renderer",
-         "Software always works but is slow. Hardware (Vulkan on D3D12) is fast but experimental on Xbox.",
-         {{"Software", "Software (safe)"}, {"Vulkan", "Hardware (experimental)"}}},
+         "Software always works but is slow. Hardware OpenGL is the fast one to try first; "
+         "Hardware Vulkan is the older experimental path.",
+         {{"Software", "Software (safe)"}, {"OpenGL", "Hardware (OpenGL)"},
+          {"Vulkan", "Hardware (Vulkan, experimental)"}}},
         {keys::kCpuJit, "CPU JIT",
          "Off uses the interpreter: much slower, but a fallback if the JIT crashes.",
          {{"enabled", "On (fast)"}, {"disabled", "Off (interpreter)"}}},
@@ -229,8 +231,11 @@ void SettingsPage::ApplyPageTheme() {
     MarkHost().Child(kit::OnyxMark(68));
     ChipHost().Children().Clear();
     ChipHost().Children().Append(kit::Chip(ConsoleModelName(Svc().Model()), kit::glyph::Gamepad));
-    const bool hw = Cfg().EffectiveCoreOptions(Svc().Model(), "")[keys::kGraphicsApi] == "Vulkan";
-    ChipHost().Children().Append(kit::Chip(hw ? "Hardware renderer" : "Software renderer", kit::glyph::Speed));
+    const std::string api = Cfg().EffectiveCoreOptions(Svc().Model(), "")[keys::kGraphicsApi];
+    ChipHost().Children().Append(kit::Chip(api == "OpenGL"   ? "Hardware renderer (OpenGL)"
+                                           : api == "Vulkan" ? "Hardware renderer (Vulkan)"
+                                                             : "Software renderer",
+                                           kit::glyph::Speed));
     {
         const auto v = winrt::Windows::ApplicationModel::Package::Current().Id().Version();
         ChipHost().Children().Append(kit::Chip("v" + std::to_string(v.Major) + "." + std::to_string(v.Minor) +
@@ -883,13 +888,15 @@ void SettingsPage::BuildAbout() {
         Note(stamp);
     }
     Note("A Nintendo 3DS emulator frontend for Xbox Series X|S Dev Mode, running the Azahar emulator core "
-         "with Vulkan translated to DirectX 12 by Mesa's Dozen driver.");
+         "with OpenGL or Vulkan translated to DirectX 12 by Mesa.");
     Note("Bring your own games: dump cartridges and system files from a 3DS you own. ONYX 3DS does not "
          "include or download any games, firmware or keys.");
     Add(kit::SectionHeader("Credits & licences"));
     for (const char* line : {
              "Azahar emulator (GPLv3+) - azahar-emu.org, built on Citra",
              "Mesa 3D / Dozen Vulkan-on-D3D12 driver (MIT)",
+             "Mesa OpenGL-on-D3D12 for UWP: SternXD/mesa-uwp (MIT); build and OpenGL fixes from "
+             "danprice142's Azahar-UWP (GPLv2+)",
              "rcheevos by RetroAchievements (MIT)",
              "nlohmann/json (MIT), doctest (MIT)",
              "DirectX Shader Compiler DXIL.dll (Microsoft redistributable)",

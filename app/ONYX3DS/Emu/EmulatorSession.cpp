@@ -142,15 +142,54 @@ bool EmulatorSession::Initialize(std::string& error) {
         }
     }
     if (!vulkan_ok_) {
-        probe_.notes.push_back("Hardware renderer unavailable: " + vk_error);
-        ONYX_WARN("Hardware renderer unavailable (%s); software rendering only", vk_error.c_str());
+        probe_.notes.push_back("Vulkan renderer unavailable: " + vk_error);
+        ONYX_WARN("Vulkan renderer unavailable (%s)", vk_error.c_str());
     }
+    // OpenGL through Mesa's D3D12 driver. Prove a context can be made, on a
+    // thread of its own: a thread with a window would make Mesa try to present
+    // into it, and contexts here are always window-less.
+    {
+        struct Probe {
+            GlHost* gl;
+            std::string error;
+            bool ok = false;
+        } probe{nullptr, {}, false};
+        auto gl = std::make_unique<GlHost>(presenter_);
+        probe.gl = gl.get();
+        GuardedCrash crash{};
+        bool survived = true;
+        std::thread([&] {
+            InstallThreadCrashHooks();
+            // A driver crash here must only cost the OpenGL renderer, not the app.
+            survived = RunGuarded(
+                [](void* ctx) {
+                    auto* p = static_cast<Probe*>(ctx);
+                    p->ok = p->gl->CreateContext(400, 480, false, false, p->error);
+                    p->gl->DestroyContext();
+                },
+                &probe, &crash);
+        }).join();
+        std::string gl_error = probe.error;
+        if (!survived) {
+            gl_error = std::string("the driver crashed while starting (") + crash.what + " at " +
+                       crash.where + ")";
+            gl.release(); // its state is undefined after the crash; leak it, never touch it
+        }
+        if (survived && probe.ok) {
+            gl_ = std::move(gl);
+            gl_ok_ = true;
+        } else {
+            probe_.notes.push_back("OpenGL renderer unavailable: " + gl_error);
+            ONYX_WARN("OpenGL renderer unavailable (%s)", gl_error.c_str());
+        }
+    }
+    if (!vulkan_ok_ && !gl_ok_) ONYX_WARN("No hardware renderer; software rendering only");
     ready_ = true;
     return true;
 }
 
 bool EmulatorSession::UsingCpuFrames() const {
-    return software_.load() || (vulkan_ && vulkan_->UsingReadback());
+    return software_.load() || use_gl_.load() || (vulkan_ && vulkan_->UsingReadback());
 }
 
 void EmulatorSession::SetEvents(SessionEvents events) {
@@ -209,10 +248,16 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         std::lock_guard lock(options_mutex_);
         options_ = settings.EffectiveCoreOptions(model, game.TitleIdHex());
         catalog_ = {};
-        const bool want_hw = options_[keys::kGraphicsApi] == "Vulkan";
-        if (want_hw && !vulkan_ok_)
-            ONYX_WARN("Hardware renderer requested but unavailable; using software");
-        software_ = !(want_hw && vulkan_ok_);
+        // OpenGL falls back to Vulkan and Vulkan to OpenGL before software.
+        const std::string want = options_[keys::kGraphicsApi];
+        std::string api = "Software";
+        if (want == "OpenGL") api = gl_ok_ ? "OpenGL" : vulkan_ok_ ? "Vulkan" : "Software";
+        else if (want == "Vulkan") api = vulkan_ok_ ? "Vulkan" : gl_ok_ ? "OpenGL" : "Software";
+        if (api != want && want != "Software")
+            ONYX_WARN("%s renderer requested but unavailable; using %s", want.c_str(), api.c_str());
+        options_[keys::kGraphicsApi] = api;
+        use_gl_ = api == "OpenGL";
+        software_ = api == "Software";
         if (software_) {
             options_[keys::kGraphicsApi] = "Software";
             // The software renderer draws at native 3DS size whatever the scale,
@@ -240,7 +285,8 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
             ONYX_INFO("Custom textures: %s", has_pack ? "pack found, on" : "no pack for this game, off");
         }
         UpdateFrameLockLocked();
-        ONYX_INFO("Renderer: %s, CPU: %s, frame rate lock %d", software_ ? "software" : "hardware (Vulkan)",
+        ONYX_INFO("Renderer: %s, CPU: %s, frame rate lock %d",
+                  software_ ? "software" : use_gl_ ? "hardware (OpenGL)" : "hardware (Vulkan)",
                   options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT", frame_lock_.load());
     }
     UpdateFolders(settings.folders);
@@ -437,15 +483,19 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     info.path = rom_path.c_str();
     bool loaded = retro_load_game(&info);
     std::string err;
+    retro_system_av_info av{};
+    if (loaded) retro_get_system_av_info(&av);
     if (!loaded) {
         fail(core_reason("The emulator could not open this game. Is it a decrypted dump?"));
     } else if (!software_ && !hw_render_set_) {
-        fail("The emulator did not request Vulkan rendering");
-    } else if (!software_ && !vulkan_->CreateDevice(err)) {
+        fail(use_gl_ ? "The emulator did not request OpenGL rendering"
+                     : "The emulator did not request Vulkan rendering");
+    } else if (!software_ && !use_gl_ && !vulkan_->CreateDevice(err)) {
         fail(err);
+    } else if (use_gl_ && !gl_->CreateContext(av.geometry.max_width, av.geometry.max_height,
+                                              hw_render_.depth, hw_render_.stencil, err)) {
+        fail("The OpenGL renderer could not start: " + err);
     } else {
-        retro_system_av_info av{};
-        retro_get_system_av_info(&av);
         audio_.Start(av.timing.sample_rate > 0 ? static_cast<uint32_t>(av.timing.sample_rate)
                                                : kCoreSampleRate);
         // Hardware: context_reset is where Azahar boots the game. Software:
@@ -460,7 +510,8 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     if (!fail_reason.empty()) {
         LogGpuRemovedReason();
         if (loaded) retro_unload_game();
-        if (vulkan_ && !software_) vulkan_->DestroyDevice();
+        if (vulkan_ && !software_ && !use_gl_) vulkan_->DestroyDevice();
+        if (gl_ && use_gl_) gl_->DestroyContext();
         audio_.Stop();
         state_ = SessionState::Failed;
         std::function<void(const std::string&)> stopped;
@@ -574,7 +625,8 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     if (ra_) ra_->UnloadGame();
     retro_unload_game();
     if (!software_ && hw_render_.context_destroy) hw_render_.context_destroy();
-    if (vulkan_ && !software_) vulkan_->DestroyDevice();
+    if (vulkan_ && !software_ && !use_gl_) vulkan_->DestroyDevice();
+    if (gl_ && use_gl_) gl_->DestroyContext();
     audio_.Stop();
     presenter_.SetPaused(false);
     state_ = SessionState::Idle;
@@ -680,7 +732,7 @@ void EmulatorSession::ApplyCoreOptions(const CoreOptions& options) {
     std::lock_guard lock(options_mutex_);
     for (const auto& [k, v] : options) options_[k] = v;
     // The renderer cannot change while a game runs.
-    options_[keys::kGraphicsApi] = software_ ? "Software" : "Vulkan";
+    options_[keys::kGraphicsApi] = software_ ? "Software" : use_gl_ ? "OpenGL" : "Vulkan";
     if (software_) options_[keys::kResolution] = "1";
     if (!custom_textures_allowed_) options_[keys::kCustomTextures] = "disabled";
     UpdateFrameLockLocked();
@@ -803,11 +855,12 @@ void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned he
                       static_cast<unsigned long long>(s_null));
         return;
     }
-    if (data == RETRO_HW_FRAME_BUFFER_VALID && vulkan_) {
+    if (data == RETRO_HW_FRAME_BUFFER_VALID && (use_gl_ ? gl_ != nullptr : vulkan_ != nullptr)) {
         // Frame rate lock 30: show every 2nd frame (the read back and display of a
         // frame are skipped, not its emulation), for an even 30 fps cadence.
         if (frame_lock_.load() == 30 && (hw_frames_++ & 1)) return;
-        vulkan_->OnFrame(width, height);
+        if (use_gl_) gl_->OnFrame(width, height);
+        else vulkan_->OnFrame(width, height);
     }
     // nullptr = duplicate frame: the presenter keeps showing the last one.
 }
@@ -945,18 +998,29 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
         return *static_cast<const retro_pixel_format*>(data) == RETRO_PIXEL_FORMAT_XRGB8888;
     case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
-        *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_VULKAN;
+        *static_cast<unsigned*>(data) = use_gl_ ? RETRO_HW_CONTEXT_OPENGL_CORE : RETRO_HW_CONTEXT_VULKAN;
         return true;
     case RETRO_ENVIRONMENT_SET_HW_RENDER: {
         auto* cb = static_cast<retro_hw_render_callback*>(data);
-        if (software_ || !vulkan_) return false;
+        if (software_) return false;
+        if (use_gl_) {
+            if (!gl_ || (cb->context_type != RETRO_HW_CONTEXT_OPENGL_CORE &&
+                         cb->context_type != RETRO_HW_CONTEXT_OPENGL))
+                return false;
+            cb->get_current_framebuffer = &GlHost::GetCurrentFramebuffer;
+            cb->get_proc_address = &GlHost::GetProcAddress;
+            hw_render_ = *cb;
+            hw_render_set_ = true;
+            return true;
+        }
+        if (!vulkan_) return false;
         if (cb->context_type != RETRO_HW_CONTEXT_VULKAN) return false; // only Vulkan on Xbox
         hw_render_ = *cb;
         hw_render_set_ = true;
         return true;
     }
     case RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE:
-        if (!vulkan_) return false;
+        if (!vulkan_ || use_gl_) return false;
         vulkan_->SetNegotiationInterface(
             static_cast<const retro_hw_render_context_negotiation_interface_vulkan*>(data));
         return true;
@@ -969,7 +1033,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         return false;
     }
     case RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE:
-        if (!vulkan_ || !vulkan_->HasDevice()) return false;
+        if (use_gl_ || !vulkan_ || !vulkan_->HasDevice()) return false;
         *static_cast<const retro_hw_render_interface**>(data) =
             reinterpret_cast<const retro_hw_render_interface*>(vulkan_->Interface());
         return true;
@@ -1066,8 +1130,21 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
     case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
     case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
+        return true;
     case RETRO_ENVIRONMENT_SET_GEOMETRY:
+        // The OpenGL output framebuffer must hold the new size before the core draws.
+        if (use_gl_ && gl_ && gl_->HasContext() && data) {
+            const auto* g = static_cast<const retro_game_geometry*>(data);
+            gl_->EnsureSize(g->base_width, g->base_height);
+        }
+        return true;
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
+        if (use_gl_ && gl_ && gl_->HasContext() && data) {
+            const auto* av = static_cast<const retro_system_av_info*>(data);
+            gl_->EnsureSize(std::max(av->geometry.max_width, av->geometry.base_width),
+                            std::max(av->geometry.max_height, av->geometry.base_height));
+        }
+        return true;
     case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
         return true;
     // Not provided on Xbox: the core falls back on its own.

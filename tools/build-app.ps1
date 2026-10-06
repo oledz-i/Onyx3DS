@@ -28,6 +28,22 @@ foreach ($d in "vulkan_dzn.dll", "dxil.dll") {
     else { Write-Warning "$d not found in deps\bin; graphics will not work in this package" }
 }
 
+# OpenGL on D3D12 (Mesa, UWP build) for the OpenGL hardware renderer: see vendor\mesa-gl.
+$glZip = Join-Path $Root "vendor\mesa-gl\mesa-uwp-26.1.3.zip"
+$glTmp = Join-Path $Root "out\mesa-gl"
+if (Test-Path $glZip) {
+    $expected = "AA206F0547291254AE986C723E62A68B1CAC2CBDAD08C94DEC593A3640A0BF43"
+    $actual = (Get-FileHash $glZip -Algorithm SHA256).Hash
+    if ($actual -ne $expected) { throw "mesa-gl archive hash mismatch: $actual" }
+    if (Test-Path $glTmp) { Remove-Item $glTmp -Recurse -Force }
+    Expand-Archive -Path $glZip -DestinationPath $glTmp -Force
+    foreach ($d in "opengl32.dll", "libgallium_wgl.dll", "z-1.dll") {
+        Copy-Item (Join-Path $glTmp "26.1.3\bin\$d") (Join-Path $Root "app\ONYX3DS\$d") -Force
+    }
+} else {
+    Write-Warning "vendor\mesa-gl archive missing; the OpenGL renderer will not be available"
+}
+
 Write-Step "Building ONYX 3DS ($Configuration|x64)"
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "out") | Out-Null
 Invoke-Checked msbuild $proj /m /restore /p:Configuration=$Configuration /p:Platform=x64 `

@@ -134,6 +134,7 @@
     <ClInclude Include="Emu\D3D12Presenter.h" />
     <ClInclude Include="Emu\EmulatorSession.h" />
     <ClInclude Include="Emu\InputManager.h" />
+    <ClInclude Include="Emu\GlHost.h" />
     <ClInclude Include="Emu\VulkanHost.h" />
     <ClInclude Include="Platform\CrashHandler.h" />
     <ClInclude Include="Platform\Profiler.h" />
@@ -193,6 +194,7 @@
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
     <ClCompile Include="Emu\AudioOutput.cpp" />
     <ClCompile Include="Emu\D3D12Presenter.cpp" />
+    <ClCompile Include="Emu\GlHost.cpp" />
     <ClCompile Include="Emu\EmulatorSession.cpp" />
     <ClCompile Include="Emu\InputManager.cpp" />
     <ClCompile Include="Emu\VulkanHost.cpp" />
@@ -251,6 +253,16 @@
       <DeploymentContent>true</DeploymentContent>
     </None>
     <None Include="dxil.dll" Condition="Exists('dxil.dll')">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
+    <!-- OpenGL on D3D12 (vendor\mesa-gl), for the OpenGL hardware renderer. -->
+    <None Include="opengl32.dll" Condition="Exists('opengl32.dll')">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
+    <None Include="libgallium_wgl.dll" Condition="Exists('libgallium_wgl.dll')">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
+    <None Include="z-1.dll" Condition="Exists('z-1.dll')">
       <DeploymentContent>true</DeploymentContent>
     </None>
   </ItemGroup>
