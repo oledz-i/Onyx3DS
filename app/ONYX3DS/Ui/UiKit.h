@@ -34,7 +34,25 @@ wuxc::TextBox Field(const std::string& value, const std::string& placeholder,
 // Label + one-line help on the left, control on the right.
 wux::UIElement SettingRow(const std::string& label, const std::string& help,
                           wux::UIElement const& control);
-wuxc::TextBlock SectionHeader(const std::string& title);
+wux::UIElement SectionHeader(const std::string& title); // Tag "hdr"
+
+// Small rounded pill, e.g. "Series S" or "Build 6ac44363".
+wuxc::Border Chip(const std::string& text, const wchar_t* glyph = nullptr, bool accent = false);
+// Controller button hint: an Xbox-coloured round button with its letter, then a label.
+// `button` is "A", "B", "X", "Y", "LB", "RB", "LB/RB", "View" or "Menu".
+wux::UIElement ButtonHint(const std::string& button, const std::string& label,
+                          const std::string& text_color_hex = {});
+// A row of button hints.
+wux::UIElement HintBar(const std::vector<std::pair<std::string, std::string>>& hints,
+                       const std::string& text_color_hex = {});
+// The ONYX mark (rounded diamond with the two 3DS screens), drawn with shapes.
+wux::UIElement OnyxMark(double size);
+// Fades an element in, optionally sliding it by (dx, dy) to its place. Elements that
+// use the Translation/Scale properties must pass dx = dy = 0 (opacity only).
+void Entrance(wux::UIElement const& e, double dx = 0, double dy = 0, int delay_ms = 0,
+              int duration_ms = 260);
+// Hex colour with an alpha byte ("#RRGGBB" + alpha -> "#RRGGBBAA").
+std::string WithAlpha(const std::string& hex, unsigned alpha);
 
 // Brief notification in the bottom-right of `host` (a Panel on the page).
 void ShowToast(wuxc::Panel const& host, const std::string& text, const wchar_t* glyph = nullptr);

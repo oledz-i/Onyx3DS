@@ -12,18 +12,29 @@
         <Image x:Name="FarLayer" Stretch="UniformToFill" Margin="-80" IsHitTestVisible="False" />
         <Image x:Name="NearLayer" Stretch="UniformToFill" Margin="-120" IsHitTestVisible="False" />
         <Grid x:Name="ShadowReceiver" />
+        <!-- Slow floating motes of light; built and animated in MainPage.cpp. -->
+        <Canvas x:Name="Sparkles" IsHitTestVisible="False" />
 
         <Grid x:Name="ContentArea" Margin="96,36,96,236">
             <Grid.RowDefinitions>
-                <RowDefinition Height="64" />
+                <RowDefinition Height="84" />
                 <RowDefinition Height="*" />
                 <RowDefinition Height="36" />
             </Grid.RowDefinitions>
             <Grid x:Name="Header">
-                <TextBlock x:Name="TitleText" Text="ONYX 3DS" FontSize="34" FontWeight="SemiBold"
-                           VerticalAlignment="Center" />
-                <TextBlock x:Name="InfoText" FontSize="24" HorizontalAlignment="Right"
-                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="1100" />
+                <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                    <Border x:Name="MarkHost" VerticalAlignment="Center" />
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock x:Name="TitleText" Text="ONYX 3DS" FontSize="34" FontWeight="SemiBold" />
+                        <TextBlock x:Name="GreetingText" FontSize="18" />
+                    </StackPanel>
+                </StackPanel>
+                <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" MaxWidth="1000">
+                    <TextBlock x:Name="SelectedText" FontSize="28" FontWeight="SemiBold"
+                               HorizontalAlignment="Right" TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="InfoText" FontSize="18" HorizontalAlignment="Right"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
             </Grid>
             <Grid x:Name="ChannelGrid" Grid.Row="1" XYFocusKeyboardNavigation="Enabled" />
             <StackPanel x:Name="PageDots" Grid.Row="2" Orientation="Horizontal" Spacing="14"
@@ -42,7 +53,9 @@
             <Grid x:Name="LeftButtonHost" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="96,0,0,30" />
             <Grid x:Name="RightButtonHost" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,96,30" />
             <TextBlock x:Name="HintText" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                       Margin="0,0,0,12" Opacity="0.75" />
+                       Margin="0,0,0,12" Opacity="0.75" Visibility="Collapsed" />
+            <Border x:Name="HintHost" HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                    Margin="0,0,0,8" Opacity="0.9" />
         </Grid>
 
         <StackPanel x:Name="ToastHost" HorizontalAlignment="Right" VerticalAlignment="Top"

@@ -88,6 +88,7 @@ struct VulkanHost::Fn {
     PFN_vkCreateFence CreateFence = nullptr;
     PFN_vkDestroyFence DestroyFence = nullptr;
     PFN_vkWaitForFences WaitForFences = nullptr;
+    PFN_vkGetFenceStatus GetFenceStatus = nullptr;
     PFN_vkResetFences ResetFences = nullptr;
     PFN_vkCreateImage CreateImage = nullptr;
     PFN_vkDestroyImage DestroyImage = nullptr;
@@ -428,6 +429,7 @@ bool VulkanHost::LoadDeviceFunctions() {
     LOAD_D(CreateFence);
     LOAD_D(DestroyFence);
     LOAD_D(WaitForFences);
+    LOAD_D(GetFenceStatus);
     LOAD_D(ResetFences);
     LOAD_D(CreateImage);
     LOAD_D(DestroyImage);
@@ -750,10 +752,15 @@ bool VulkanHost::EnsureReadback(Readback& rb, VkDeviceSize size) {
     return true;
 }
 
-void VulkanHost::ShowReadback(uint32_t index) {
+void VulkanHost::ShowReadback(uint32_t index, bool wait) {
     auto& f = *fn_;
     Readback& rb = readbacks_[index];
     if (!rb.ready) return;
+    // Not finished on the GPU yet and the caller can come back later: don't block
+    // the emulation on it (it is shown next frame, before its buffer is reused).
+    if (!wait && fence_pending_[index] && f.GetFenceStatus &&
+        f.GetFenceStatus(device_, fences_[index]) != VK_SUCCESS)
+        return;
     rb.ready = false;
     if (fence_pending_[index]) {
         f.WaitForFences(device_, 1, &fences_[index], VK_TRUE, UINT64_MAX);
@@ -902,9 +909,9 @@ void VulkanHost::OnFrameReadback(unsigned width, unsigned height) {
               image_.create_info.format == VK_FORMAT_B8G8R8A8_SRGB;
     rb.ready = true;
     sync_index_ = (sync_index_ + 1) % kSyncFrames;
-    // Show the previous frame now (its copy has most likely finished while this
-    // frame was emulated), keeping one frame of latency instead of a GPU stall.
-    ShowReadback(sync_index_);
+    // Show the previous frame now if the GPU is done with it (it most likely is),
+    // keeping one frame of latency instead of a GPU stall.
+    ShowReadback(sync_index_, false);
 }
 
 void VulkanHost::DestroyDevice() {

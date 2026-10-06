@@ -1,0 +1,140 @@
+From bc566c2239fe8dba5ce91861df640c7a571f1f1f Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 21:05:28 -0400
+Subject: [PATCH] dzn: a refused pipeline variant skips draws instead of
+ crashing
+
+The Xbox driver refused a variant with E_INVALIDARG; the failure was only
+asserted on, so the NULL state was bound and the app crashed inside D3D12.
+Log the variant key, remember the failure, keep the current state, and skip
+draws when there is no state at all.
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c | 23 +++++++++++++++++------
+ src/microsoft/vulkan/dzn_pipeline.c   | 22 +++++++++++++++++++---
+ 2 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index 0d11982..e287762 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -3334,7 +3334,9 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
+ 
+    ID3D12PipelineState *new_pipeline_state = pipeline->state;
+ 
+-   if (old_pipeline_state != new_pipeline_state) {
++   /* ONYX: no state at all (the driver refused every variant so far): bind
++    * nothing; prepare_draw reports it and the draw is skipped. */
++   if (new_pipeline_state && old_pipeline_state != new_pipeline_state) {
+       ID3D12GraphicsCommandList1_SetPipelineState((dzn_cmd_note(cmdbuf, "SetPipelineState"), cmdbuf->cmdlist), pipeline->state);
+       cmdbuf->state.pipeline = pipeline;
+    }
+@@ -3842,13 +3844,17 @@ dzn_cmd_buffer_triangle_fan_rewrite_index(struct dzn_cmd_buffer *cmdbuf,
+    return VK_SUCCESS;
+ }
+ 
+-static void
++static bool
+ dzn_cmd_buffer_prepare_draw(struct dzn_cmd_buffer *cmdbuf, bool indexed)
+ {
+    if (indexed)
+       dzn_cmd_buffer_update_ibview(cmdbuf);
+ 
+    dzn_cmd_buffer_update_pipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
++   const struct dzn_pipeline *gfx_pipeline =
++      cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
++   if (!gfx_pipeline || !gfx_pipeline->state)
++      return false;
+    dzn_cmd_buffer_update_heaps(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    dzn_cmd_buffer_update_sysvals(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    dzn_cmd_buffer_update_viewports(cmdbuf);
+@@ -3863,6 +3869,7 @@ dzn_cmd_buffer_prepare_draw(struct dzn_cmd_buffer *cmdbuf, bool indexed)
+    /* Reset the dirty states */
+    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty &= DZN_CMD_BINDPOINT_DIRTY_HEAPS;
+    cmdbuf->state.dirty = 0;
++   return true;
+ }
+ 
+ static uint32_t
+@@ -4199,7 +4206,8 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
+       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |=
+          DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+ 
+-      dzn_cmd_buffer_prepare_draw(cmdbuf, indexed);
++      if (!dzn_cmd_buffer_prepare_draw(cmdbuf, indexed))
++         continue;
+ 
+       ID3D12GraphicsCommandList1_ExecuteIndirect((dzn_cmd_note(cmdbuf, "ExecuteIndirect"), cmdbuf->cmdlist), cmdsig,
+                                                  max_draw_count,
+@@ -5420,7 +5428,8 @@ dzn_CmdDraw(VkCommandBuffer commandBuffer,
+          cmdbuf->state.sysvals.gfx.view_index = view;
+          cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |=
+             DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+-         dzn_cmd_buffer_prepare_draw(cmdbuf, true);
++         if (!dzn_cmd_buffer_prepare_draw(cmdbuf, true))
++            continue;
+          ID3D12GraphicsCommandList1_DrawIndexedInstanced((dzn_cmd_note(cmdbuf, "DrawIndexedInstanced"), cmdbuf->cmdlist), vertexCount, instanceCount, 0,
+                                                 firstVertex, firstInstance);
+       }
+@@ -5436,7 +5445,8 @@ dzn_CmdDraw(VkCommandBuffer commandBuffer,
+          cmdbuf->state.sysvals.gfx.view_index = view;
+          cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |=
+             DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+-         dzn_cmd_buffer_prepare_draw(cmdbuf, false);
++         if (!dzn_cmd_buffer_prepare_draw(cmdbuf, false))
++            continue;
+          ID3D12GraphicsCommandList1_DrawInstanced((dzn_cmd_note(cmdbuf, "DrawInstanced"), cmdbuf->cmdlist), vertexCount, instanceCount,
+                                           firstVertex, firstInstance);
+       }
+@@ -5514,7 +5524,8 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
+       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |=
+          DZN_CMD_BINDPOINT_DIRTY_SYSVALS;
+ 
+-      dzn_cmd_buffer_prepare_draw(cmdbuf, true);
++      if (!dzn_cmd_buffer_prepare_draw(cmdbuf, true))
++         continue;
+       ID3D12GraphicsCommandList1_DrawIndexedInstanced((dzn_cmd_note(cmdbuf, "DrawIndexedInstanced"), cmdbuf->cmdlist), indexCount, instanceCount, firstIndex,
+                                             vertexOffset, firstInstance);
+    }
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 63fe064..30b77af 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2340,7 +2340,21 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+       ASSERTED HRESULT hres = DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
+                                                                 &IID_ID3D12PipelineState,
+                                                                 (void**)(&variant->state)));
+-      assert(!FAILED(hres));
++      if (FAILED(hres)) {
++         /* ONYX: the Xbox driver can refuse a variant (E_INVALIDARG seen). A
++          * NULL state was later bound and crashed the app in D3D12. Remember the
++          * failure (so it isn't retried every draw) and keep the state that was
++          * current; with none, the draw is skipped (dzn_cmd_buffer_prepare_draw). */
++         mesa_loge("dzn: pipeline variant refused (0x%08x): strip cut %d, depth bias %d/%.3f/%.3f, "
++                   "stencil cmp %x/%x write %x/%x",
++                   (unsigned)hres, (int)masked_key.ib_strip_cut,
++                   masked_key.depth_bias.constant_factor, masked_key.depth_bias.slope_factor,
++                   masked_key.depth_bias.clamp, masked_key.stencil_test.front.compare_mask,
++                   masked_key.stencil_test.back.compare_mask,
++                   masked_key.stencil_test.front.write_mask,
++                   masked_key.stencil_test.back.write_mask);
++         variant->state = NULL;
++      }
+       /* ONYX: variants are compiled while commands are recorded, so a slow one
+        * stalls the frame. Log what forced each one. */
+       {
+@@ -2366,8 +2380,10 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+       variant = he->data;
+    }
+ 
+-   if (variant->state)
+-      ID3D12PipelineState_AddRef(variant->state);
++   if (!variant->state)
++      return pipeline->base.state; /* refused variant: keep what was current */
++
++   ID3D12PipelineState_AddRef(variant->state);
+ 
+    if (pipeline->base.state)
+       ID3D12PipelineState_Release(pipeline->base.state);
+-- 
+2.43.0
+

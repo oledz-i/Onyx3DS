@@ -166,7 +166,6 @@ UIElement SettingRow(const std::string& label, const std::string& help, UIElemen
     c1.Width(GridLengthHelper::Auto());
     g.ColumnDefinitions().Append(c0);
     g.ColumnDefinitions().Append(c1);
-    g.Margin(Thickness{0, 10, 0, 10});
     StackPanel left;
     left.Spacing(4);
     left.Children().Append(Text(label, 22, true));
@@ -178,13 +177,203 @@ UIElement SettingRow(const std::string& label, const std::string& help, UIElemen
     fe.VerticalAlignment(VerticalAlignment::Center);
     Grid::SetColumn(fe, 1);
     g.Children().Append(control);
+
+    // The row lights up (accent wash + accent edge) while its control has focus, so
+    // it's always clear on the TV which setting the controller is on.
+    Border row;
+    row.CornerRadius(CornerRadius{14, 14, 14, 14});
+    row.Padding(Thickness{18, 12, 18, 12});
+    row.Margin(Thickness{-18, 2, -18, 2});
+    row.BorderThickness(Thickness{3, 0, 0, 0});
+    const auto idle_bg = B("#00000000");
+    const auto idle_edge = B("#00000000");
+    row.Background(idle_bg);
+    row.BorderBrush(idle_edge);
+    row.BackgroundTransition(BrushTransition());
+    row.Child(g);
+    const std::string accent = T().colors.accent;
+    // The handlers take the row from `sender`: capturing it would keep every row alive.
+    row.GotFocus([accent](IInspectable const& sender, RoutedEventArgs const&) {
+        if (auto r = sender.try_as<Border>()) {
+            r.Background(B(WithAlpha(accent, 0x2A)));
+            r.BorderBrush(B(accent));
+        }
+    });
+    row.LostFocus([idle_bg, idle_edge](IInspectable const& sender, RoutedEventArgs const&) {
+        if (auto r = sender.try_as<Border>()) {
+            r.Background(idle_bg);
+            r.BorderBrush(idle_edge);
+        }
+    });
+    return row;
+}
+
+UIElement SectionHeader(const std::string& title) {
+    StackPanel p;
+    p.Orientation(Orientation::Horizontal);
+    p.Spacing(14);
+    p.Margin(Thickness{0, 28, 0, 8});
+    Border bar;
+    bar.Width(6);
+    bar.CornerRadius(CornerRadius{3, 3, 3, 3});
+    bar.Background(B(T().colors.accent));
+    bar.Margin(Thickness{0, 6, 0, 6});
+    p.Children().Append(bar);
+    auto t = Text(title, 30, true);
+    t.VerticalAlignment(VerticalAlignment::Center);
+    p.Children().Append(t);
+    p.Tag(box_value(hstring(L"hdr")));
+    return p;
+}
+
+std::string WithAlpha(const std::string& hex, unsigned alpha) {
+    if (hex.size() < 7) return hex;
+    char a[3];
+    std::snprintf(a, sizeof(a), "%02X", alpha & 0xFF);
+    return hex.substr(0, 7) + a;
+}
+
+Border Chip(const std::string& text, const wchar_t* glyph, bool accent) {
+    StackPanel row;
+    row.Orientation(Orientation::Horizontal);
+    row.Spacing(8);
+    if (glyph) {
+        auto g = Glyph(glyph, 16, accent ? T().colors.accent_text : T().colors.accent);
+        g.VerticalAlignment(VerticalAlignment::Center);
+        row.Children().Append(g);
+    }
+    auto t = Text(text, 16, true, accent ? T().colors.accent_text : T().colors.text);
+    t.TextWrapping(TextWrapping::NoWrap);
+    t.VerticalAlignment(VerticalAlignment::Center);
+    row.Children().Append(t);
+    Border b;
+    b.CornerRadius(CornerRadius{16, 16, 16, 16});
+    b.Padding(Thickness{14, 6, 14, 6});
+    b.Background(B(accent ? T().colors.accent : WithAlpha(T().colors.accent, 0x22)));
+    b.BorderBrush(B(WithAlpha(T().colors.accent, 0x66)));
+    b.BorderThickness(Thickness{1, 1, 1, 1});
+    b.Child(row);
+    return b;
+}
+
+UIElement ButtonHint(const std::string& button, const std::string& label,
+                     const std::string& text_color_hex) {
+    struct Look { const char* name; const char* fill; const char* ink; };
+    static const Look looks[] = {
+        {"A", "#3FAE2A", "#FFFFFF"}, {"B", "#E0383E", "#FFFFFF"},
+        {"X", "#2F7FE0", "#FFFFFF"}, {"Y", "#F2B807", "#1A1A1A"},
+    };
+    const Look* look = nullptr;
+    for (const auto& l : looks)
+        if (button == l.name) look = &l;
+    StackPanel row;
+    row.Orientation(Orientation::Horizontal);
+    row.Spacing(10);
+    Border key;
+    key.Height(30);
+    key.MinWidth(30);
+    key.CornerRadius(CornerRadius{15, 15, 15, 15});
+    key.Padding(Thickness{look ? 0.0 : 10.0, 0, look ? 0.0 : 10.0, 0});
+    key.Background(B(look ? look->fill : "#3A3F4AE6"));
+    key.BorderBrush(B("#FFFFFF40"));
+    key.BorderThickness(Thickness{1, 1, 1, 1});
+    auto k = Text(button, look ? 17 : 14, true, look ? look->ink : "#FFFFFF");
+    k.TextWrapping(TextWrapping::NoWrap);
+    k.HorizontalAlignment(HorizontalAlignment::Center);
+    k.VerticalAlignment(VerticalAlignment::Center);
+    key.Child(k);
+    row.Children().Append(key);
+    auto t = Text(label, 18, false, text_color_hex.empty() ? T().colors.text : text_color_hex);
+    t.TextWrapping(TextWrapping::NoWrap);
+    t.VerticalAlignment(VerticalAlignment::Center);
+    row.Children().Append(t);
+    return row;
+}
+
+UIElement HintBar(const std::vector<std::pair<std::string, std::string>>& hints,
+                  const std::string& text_color_hex) {
+    StackPanel bar;
+    bar.Orientation(Orientation::Horizontal);
+    bar.Spacing(28);
+    for (const auto& [button, label] : hints)
+        bar.Children().Append(ButtonHint(button, label, text_color_hex));
+    return bar;
+}
+
+UIElement OnyxMark(double size) {
+    using namespace winrt::Windows::UI::Xaml::Shapes;
+    Grid g;
+    g.Width(size);
+    g.Height(size);
+    const double side = size * 0.70;
+    Rectangle diamond;
+    diamond.Width(side);
+    diamond.Height(side);
+    diamond.RadiusX(side * 0.22);
+    diamond.RadiusY(side * 0.22);
+    diamond.Fill(B("#18162A"));
+    diamond.Stroke(B("#9B7BFF"));
+    diamond.StrokeThickness(std::max(2.0, size * 0.06));
+    diamond.RenderTransformOrigin(winrt::Windows::Foundation::Point{0.5, 0.5});
+    RotateTransform rot;
+    rot.Angle(45);
+    diamond.RenderTransform(rot);
+    diamond.HorizontalAlignment(HorizontalAlignment::Center);
+    diamond.VerticalAlignment(VerticalAlignment::Center);
+    g.Children().Append(diamond);
+    auto screen = [&](double w, double h, double y, const char* fill) {
+        Rectangle r;
+        r.Width(w);
+        r.Height(h);
+        r.RadiusX(size * 0.035);
+        r.RadiusY(size * 0.035);
+        r.Fill(B(fill));
+        r.HorizontalAlignment(HorizontalAlignment::Center);
+        r.VerticalAlignment(VerticalAlignment::Center);
+        r.Margin(Thickness{0, y, 0, -y});
+        g.Children().Append(r);
+    };
+    screen(size * 0.36, size * 0.19, -size * 0.13, "#78DCF0");
+    screen(size * 0.27, size * 0.19, size * 0.13, "#C8BEFF");
     return g;
 }
 
-TextBlock SectionHeader(const std::string& title) {
-    auto t = Text(title, 30, true);
-    t.Margin(Thickness{0, 24, 0, 8});
-    return t;
+void Entrance(UIElement const& e, double dx, double dy, int delay_ms, int duration_ms) {
+    using winrt::Windows::Foundation::TimeSpan;
+    const TimeSpan dur{std::chrono::milliseconds(duration_ms)};
+    const TimeSpan delay{std::chrono::milliseconds(delay_ms)};
+    e.Opacity(0);
+    Storyboard sb;
+    DoubleAnimation fade;
+    fade.From(0.0);
+    fade.To(1.0);
+    fade.Duration(DurationHelper::FromTimeSpan(dur));
+    fade.BeginTime(delay);
+    Storyboard::SetTarget(fade, e);
+    Storyboard::SetTargetProperty(fade, L"Opacity");
+    sb.Children().Append(fade);
+    if (dx != 0 || dy != 0) {
+        TranslateTransform tr;
+        tr.X(dx);
+        tr.Y(dy);
+        e.RenderTransform(tr);
+        CubicEase ease;
+        ease.EasingMode(EasingMode::EaseOut);
+        for (int axis = 0; axis < 2; ++axis) {
+            const double from = axis == 0 ? dx : dy;
+            if (from == 0) continue;
+            DoubleAnimation slide;
+            slide.From(from);
+            slide.To(0.0);
+            slide.Duration(DurationHelper::FromTimeSpan(dur));
+            slide.BeginTime(delay);
+            slide.EasingFunction(ease);
+            Storyboard::SetTarget(slide, tr);
+            Storyboard::SetTargetProperty(slide, axis == 0 ? L"X" : L"Y");
+            sb.Children().Append(slide);
+        }
+    }
+    sb.Begin();
 }
 
 void ShowToast(Panel const& host, const std::string& text, const wchar_t* glyph) {

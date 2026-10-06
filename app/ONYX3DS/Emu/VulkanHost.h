@@ -155,7 +155,7 @@ private:
     std::array<Readback, kSyncFrames> readbacks_{};
     std::vector<uint8_t> readback_pixels_;
     bool EnsureReadback(Readback& rb, VkDeviceSize size);
-    void ShowReadback(uint32_t index);
+    void ShowReadback(uint32_t index, bool wait = true);
     void OnFrameReadback(unsigned width, unsigned height);
 };
 

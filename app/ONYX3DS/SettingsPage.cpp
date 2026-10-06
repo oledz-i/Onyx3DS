@@ -38,17 +38,31 @@ struct Section {
     const char* id;
     const char* label;
     const wchar_t* glyph;
+    const char* blurb; // one line under the label, and under the title in the section
 };
 const Section kSections[] = {
-    {"folders", "Folders", kit::glyph::Folder},
-    {"emulation", "Emulation", kit::glyph::Speed},
-    {"controls", "Screen & controls", kit::glyph::Gamepad},
-    {"interface", "Interface & themes", kit::glyph::Palette},
-    {"updates", "Updates & DLC", kit::glyph::Package},
-    {"services", "Online services", kit::glyph::Globe},
-    {"system", "System check", kit::glyph::Info},
-    {"about", "About", kit::glyph::Star},
+    {"folders", "Folders", kit::glyph::Folder, "Your USB drive and where games live"},
+    {"emulation", "Emulation", kit::glyph::Speed, "Renderer, speed and frame rate lock"},
+    {"controls", "Screen & controls", kit::glyph::Gamepad, "Screen layout and your controller"},
+    {"interface", "Interface & themes", kit::glyph::Palette, "Themes, music and the home menu"},
+    {"updates", "Updates & DLC", kit::glyph::Package, "Install game updates and add-ons"},
+    {"services", "Online services", kit::glyph::Globe, "RetroAchievements and cover art"},
+    {"system", "System check", kit::glyph::Info, "How this console runs ONYX"},
+    {"about", "About", kit::glyph::Star, "Version, credits and licences"},
 };
+const Section& FindSection(const std::string& id) {
+    for (const auto& s : kSections)
+        if (id == s.id) return s;
+    return kSections[std::size(kSections) - 1];
+}
+std::string BuildStamp() {
+    const auto* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    char stamp[16];
+    std::snprintf(stamp, sizeof(stamp), "%08x", static_cast<unsigned>(nt->FileHeader.TimeDateStamp));
+    return stamp;
+}
 
 // Curated emulation options with friendly names. Values come from the core
 // when it has announced its catalogue; these lists are the fallback.
@@ -132,13 +146,45 @@ void SettingsPage::InitializeComponent() {
         StackPanel row;
         row.Orientation(Orientation::Horizontal);
         row.Spacing(16);
-        row.Children().Append(kit::Glyph(s.glyph, 24));
-        row.Children().Append(kit::Text(s.label, 24, true));
+        // Glyph in a soft accent tile, then the label with a one-line blurb.
+        Border icon;
+        icon.Width(48);
+        icon.Height(48);
+        icon.CornerRadius(CornerRadius{14, 14, 14, 14});
+        icon.Background(Svc().ThemeBrush(kit::WithAlpha(Svc().CurrentTheme().colors.accent, 0x26)));
+        auto g = kit::Glyph(s.glyph, 22);
+        g.HorizontalAlignment(HorizontalAlignment::Center);
+        g.VerticalAlignment(VerticalAlignment::Center);
+        icon.Child(g);
+        row.Children().Append(icon);
+        StackPanel text;
+        text.VerticalAlignment(VerticalAlignment::Center);
+        text.Children().Append(kit::Text(s.label, 22, true));
+        auto blurb = kit::Text(s.blurb, 15, false, Svc().CurrentTheme().colors.text_muted);
+        blurb.TextWrapping(TextWrapping::NoWrap);
+        blurb.TextTrimming(TextTrimming::CharacterEllipsis);
+        text.Children().Append(blurb);
+        row.Children().Append(text);
         item.Content(row);
         item.Tag(box_value(kit::H(s.id)));
-        item.Padding(Thickness{16, 14, 16, 14});
+        item.Padding(Thickness{12, 10, 12, 10});
+        item.Margin(Thickness{0, 2, 0, 2});
         SectionList().Items().Append(item);
     }
+    // LB / RB step through the sections from anywhere on the page.
+    KeyDown([weak = get_weak()](auto&&, Input::KeyRoutedEventArgs const& e) {
+        auto self = weak.get();
+        if (!self) return;
+        using winrt::Windows::System::VirtualKey;
+        const int delta = e.Key() == VirtualKey::GamepadLeftShoulder    ? -1
+                          : e.Key() == VirtualKey::GamepadRightShoulder ? 1
+                                                                         : 0;
+        if (!delta) return;
+        const int count = static_cast<int>(self->SectionList().Items().Size());
+        const int next = (self->SectionList().SelectedIndex() + delta + count) % count;
+        self->SectionList().SelectedIndex(next);
+        e.Handled(true);
+    });
     SectionList().SelectionChanged([weak = get_weak()](auto&&, auto&&) {
         auto self = weak.get();
         if (!self) return;
@@ -160,7 +206,39 @@ void SettingsPage::ApplyPageTheme() {
     Root().RequestedTheme((0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) < 128 ? ElementTheme::Dark
                                                                              : ElementTheme::Light);
     PageTitle().Foreground(Svc().ThemeBrush(t.colors.text));
+    PageTitle().FontFamily(Svc().ThemeFont(true));
+    PageSubtitle().Foreground(Svc().ThemeBrush(t.colors.text_muted));
+    PageSubtitle().FontFamily(Svc().ThemeFont(false));
+    PageSubtitle().Text(L"Make ONYX yours. Changes save as you go.");
     ContentCard().Background(Svc().ThemeBrush(t.colors.panel));
+    ContentCard().BorderBrush(Svc().ThemeBrush(kit::WithAlpha(t.colors.accent, 0x55)));
+    // A soft vertical scrim keeps text readable over busy theme art.
+    {
+        LinearGradientBrush scrim;
+        GradientStop a, b;
+        a.Color(Svc().ThemeColor(kit::WithAlpha(t.colors.background_bottom, 0x00)));
+        a.Offset(0);
+        b.Color(Svc().ThemeColor(kit::WithAlpha(t.colors.background_bottom, 0xB0)));
+        b.Offset(1);
+        scrim.GradientStops().Append(a);
+        scrim.GradientStops().Append(b);
+        scrim.StartPoint(winrt::Windows::Foundation::Point{0, 0});
+        scrim.EndPoint(winrt::Windows::Foundation::Point{0, 1});
+        Scrim().Fill(scrim);
+    }
+    MarkHost().Child(kit::OnyxMark(68));
+    ChipHost().Children().Clear();
+    ChipHost().Children().Append(kit::Chip(ConsoleModelName(Svc().Model()), kit::glyph::Gamepad));
+    const bool hw = Cfg().EffectiveCoreOptions(Svc().Model(), "")[keys::kGraphicsApi] == "Vulkan";
+    ChipHost().Children().Append(kit::Chip(hw ? "Hardware renderer" : "Software renderer", kit::glyph::Speed));
+    {
+        const auto v = winrt::Windows::ApplicationModel::Package::Current().Id().Version();
+        ChipHost().Children().Append(kit::Chip("v" + std::to_string(v.Major) + "." + std::to_string(v.Minor) +
+                                               "." + std::to_string(v.Build) + " · " + BuildStamp(),
+                                               kit::glyph::Package, true));
+    }
+    HintHost().Child(kit::HintBar({{"A", "Select"}, {"B", "Back"}, {"LB/RB", "Switch section"}},
+                                  t.colors.text));
 }
 
 void SettingsPage::OnNavigatedTo(NavigationEventArgs const& e) {
@@ -213,6 +291,49 @@ void SettingsPage::Show(const std::string& section) {
     else if (section == "services") BuildServices();
     else if (section == "system") BuildSystem();
     else BuildAbout();
+
+    // Section hero: big glyph tile, title and blurb (replaces the builder's own header).
+    auto children = ContentPanel().Children();
+    if (children.Size()) {
+        if (auto first = children.GetAt(0).try_as<FrameworkElement>();
+            first && first.Tag() && unbox_value_or<hstring>(first.Tag(), L"") == L"hdr")
+            children.RemoveAt(0);
+    }
+    const Section& sec = FindSection(section);
+    const Theme& t = Svc().CurrentTheme();
+    StackPanel hero;
+    hero.Orientation(Orientation::Horizontal);
+    hero.Spacing(20);
+    hero.Margin(Thickness{0, 18, 0, 10});
+    Border tile;
+    tile.Width(72);
+    tile.Height(72);
+    tile.CornerRadius(CornerRadius{20, 20, 20, 20});
+    {
+        LinearGradientBrush fill;
+        GradientStop a, b;
+        a.Color(Svc().ThemeColor(t.colors.accent));
+        a.Offset(0);
+        b.Color(Svc().ThemeColor(kit::WithAlpha(t.colors.accent, 0x99)));
+        b.Offset(1);
+        fill.GradientStops().Append(a);
+        fill.GradientStops().Append(b);
+        fill.StartPoint(winrt::Windows::Foundation::Point{0, 0});
+        fill.EndPoint(winrt::Windows::Foundation::Point{1, 1});
+        tile.Background(fill);
+    }
+    auto glyph = kit::Glyph(sec.glyph, 34, t.colors.accent_text);
+    glyph.HorizontalAlignment(HorizontalAlignment::Center);
+    glyph.VerticalAlignment(VerticalAlignment::Center);
+    tile.Child(glyph);
+    hero.Children().Append(tile);
+    StackPanel words;
+    words.VerticalAlignment(VerticalAlignment::Center);
+    words.Children().Append(kit::Text(sec.label, 36, true));
+    words.Children().Append(kit::Text(sec.blurb, 18, false, t.colors.text_muted));
+    hero.Children().Append(words);
+    children.InsertAt(0, hero);
+    kit::Entrance(ContentPanel(), 40, 0, 0, 240);
 }
 
 // ---------------------------------------------------------------------------

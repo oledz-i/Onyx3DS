@@ -65,6 +65,12 @@
   reuse, rarer trace checks), azahar/0034 (bounded vertex copy), no log flushes,
   custom textures only with a pack, frame rate lock, and "Profile stall" stacks
   (proper unwinding) for any frame over 100 ms.
+- Build #73 stall stacks: 96% of stalled-frame samples in VulkanHost::ShowReadback
+  waiting on the previous frame's fence (GPU ~0.5 s late), right after
+  RasterizerCache::RunGarbageCollector -> vmaDestroyImage -> D3D12 kernel call.
+  Next build: azahar/0035 recycles texture images (no create/destroy churn) and skips
+  small draws while their pipeline builds on Dozen; mesa/0018 skips draws for refused
+  pipeline variants (E_INVALIDARG crash); readback shows finished frames without waiting.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

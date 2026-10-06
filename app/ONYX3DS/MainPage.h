@@ -28,6 +28,8 @@ private:
     void ChangePage(int delta);
     void UpdateClock();
     void StartAmbientMotion();
+    void BuildSparkles();
+    void UpdateGreeting();
     void MoveParallax(float nx, float ny);
     void HandleKeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
@@ -40,6 +42,8 @@ private:
     Windows::UI::Xaml::Media::ThemeShadow shadow_{nullptr};
     Windows::UI::Xaml::Media::TranslateTransform far_par_{nullptr};
     Windows::UI::Xaml::Media::TranslateTransform near_par_{nullptr};
+    Windows::UI::Xaml::Media::Animation::Storyboard sparkles_{nullptr};
+    bool animate_entrance_ = true; // fade the tiles in on the next BuildPage
     bool initialised_ = false;
     bool resume_checked_ = false;
     std::string theme_applied_;

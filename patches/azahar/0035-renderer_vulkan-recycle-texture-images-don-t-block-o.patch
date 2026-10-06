@@ -1,0 +1,247 @@
+From 73d2aad8b65c818d4cdeaaeb52650f7097f84f12 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 21:04:31 -0400
+Subject: [PATCH] renderer_vulkan: recycle texture images; don't block on small
+ draws' pipelines on Dozen
+
+The texture cache destroyed images as it collected surfaces and created new
+ones moments later. On Xbox each create/destroy is a kernel call that holds up
+the GPU: logs show the emulation thread stuck ~0.5 s waiting for the frame's
+GPU work every couple of seconds, right after a collection. Freed images now
+go to a recycler (up to 192 MB) and are handed back to the next Create with
+the same parameters.
+
+Small draws (<= 6 vertices) waited for their pipeline to build even with
+async compilation; on Dozen a build takes 0.4-3 s, so each new effect froze
+the game. They are skipped until ready instead.
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         |   7 +-
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 103 +++++++++++++++++-
+ .../renderer_vulkan/vk_texture_runtime.h      |  22 +++-
+ 3 files changed, 127 insertions(+), 5 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 707fcac..b0341b8 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -487,7 +487,12 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+         SetupIndexArray();
+     }
+ 
+-    const bool wait_built = !async_shaders || regs.pipeline.num_vertices <= 6;
++    // Upstream waits for small draws (UI quads) so they never flicker in. On Dozen a
++    // pipeline takes the Xbox driver 0.4-3 s to build, so waiting froze the game each
++    // time a new effect appeared; skip those draws until their pipeline is ready.
++    const bool is_dozen = static_cast<u32>(instance.GetDriverID()) == 23u;
++    const bool wait_built =
++        !async_shaders || (regs.pipeline.num_vertices <= 6 && !is_dozen);
+     if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+         return true;
+     }
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index 73162ab..da33ad3 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -2,6 +2,8 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <list>
++#include <mutex>
+ #include <stdexcept>
+ #include "video_core/renderer_vulkan/vk_texture_runtime.h"
+ 
+@@ -164,6 +166,77 @@ constexpr u64 DOWNLOAD_BUFFER_SIZE = 16_MiB;
+ 
+ } // Anonymous namespace
+ 
++namespace {
++std::mutex g_recycle_mutex;
++std::list<Handle>* g_recycled = nullptr; // oldest first; null while disabled
++u64 g_recycled_bytes = 0;
++constexpr u64 RECYCLE_BUDGET = 192ULL << 20;
++} // Anonymous namespace
++
++void Handle::EnableRecycler(bool enable) {
++    std::list<Handle> drop;
++    {
++        std::scoped_lock lock{g_recycle_mutex};
++        if (enable) {
++            if (!g_recycled) {
++                g_recycled = new std::list<Handle>();
++            }
++            return;
++        }
++        if (!g_recycled) {
++            return;
++        }
++        drop.splice(drop.end(), *g_recycled);
++        delete g_recycled;
++        g_recycled = nullptr;
++        g_recycled_bytes = 0;
++    }
++    for (auto& handle : drop) {
++        handle.Destroy();
++    }
++}
++
++bool Handle::Recycle() {
++    if (!allocation || recycle_key == 0) {
++        return false;
++    }
++    std::list<Handle> evicted;
++    {
++        std::scoped_lock lock{g_recycle_mutex};
++        if (!g_recycled || recycle_bytes > RECYCLE_BUDGET / 4) {
++            return false;
++        }
++        g_recycled_bytes += recycle_bytes;
++        g_recycled->emplace_back(std::move(*this));
++        while (g_recycled_bytes > RECYCLE_BUDGET && !g_recycled->empty()) {
++            g_recycled_bytes -= g_recycled->front().recycle_bytes;
++            evicted.splice(evicted.end(), *g_recycled, g_recycled->begin());
++        }
++    }
++    for (auto& handle : evicted) {
++        handle.Destroy();
++    }
++    return true;
++}
++
++bool Handle::TakeRecycled(u64 key) {
++    std::scoped_lock lock{g_recycle_mutex};
++    if (!g_recycled) {
++        return false;
++    }
++    // Newest first: the most recently freed image is the likeliest to be reused.
++    for (auto it = g_recycled->end(); it != g_recycled->begin();) {
++        --it;
++        if (it->recycle_key == key) {
++            g_recycled_bytes -= it->recycle_bytes;
++            *this = std::move(*it);
++            g_recycled->erase(it);
++            return true;
++        }
++    }
++    return false;
++}
++
+ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::Format format,
+                     vk::ImageUsageFlags usage, vk::ImageCreateFlags flags,
+                     vk::ImageAspectFlags aspect, bool need_format_list,
+@@ -185,6 +258,26 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
+         height = std::max(height, 1u);
+         levels = std::max(levels, 1u);
+     }
++    {
++        u64 key = 0xcbf29ce484222325ULL;
++        const auto mix = [&key](u64 v) { key = (key ^ v) * 0x100000001b3ULL; };
++        mix(width);
++        mix(height);
++        mix(levels);
++        mix(static_cast<u64>(type));
++        mix(static_cast<u64>(format));
++        mix(static_cast<u64>(static_cast<VkImageUsageFlags>(usage)));
++        mix(static_cast<u64>(static_cast<VkImageCreateFlags>(flags)));
++        mix(static_cast<u64>(static_cast<VkImageAspectFlags>(aspect)));
++        mix(need_format_list ? 1 : 2);
++        key |= 1; // never 0
++        if (TakeRecycled(key)) {
++            return;
++        }
++        recycle_key = key;
++        recycle_bytes = static_cast<u64>(width) * height * 4 * (is_cube_map ? 6 : 1) *
++                        (levels > 1 ? 2 : 1);
++    }
+     this->width = width;
+     this->height = height;
+     this->levels = levels;
+@@ -291,6 +384,8 @@ void Handle::Destroy() {
+ 
+     image = VK_NULL_HANDLE;
+     allocation = VK_NULL_HANDLE;
++    recycle_key = 0;
++    recycle_bytes = 0;
+ }
+ 
+ TextureRuntime::TextureRuntime(const Instance& instance, Scheduler& scheduler,
+@@ -304,9 +399,13 @@ TextureRuntime::TextureRuntime(const Instance& instance, Scheduler& scheduler,
+                       vk::BufferUsageFlagBits::eTransferDst |
+                           vk::BufferUsageFlagBits::eStorageBuffer,
+                       DOWNLOAD_BUFFER_SIZE, BufferType::Download},
+-      num_swapchain_images{num_swapchain_images_} {}
++      num_swapchain_images{num_swapchain_images_} {
++    Handle::EnableRecycler(true);
++}
+ 
+-TextureRuntime::~TextureRuntime() = default;
++TextureRuntime::~TextureRuntime() {
++    Handle::EnableRecycler(false);
++}
+ 
+ VideoCore::StagingData TextureRuntime::FindStaging(u32 size, bool upload) {
+     StreamBuffer& buffer = upload ? upload_buffer : download_buffer;
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.h b/src/video_core/renderer_vulkan/vk_texture_runtime.h
+index 8ce827e..56f2b8f 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.h
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.h
+@@ -47,7 +47,9 @@ struct Handle {
+     explicit Handle(const Instance& _instance) : instance(_instance) {}
+ 
+     ~Handle() {
+-        Destroy();
++        if (!Recycle()) {
++            Destroy();
++        }
+     }
+ 
+     Handle(const Handle& other) = delete;
+@@ -58,7 +60,9 @@ struct Handle {
+           image_views(std::exchange(other.image_views, {})),
+           framebuffer(std::exchange(other.framebuffer, VK_NULL_HANDLE)),
+           width(std::exchange(other.width, 0)), height(std::exchange(other.height, 0)),
+-          levels(std::exchange(other.levels, 0)), layers(std::exchange(other.layers, 0)) {}
++          levels(std::exchange(other.levels, 0)), layers(std::exchange(other.layers, 0)),
++          recycle_key(std::exchange(other.recycle_key, 0)),
++          recycle_bytes(std::exchange(other.recycle_bytes, 0)) {}
+ 
+     Handle& operator=(const Handle& other) = delete;
+ 
+@@ -74,6 +78,8 @@ struct Handle {
+         height = std::exchange(other.height, 0);
+         levels = std::exchange(other.levels, 0);
+         layers = std::exchange(other.layers, 0);
++        recycle_key = std::exchange(other.recycle_key, 0);
++        recycle_bytes = std::exchange(other.recycle_bytes, 0);
+ 
+         return *this;
+     }
+@@ -84,6 +90,12 @@ struct Handle {
+ 
+     void Destroy();
+ 
++    /// Images freed by the texture cache are kept (up to a memory budget) and handed
++    /// back to the next Create with the same parameters, instead of being destroyed
++    /// and re-created. On Xbox each image create/destroy is a kernel call that can
++    /// hold up the GPU, which showed as a half-second stall every couple of seconds.
++    static void EnableRecycler(bool enable);
++
+     operator bool() const {
+         return allocation;
+     }
+@@ -98,6 +110,12 @@ struct Handle {
+     u32 height{};
+     u32 levels{};
+     u32 layers{};
++    u64 recycle_key{};   ///< Hash of the create parameters (0 = not recyclable)
++    u64 recycle_bytes{}; ///< Approximate memory size, for the recycler budget
++
++private:
++    bool Recycle();
++    bool TakeRecycled(u64 key);
+ };
+ 
+ /**
+-- 
+2.43.0
+

@@ -29,7 +29,7 @@ namespace winrt::ONYX3DS::implementation {
 namespace {
 // Layout of the channel area at 1920x1080 (TV-safe margins applied in XAML).
 constexpr double kAreaWidth = 1728;
-constexpr double kAreaHeight = 708;
+constexpr double kAreaHeight = 688;
 constexpr double kGap = 36;
 
 AppServices& Svc() {
@@ -67,6 +67,8 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
     BuildBarButtons();
     UpdateClock();
     clock_.Start();
+    if (sparkles_) sparkles_.Begin();
+    animate_entrance_ = true;
     Svc().StartMusic();
 
     if (!initialised_) {
@@ -103,6 +105,7 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
 
 void MainPage::OnNavigatedFrom(NavigationEventArgs const&) {
     clock_.Stop();
+    if (sparkles_) sparkles_.Stop(); // nothing animates behind a running game
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +132,15 @@ void MainPage::ApplyTheme() {
     ClockText().Visibility(t.style.show_clock && Svc().Config().qol.show_clock ? Visibility::Visible
                                                                              : Visibility::Collapsed);
     HintText().Text(L"A Open    Y Favourite    X Details    LB / RB Pages    Menu Tools    View Settings");
+    HintHost().Child(kit::HintBar({{"A", "Open"}, {"Y", "Favourite"}, {"X", "Details"},
+                                   {"LB/RB", "Pages"}, {"Menu", "Tools"}, {"View", "Settings"}},
+                                  t.colors.bar_text));
+    MarkHost().Child(kit::OnyxMark(56));
+    for (auto tb : {GreetingText(), InfoText()}) tb.FontFamily(font);
+    SelectedText().FontFamily(Svc().ThemeFont(true));
+    GreetingText().Foreground(Svc().ThemeBrush(t.colors.text_muted));
+    SelectedText().Foreground(Svc().ThemeBrush(t.colors.text));
+    BuildSparkles();
 
     // Depth: one shared ThemeShadow, cast onto the layer behind the grid.
     shadow_ = ThemeShadow();
@@ -265,7 +277,12 @@ void MainPage::BuildPage() {
         Grid::SetRow(element, slot / columns_);
         Grid::SetColumn(element, slot % columns_);
         grid.Children().Append(element);
+        // Tiles fade in one after another (opacity only: tiles use the Translation
+        // and Scale properties, which can't be mixed with a RenderTransform).
+        if (animate_entrance_) kit::Entrance(element, 0, 0, slot * 28, 260);
     }
+    animate_entrance_ = false;
+    UpdateGreeting();
 
     // Page dots
     auto dots = PageDots();
@@ -421,8 +438,10 @@ void MainPage::OnTileFocused(Button const& tile, const GameEntry& game, bool foc
     focused_path_ = game.path;
     Svc().SetSelectedGame(game);
     Svc().PlaySfx("move");
-    InfoText().Text(kit::H(game.DisplayTitle() + "   ·   " + FormatLastPlayed(game.last_played) +
-                           (game.play_seconds ? "   ·   " + FormatPlayTime(game.play_seconds) : "")));
+    SelectedText().Text(kit::H(game.DisplayTitle()));
+    InfoText().Text(kit::H(FormatLastPlayed(game.last_played) +
+                           (game.play_seconds ? "   ·   " + FormatPlayTime(game.play_seconds) : "") +
+                           (game.favorite ? "   ·   Favourite" : "")));
     // Parallax follows the cursor across the grid.
     const int per_page = columns_ * rows_;
     int index = 0;
@@ -446,6 +465,7 @@ void MainPage::ChangePage(int delta) {
     grid.OpacityTransition(ScalarTransition());
     grid.Translation(float3{delta * 60.0f, 0, 0});
     grid.TranslationTransition(Vector3Transition());
+    animate_entrance_ = true;
     BuildPage();
     grid.Opacity(1);
     grid.Translation(float3{0, 0, 0});
@@ -558,6 +578,81 @@ void MainPage::UpdateClock() {
     std::snprintf(date, sizeof(date), "%s %d/%d", days[st.wDayOfWeek], st.wMonth, st.wDay);
     ClockText().Text(kit::H(clock));
     DateText().Text(kit::H(date));
+    UpdateGreeting();
+}
+
+void MainPage::UpdateGreeting() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    const char* part = st.wHour < 5 ? "Up late" : st.wHour < 12 ? "Good morning"
+                       : st.wHour < 18 ? "Good afternoon" : "Good evening";
+    const size_t n = games_.size();
+    const std::string text = std::string(part) + "   ·   " + std::to_string(n) +
+                             (n == 1 ? " game" : " games");
+    if (kit::S(GreetingText().Text()) != text) GreetingText().Text(kit::H(text));
+}
+
+void MainPage::BuildSparkles() {
+    // A dozen soft motes drifting up and pulsing: plain RenderTransforms on
+    // shapes in a Canvas (independent animations, run by the compositor).
+    auto canvas = Sparkles();
+    if (sparkles_) sparkles_.Stop();
+    sparkles_ = nullptr;
+    canvas.Children().Clear();
+    const Theme& t = Svc().CurrentTheme();
+    if (!Svc().Config().qol.background_parallax || t.style.parallax <= 0) return;
+    Storyboard sb;
+    uint32_t seed = 0x9E3779B9u;
+    auto rnd = [&seed](double lo, double hi) {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return lo + (hi - lo) * ((seed & 0xFFFF) / 65535.0);
+    };
+    for (int i = 0; i < 14; ++i) {
+        Shapes::Ellipse dot;
+        const double size = rnd(6, 18);
+        dot.Width(size);
+        dot.Height(size);
+        dot.Fill(Svc().ThemeBrush(kit::WithAlpha(i % 3 ? t.colors.tile_glow : t.colors.accent, 0x90)));
+        dot.Stroke(Svc().ThemeBrush(kit::WithAlpha(t.colors.tile_glow, 0x30)));
+        dot.StrokeThickness(size * 0.35);
+        Canvas::SetLeft(dot, rnd(40, 1880));
+        Canvas::SetTop(dot, rnd(120, 900));
+        TranslateTransform tr;
+        dot.RenderTransform(tr);
+        dot.Opacity(0);
+        canvas.Children().Append(dot);
+
+        const auto dur = std::chrono::milliseconds(static_cast<int>(rnd(9000, 16000)));
+        const auto delay = std::chrono::milliseconds(static_cast<int>(rnd(0, 8000)));
+        DoubleAnimation rise;
+        rise.From(0.0);
+        rise.To(-rnd(120, 260));
+        rise.Duration(DurationHelper::FromTimeSpan(dur));
+        rise.BeginTime(TimeSpan{delay});
+        rise.RepeatBehavior(RepeatBehaviorHelper::Forever());
+        Storyboard::SetTarget(rise, tr);
+        Storyboard::SetTargetProperty(rise, L"Y");
+        sb.Children().Append(rise);
+        DoubleAnimationUsingKeyFrames fade;
+        fade.Duration(DurationHelper::FromTimeSpan(dur));
+        fade.BeginTime(TimeSpan{delay});
+        fade.RepeatBehavior(RepeatBehaviorHelper::Forever());
+        for (auto [at, value] : {std::pair{0.0, 0.0}, std::pair{0.3, 0.8}, std::pair{0.7, 0.6},
+                                 std::pair{1.0, 0.0}}) {
+            LinearDoubleKeyFrame k;
+            k.KeyTime(KeyTimeHelper::FromTimeSpan(TimeSpan{std::chrono::milliseconds(
+                static_cast<long long>(dur.count() * at))}));
+            k.Value(value);
+            fade.KeyFrames().Append(k);
+        }
+        Storyboard::SetTarget(fade, dot);
+        Storyboard::SetTargetProperty(fade, L"Opacity");
+        sb.Children().Append(fade);
+    }
+    sparkles_ = sb;
+    sb.Begin();
 }
 
 // ---------------------------------------------------------------------------
