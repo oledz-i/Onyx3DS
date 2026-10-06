@@ -1,0 +1,313 @@
+From 5c00d2d8f5012f2cd1aa7d4cd85762249af9a41a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 08:10:48 -0400
+Subject: [PATCH 37/38] libretro: time every GPU submission and log stream
+ buffer wraps
+
+Each core submission is wrapped in two timestamp writes. The wait thread
+logs submissions that ran long on the GPU, started long after the previous
+one, or were seen done long after submit, so a periodic stall can be told
+apart as GPU work, GPU starvation or late submission.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/citra_libretro/libretro_vk.cpp            | 131 +++++++++++++++++-
+ src/citra_libretro/libretro_vk.h              |  23 ++-
+ .../renderer_vulkan/vk_stream_buffer.cpp      |  12 ++
+ .../renderer_vulkan/vk_stream_buffer.h        |   3 +
+ 4 files changed, 162 insertions(+), 7 deletions(-)
+
+diff --git a/src/citra_libretro/libretro_vk.cpp b/src/citra_libretro/libretro_vk.cpp
+index d44f12c..71dace0 100644
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -3,6 +3,8 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <array>
++#include <chrono>
+ #include <memory>
+ #include <stdexcept>
+ #include <vector>
+@@ -787,14 +789,110 @@ MasterSemaphoreLibRetro::MasterSemaphoreLibRetro(const Instance& instance_) : in
+     for (u64 i = 0; i < FENCE_RESERVE; i++) {
+         free_queue.push_back(device.createFence({}));
+     }
++    InitGpuTiming();
+     // Start background wait thread
+     wait_thread = std::jthread([this](std::stop_token token) { WaitThread(token); });
+ }
+ 
++void MasterSemaphoreLibRetro::InitGpuTiming() {
++    try {
++        const vk::Device device{instance.GetDevice()};
++        const auto props = instance.GetPhysicalDevice().getProperties();
++        const auto families = instance.GetPhysicalDevice().getQueueFamilyProperties();
++        const u32 family = instance.GetGraphicsQueueFamilyIndex();
++        const u32 valid_bits = family < families.size() ? families[family].timestampValidBits : 0;
++        if (valid_bits == 0 || props.limits.timestampPeriod <= 0.f) {
++            LOG_INFO(Render_Vulkan, "GPU timing: timestamps not supported");
++            return;
++        }
++        timing_period_ns = props.limits.timestampPeriod;
++        timing_mask = valid_bits >= 64 ? ~0ULL : ((1ULL << valid_bits) - 1);
++        timing_pool = device.createQueryPool({
++            .queryType = vk::QueryType::eTimestamp,
++            .queryCount = TIMING_SLOTS * 2,
++        });
++        timing_cmd_pool = device.createCommandPool({.queueFamilyIndex = family});
++        timing_start = device.allocateCommandBuffers({
++            .commandPool = timing_cmd_pool,
++            .level = vk::CommandBufferLevel::ePrimary,
++            .commandBufferCount = TIMING_SLOTS,
++        });
++        timing_end = device.allocateCommandBuffers({
++            .commandPool = timing_cmd_pool,
++            .level = vk::CommandBufferLevel::ePrimary,
++            .commandBufferCount = TIMING_SLOTS,
++        });
++        timing_submit_time.resize(TIMING_SLOTS);
++        for (u32 i = 0; i < TIMING_SLOTS; i++) {
++            timing_start[i].begin(vk::CommandBufferBeginInfo{});
++            timing_start[i].resetQueryPool(timing_pool, i * 2, 2);
++            timing_start[i].writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, timing_pool, i * 2);
++            timing_start[i].end();
++            timing_end[i].begin(vk::CommandBufferBeginInfo{});
++            timing_end[i].writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing_pool,
++                                         i * 2 + 1);
++            timing_end[i].end();
++        }
++        LOG_INFO(Render_Vulkan, "GPU timing: on ({} ns per tick)", timing_period_ns);
++    } catch (const std::exception& e) {
++        LOG_WARNING(Render_Vulkan, "GPU timing unavailable: {}", e.what());
++        timing_period_ns = 0.f;
++    }
++}
++
++void MasterSemaphoreLibRetro::ReportGpuTiming(u32 slot, u64 signal_value) {
++    u64 ts[2]{};
++    const vk::Device device{instance.GetDevice()};
++    const vk::Result r = device.getQueryPoolResults(
++        timing_pool, slot * 2, 2, sizeof(ts), ts, sizeof(u64), vk::QueryResultFlagBits::e64);
++    if (r != vk::Result::eSuccess) {
++        return;
++    }
++    const u64 start = ts[0] & timing_mask, end = ts[1] & timing_mask;
++    const double gpu_ms = static_cast<double>((end - start) & timing_mask) * timing_period_ns / 1e6;
++    const double gap_ms = timing_prev_end
++                              ? static_cast<double>((start - timing_prev_end) & timing_mask) *
++                                    timing_period_ns / 1e6
++                              : 0.0;
++    timing_prev_end = end;
++    const double done_ms = std::chrono::duration<double, std::milli>(
++                               std::chrono::steady_clock::now() - timing_submit_time[slot])
++                               .count();
++    static u32 s_logged = 0;
++    static u64 s_count = 0;
++    static double s_worst_gpu = 0, s_worst_gap = 0;
++    ++s_count;
++    s_worst_gpu = std::max(s_worst_gpu, gpu_ms);
++    s_worst_gap = std::max(s_worst_gap, gap_ms);
++    if ((gpu_ms > 40.0 || gap_ms > 100.0 || done_ms > 100.0) && (s_logged < 60 || s_logged % 50 == 0)) {
++        LOG_WARNING(Render_Vulkan,
++                    "GPU timing: submission {} ran {:.1f} ms on the GPU, started {:.1f} ms after "
++                    "the previous one ended, seen done {:.1f} ms after it was submitted",
++                    signal_value, gpu_ms, gap_ms, done_ms);
++        ++s_logged;
++    } else if (gpu_ms > 40.0 || gap_ms > 100.0 || done_ms > 100.0) {
++        ++s_logged;
++    }
++    if (s_count % 1800 == 0) {
++        LOG_INFO(Render_Vulkan, "GPU timing: {} submissions, worst {:.1f} ms on the GPU, worst gap {:.1f} ms",
++                 s_count, s_worst_gpu, s_worst_gap);
++        s_worst_gpu = s_worst_gap = 0;
++    }
++}
++
+ MasterSemaphoreLibRetro::~MasterSemaphoreLibRetro() {
+-    // wait_thread will be automatically stopped by jthread destructor
+-    // Clean up remaining fences
++    // Stop the wait thread first: it reads the timing queries.
++    wait_thread.request_stop();
++    if (wait_thread.joinable()) {
++        wait_thread.join();
++    }
+     const vk::Device device{instance.GetDevice()};
++    if (timing_cmd_pool) {
++        device.destroyCommandPool(timing_cmd_pool);
++    }
++    if (timing_pool) {
++        device.destroyQueryPool(timing_pool);
++    }
+     for (const auto& fence : free_queue) {
+         device.destroyFence(fence);
+     }
+@@ -819,13 +917,26 @@ void MasterSemaphoreLibRetro::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore
+     // Get a fence from the pool
+     const vk::Fence fence = GetFreeFence();
+ 
++    // With GPU timing on, the work is wrapped in two tiny command buffers that
++    // write a timestamp before and after it.
++    u32 timing_slot = ~0u;
++    std::array<vk::CommandBuffer, 3> buffers{cmdbuf, {}, {}};
++    u32 buffer_count = 1;
++    if (timing_period_ns > 0.f) {
++        timing_slot = timing_next;
++        timing_next = (timing_next + 1) % TIMING_SLOTS;
++        buffers = {timing_start[timing_slot], cmdbuf, timing_end[timing_slot]};
++        buffer_count = 3;
++        timing_submit_time[timing_slot] = std::chrono::steady_clock::now();
++    }
++
+     // Strip semaphores - RetroArch handles frame sync, we track resources internally
+     const vk::SubmitInfo submit_info = {
+         .waitSemaphoreCount = 0,
+         .pWaitSemaphores = nullptr,
+         .pWaitDstStageMask = nullptr,
+-        .commandBufferCount = 1u,
+-        .pCommandBuffers = &cmdbuf,
++        .commandBufferCount = buffer_count,
++        .pCommandBuffers = buffers.data(),
+         .signalSemaphoreCount = 0,
+         .pSignalSemaphores = nullptr,
+     };
+@@ -858,7 +969,7 @@ void MasterSemaphoreLibRetro::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore
+     // Enqueue fence for wait thread to process
+     {
+         std::scoped_lock lock{wait_mutex};
+-        wait_queue.emplace(fence, signal_value);
++        wait_queue.push(PendingWork{fence, signal_value, timing_slot});
+         wait_cv.notify_one();
+     }
+ }
+@@ -869,6 +980,7 @@ void MasterSemaphoreLibRetro::WaitThread(std::stop_token token) {
+     while (!token.stop_requested()) {
+         vk::Fence fence;
+         u64 signal_value;
++        u32 timing_slot;
+ 
+         // Wait for work
+         {
+@@ -877,7 +989,10 @@ void MasterSemaphoreLibRetro::WaitThread(std::stop_token token) {
+             if (token.stop_requested()) {
+                 return;
+             }
+-            std::tie(fence, signal_value) = wait_queue.front();
++            const PendingWork work = wait_queue.front();
++            fence = work.fence;
++            signal_value = work.signal_value;
++            timing_slot = work.timing_slot;
+             wait_queue.pop();
+         }
+ 
+@@ -894,6 +1009,10 @@ void MasterSemaphoreLibRetro::WaitThread(std::stop_token token) {
+             LOG_ERROR(Render_Vulkan, "Fence wait failed: {}", e.what());
+         }
+ 
++        if (timing_slot != ~0u) {
++            ReportGpuTiming(timing_slot, signal_value);
++        }
++
+         // Update GPU tick - signals main thread's Wait()
+         gpu_tick.store(signal_value, std::memory_order_release);
+ 
+diff --git a/src/citra_libretro/libretro_vk.h b/src/citra_libretro/libretro_vk.h
+index 5a60f75..b025538 100644
+--- a/src/citra_libretro/libretro_vk.h
++++ b/src/citra_libretro/libretro_vk.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <memory>
+ #include <variant>
+ #include <fmt/format.h>
+@@ -70,10 +71,30 @@ public:
+ private:
+     void WaitThread(std::stop_token token);
+     vk::Fence GetFreeFence();
++    void InitGpuTiming();
++    void ReportGpuTiming(u32 slot, u64 signal_value);
+ 
+     const Instance& instance;
++    // GPU timestamps around every submission (ONYX diagnostics): tells a frame the
++    // GPU spent a long time on from one it started late.
++    static constexpr u32 TIMING_SLOTS = 256;
++    vk::QueryPool timing_pool{};
++    vk::CommandPool timing_cmd_pool{};
++    std::vector<vk::CommandBuffer> timing_start;
++    std::vector<vk::CommandBuffer> timing_end;
++    std::vector<std::chrono::steady_clock::time_point> timing_submit_time;
++    float timing_period_ns = 0.f;
++    u64 timing_mask = 0;
++    u32 timing_next = 0;
++    u64 timing_prev_end = 0;
++    std::chrono::steady_clock::time_point timing_prev_submit{};
+     std::deque<vk::Fence> free_queue;
+-    std::queue<Waitable> wait_queue;
++    struct PendingWork {
++        vk::Fence fence;
++        u64 signal_value;
++        u32 timing_slot; // ~0u: no timestamps
++    };
++    std::queue<PendingWork> wait_queue;
+     std::mutex free_mutex;
+     std::mutex wait_mutex;
+     std::condition_variable free_cv;
+diff --git a/src/video_core/renderer_vulkan/vk_stream_buffer.cpp b/src/video_core/renderer_vulkan/vk_stream_buffer.cpp
+index 99daad6..eb8ad04 100644
+--- a/src/video_core/renderer_vulkan/vk_stream_buffer.cpp
++++ b/src/video_core/renderer_vulkan/vk_stream_buffer.cpp
+@@ -11,6 +11,7 @@
+ #include "common/alignment.h"
+ #include "common/assert.h"
+ #include "common/literals.h"
++#include "common/logging/log.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_memory_util.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+@@ -135,6 +136,17 @@ std::tuple<u8*, u32, bool> StreamBuffer::Map(u32 size, u64 alignment) {
+         std::swap(previous_watches, current_watches);
+         wait_cursor = 0;
+         wait_bound = 0;
++
++        // ONYX: log how often each buffer wraps, to line it up with GPU stalls.
++        const auto now = std::chrono::steady_clock::now();
++        if (wrap_count < 40 || wrap_count % 25 == 0) {
++            const double secs =
++                wrap_count ? std::chrono::duration<double>(now - last_wrap).count() : 0.0;
++            LOG_INFO(Render_Vulkan, "Stream buffer ({} KiB, type {}) wrapped #{} after {:.2f} s",
++                     stream_buffer_size >> 10, static_cast<u32>(type), wrap_count + 1, secs);
++        }
++        last_wrap = now;
++        ++wrap_count;
+     }
+ 
+     const u64 mapped_upper_bound = offset + size;
+diff --git a/src/video_core/renderer_vulkan/vk_stream_buffer.h b/src/video_core/renderer_vulkan/vk_stream_buffer.h
+index 01747a3..4480524 100644
+--- a/src/video_core/renderer_vulkan/vk_stream_buffer.h
++++ b/src/video_core/renderer_vulkan/vk_stream_buffer.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <optional>
+ #include <span>
+ #include <tuple>
+@@ -77,6 +78,8 @@ private:
+     std::vector<Watch> current_watches;           ///< Watches recorded in the current iteration.
+     std::size_t current_watch_cursor{};           ///< Count of watches, reset on invalidation.
+     std::optional<std::size_t> invalidation_mark; ///< Number of watches used in the previous cycle.
++    std::chrono::steady_clock::time_point last_wrap{}; ///< ONYX: when the buffer last wrapped.
++    u32 wrap_count = 0;
+ 
+     std::vector<Watch> previous_watches; ///< Watches used in the previous iteration.
+     std::size_t wait_cursor{};           ///< Last watch being waited for completion.
+-- 
+2.43.0
+

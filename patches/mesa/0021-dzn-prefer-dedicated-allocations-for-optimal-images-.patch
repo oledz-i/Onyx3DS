@@ -1,0 +1,37 @@
+From 17c8ee6de1ed3974ffba056cb973331d99089d2e Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Tue, 6 Oct 2026 08:01:20 -0400
+Subject: [PATCH] dzn: prefer dedicated allocations for optimal images again
+
+Without it, VMA placed textures in shared heaps and reused memory showed old
+render-target contents (one 3DS screen drawn over the other): placed render
+targets need a clear or discard after aliasing, which nothing issues.
+---
+ src/microsoft/vulkan/dzn_image.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index dc55c06..fa7ed20 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -894,11 +894,12 @@ dzn_GetImageMemoryRequirements2(VkDevice _device,
+          VkMemoryDedicatedRequirements *requirements =
+             (VkMemoryDedicatedRequirements *)ext;
+          requirements->requiresDedicatedAllocation = image->vk.external_handle_types != 0;
+-         /* ONYX: no preference for dedicated allocations. With it, allocators
+-          * (VMA) gave every texture its own D3D12 heap, so each texture the
+-          * emulator creates or frees was a kernel memory operation on Xbox.
+-          * Placed resources in shared heaps avoid that churn. */
+-         requirements->prefersDedicatedAllocation = requirements->requiresDedicatedAllocation;
++         /* ONYX: keep preferring dedicated allocations for optimal images. Tried
++          * without (placed resources in shared heaps): reused heap memory showed
++          * old render-target contents on screen (placed render targets need a
++          * clear or discard after aliasing, which nothing issues). */
++         requirements->prefersDedicatedAllocation = requirements->requiresDedicatedAllocation ||
++            image->vk.tiling == VK_IMAGE_TILING_OPTIMAL;
+          break;
+       }
+ 
+-- 
+2.43.0
+

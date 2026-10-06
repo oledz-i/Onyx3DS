@@ -1,0 +1,30 @@
+From 7d8015ab446b68e136adb753423357b5cf72c1dc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 08:10:48 -0400
+Subject: [PATCH 38/38] vulkan: no geometry shaders on Dozen
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/video_core/renderer_vulkan/vk_instance.h | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_instance.h b/src/video_core/renderer_vulkan/vk_instance.h
+index 742ec36..46a7ca9 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.h
++++ b/src/video_core/renderer_vulkan/vk_instance.h
+@@ -122,7 +122,10 @@ public:
+         // cost even if it hurts accuracy somewhat. TODO: Make this an option
+         return false;
+ #else
+-        return features.geometryShader;
++        // ONYX: on Dozen (Vulkan on D3D12) geometry shaders are slow, cost a long
++        // pipeline compile, and are the likeliest reason the Xbox driver refuses some
++        // lit-scene pipelines (their draws vanish). Interpolate without them.
++        return features.geometryShader && driver_id != vk::DriverIdKHR::eMesaDozen;
+ #endif
+     }
+ 
+-- 
+2.43.0
+

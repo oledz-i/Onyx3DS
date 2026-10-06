@@ -1,0 +1,100 @@
+From ed8a0ec2d360903ff76b31ddf9bbb6dd933e5292 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 08:12:09 -0400
+Subject: [PATCH] dzn: validate and name the stages of a refused pipeline
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/microsoft/compiler/dxil_validator.cpp | 25 +++++++++++++++++++++++
+ src/microsoft/compiler/dxil_validator.h   |  5 +++++
+ src/microsoft/vulkan/dzn_pipeline.c       | 21 +++++++++++++++++++
+ 3 files changed, 51 insertions(+)
+
+diff --git a/src/microsoft/compiler/dxil_validator.cpp b/src/microsoft/compiler/dxil_validator.cpp
+index 477b641..39e30b8 100644
+--- a/src/microsoft/compiler/dxil_validator.cpp
++++ b/src/microsoft/compiler/dxil_validator.cpp
+@@ -545,6 +545,31 @@ onyx_error_text(IDxcOperationResult *result, void *mem_ctx)
+    return str;
+ }
+ 
++void
++dxil_onyx_log_validation(struct dxil_validator *val, const void *data, size_t size,
++                         const char *what)
++{
++   if (!val || !data || !size)
++      return;
++   ShaderBlob source((void *)data, size);
++   ComPtr<IDxcOperationResult> result;
++   if (FAILED(val->dxc_validator->Validate(&source, DxcValidatorFlags_Default, &result)) ||
++       !result) {
++      mesa_logw("dzn: %s: the validator could not run", what);
++      return;
++   }
++   HRESULT hr;
++   result->GetStatus(&hr);
++   if (SUCCEEDED(hr)) {
++      mesa_logw("dzn: %s passes DXIL validation (%zu bytes)", what, size);
++      return;
++   }
++   char *text = onyx_error_text(result.Get(), NULL);
++   mesa_logw("dzn: %s fails DXIL validation (0x%08x): %s", what, (unsigned)hr,
++             text ? text : "(no diagnostics)");
++   ralloc_free(text);
++}
++
+ bool
+ dxil_validate_module(struct dxil_validator *val, void *data, size_t size, char **error)
+ {
+diff --git a/src/microsoft/compiler/dxil_validator.h b/src/microsoft/compiler/dxil_validator.h
+index d867d37..b308949 100644
+--- a/src/microsoft/compiler/dxil_validator.h
++++ b/src/microsoft/compiler/dxil_validator.h
+@@ -47,6 +47,11 @@ dxil_validate_module(struct dxil_validator *val, void *data,
+ char *
+ dxil_disasm_module(struct dxil_validator *val, void *data, size_t size);
+ 
++/* ONYX: validate a module without changing it and log the verdict. */
++void
++dxil_onyx_log_validation(struct dxil_validator *val, const void *data, size_t size,
++                         const char *what);
++
+ enum dxil_validator_version
+ dxil_get_validator_version(struct dxil_validator *val);
+ 
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 30b77af..746c699 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2354,6 +2354,27 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+                    masked_key.stencil_test.front.write_mask,
+                    masked_key.stencil_test.back.write_mask);
+          variant->state = NULL;
++         /* Say which stages the pipeline has and what the validator thinks of
++          * each, since modules after the first few are signed unvalidated. */
++         static unsigned onyx_diagnosed;
++         if (onyx_diagnosed++ < 6) {
++            struct dzn_instance *instance =
++               container_of(device->vk.physical->instance, struct dzn_instance, vk);
++            static const char *const stage_names[] = {
++               [MESA_SHADER_VERTEX] = "vertex", [MESA_SHADER_TESS_CTRL] = "hull",
++               [MESA_SHADER_TESS_EVAL] = "domain", [MESA_SHADER_GEOMETRY] = "geometry",
++               [MESA_SHADER_FRAGMENT] = "pixel",
++            };
++            for (uint32_t st = 0; st < ARRAY_SIZE(stage_names); st++) {
++               const D3D12_SHADER_BYTECODE *bc = pipeline->templates.shaders[st].bc;
++               if (!bc || !bc->pShaderBytecode)
++                  continue;
++               char what[64];
++               snprintf(what, sizeof(what), "refused pipeline's %s shader", stage_names[st]);
++               dxil_onyx_log_validation(instance->dxil_validator, bc->pShaderBytecode,
++                                        bc->BytecodeLength, what);
++            }
++         }
+       }
+       /* ONYX: variants are compiled while commands are recorded, so a slow one
+        * stalls the frame. Log what forced each one. */
+-- 
+2.43.0
+

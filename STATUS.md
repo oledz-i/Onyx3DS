@@ -79,6 +79,16 @@
   azahar/0036 frees images on a background thread; mesa/0020 bigger CBV/SRV/UAV
   pool heaps; shader caches remapped to the USB System folder. Navy background
   reverted (azahar/0033 dropped).
+- Build #76 (6ac46db0): screens corrupted (top screen drawn over bottom-screen
+  content): prefersDedicated=false let D3D12 placed images alias. Reverted in
+  mesa/0021. No "fence completed before its event" logs, so the GPU really finishes
+  ~470-500 ms late, every ~90 frames, in every hardware log since #69 (about 2/3 of
+  60-frame windows), with no pipeline compiles; the vkworker thread is idle then and
+  the D3D12 presenter kept presenting at 60/s in swap-chain builds, so only the
+  Vulkan queue stalls. 16 pipelines refused with a zero variant key (E_INVALIDARG)
+  in lit scenes. Next build: azahar/0037 timestamps every core submission and logs
+  stream-buffer wraps; azahar/0038 disables geometry shaders on Dozen; mesa/0022
+  logs the stages and DXIL validation verdict of a refused pipeline.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)
