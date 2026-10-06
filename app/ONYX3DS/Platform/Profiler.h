@@ -16,4 +16,10 @@ void ProfilerStart();
 // Stops the sampler and logs what is left.
 void ProfilerStop();
 
+// Brackets one emulated frame (retro_run). While a frame has run for over
+// 100 ms, the sampler records full call stacks of the emulation thread, so a
+// log names the exact call chain behind a freeze ("Profile stall" lines).
+void ProfilerFrameBegin();
+void ProfilerFrameEnd();
+
 } // namespace onyx::app

@@ -73,8 +73,11 @@ void Log(LogLevel level, const char* fmt, ...) {
     if (g_ring.size() > kRingSize) g_ring.pop_front();
     if (g_file != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
+        // No FlushFileBuffers here: it waits for the disk, and with the emulation
+        // thread logging a burst of warnings that showed up as frame hitches. What
+        // WriteFile hands the OS is written even if ONYX crashes; LogRaw (crash
+        // reports) still flushes.
         WriteFile(g_file, line, static_cast<DWORD>(std::max(0, n)), &written, nullptr);
-        if (level >= LogLevel::Warning) FlushFileBuffers(g_file);
     }
 }
 
@@ -165,16 +168,27 @@ void CaptureStderr(const std::wstring& path) {
 void DrainStderrToLog() {
     if (g_stderr_path.empty()) return;
     fflush(stderr);
-    // Share every access: the CRT keeps driver.log open for writing as stderr.
-    CREATEFILE2_EXTENDED_PARAMETERS p{sizeof(p)};
-    p.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-    const HANDLE f = CreateFile2FromAppW(g_stderr_path.c_str(), GENERIC_READ,
-                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                         OPEN_EXISTING, &p);
-    if (f == INVALID_HANDLE_VALUE) return;
+    // Opened once and kept: the ...FromApp open goes through a broker, which cost a
+    // visible hitch when it ran every two seconds during play.
+    static HANDLE s_file = INVALID_HANDLE_VALUE;
+    static std::wstring s_path;
+    if (s_file == INVALID_HANDLE_VALUE || s_path != g_stderr_path) {
+        if (s_file != INVALID_HANDLE_VALUE) CloseHandle(s_file);
+        // Share every access: the CRT keeps driver.log open for writing as stderr.
+        CREATEFILE2_EXTENDED_PARAMETERS p{sizeof(p)};
+        p.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        s_file = CreateFile2FromAppW(g_stderr_path.c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     OPEN_EXISTING, &p);
+        s_path = g_stderr_path;
+        if (s_file == INVALID_HANDLE_VALUE) return;
+    }
+    const HANDLE f = s_file;
     LARGE_INTEGER size{};
-    if (GetFileSizeEx(f, &size) && size.QuadPart < g_stderr_read)
+    if (!GetFileSizeEx(f, &size)) return;
+    if (size.QuadPart < g_stderr_read)
         g_stderr_read = 0; // truncated or recreated since the last drain
+    if (size.QuadPart == g_stderr_read) return; // nothing new: no read at all
     LARGE_INTEGER offset{};
     offset.QuadPart = g_stderr_read;
     if (SetFilePointerEx(f, offset, nullptr, FILE_BEGIN)) {
@@ -196,7 +210,6 @@ void DrainStderrToLog() {
             start = end + 1;
         }
     }
-    CloseHandle(f);
 }
 
 std::vector<std::string> RecentLog(std::size_t max_lines) {

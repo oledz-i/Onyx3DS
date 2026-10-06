@@ -1,0 +1,180 @@
+From 6ac6af6f42c5874440f2d5910cf8ab5791eaf1b5 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 20:24:21 -0400
+Subject: [PATCH] dzn: fewer stalls on Xbox
+
+- Compile the pipeline variants draws almost always use when the pipeline
+  is created, instead of on first draw while commands are recorded (the
+  driver compile takes 0.4-0.7 s on Xbox, which froze that frame even though
+  the app compiles pipelines on background threads).
+- No preference for dedicated image allocations: allocators gave every
+  texture its own heap, so each texture created or freed was a kernel memory
+  operation.
+- Keep a few upload-heap internal buffers across command buffer resets
+  instead of creating and freeing a 4 MB committed resource per use.
+- Device-removal tracing checks the first 20000 D3D12 calls, then every
+  4096th (GetDeviceRemovedReason is a kernel call on Xbox).
+---
+ src/microsoft/vulkan/dzn_cmd_buffer.c | 41 ++++++++++++++++++++++++++-
+ src/microsoft/vulkan/dzn_image.c      |  7 +++--
+ src/microsoft/vulkan/dzn_pipeline.c   | 25 ++++++++++++++++
+ src/microsoft/vulkan/dzn_private.h    |  2 ++
+ src/microsoft/vulkan/dzn_util.c       |  2 +-
+ 5 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_cmd_buffer.c b/src/microsoft/vulkan/dzn_cmd_buffer.c
+index 66091f8..0d11982 100644
+--- a/src/microsoft/vulkan/dzn_cmd_buffer.c
++++ b/src/microsoft/vulkan/dzn_cmd_buffer.c
+@@ -408,6 +408,11 @@ dzn_cmd_buffer_destroy(struct vk_command_buffer *cbuf)
+          vk_free(&cbuf->pool->alloc, res);
+       }
+    }
++   list_for_each_entry_safe(struct dzn_internal_resource, res, &cmdbuf->free_upload_bufs, link) {
++      list_del(&res->link);
++      ID3D12Resource_Release(res->res);
++      vk_free(&cbuf->pool->alloc, res);
++   }
+ 
+    dzn_descriptor_heap_pool_finish(&cmdbuf->cbv_srv_uav_pool);
+    dzn_descriptor_heap_pool_finish(&cmdbuf->sampler_pool);
+@@ -464,7 +469,25 @@ dzn_cmd_buffer_reset(struct vk_command_buffer *cbuf, VkCommandBufferResetFlags f
+    cmdbuf->state.multiview.num_views = 1;
+    cmdbuf->state.multiview.view_mask = 1;
+ 
+-   /* TODO: Return resources to the pool */
++   /* ONYX: upload-heap buffers (always GENERIC_READ, so no state to track) are
++    * kept for the next recording instead of released: each one is a 4 MB
++    * committed resource, and creating and freeing them every frame is a kernel
++    * memory operation per buffer on Xbox. The GPU is done with them, since a
++    * command buffer can't be reset while pending. A few are kept at most. */
++   unsigned kept = 0;
++   list_for_each_entry(struct dzn_internal_resource, res, &cmdbuf->free_upload_bufs, link)
++      kept++;
++   list_for_each_entry_safe(struct dzn_internal_resource, res,
++                            &cmdbuf->internal_bufs[DZN_INTERNAL_BUF_UPLOAD], link) {
++      list_del(&res->link);
++      if (kept < 4) {
++         list_addtail(&res->link, &cmdbuf->free_upload_bufs);
++         kept++;
++      } else {
++         ID3D12Resource_Release(res->res);
++         vk_free(&cmdbuf->vk.pool->alloc, res);
++      }
++   }
+    for (uint32_t bucket = 0; bucket < DZN_INTERNAL_BUF_BUCKET_COUNT; ++bucket) {
+       list_for_each_entry_safe(struct dzn_internal_resource, res, &cmdbuf->internal_bufs[bucket], link) {
+          list_del(&res->link);
+@@ -653,6 +676,7 @@ dzn_cmd_buffer_create(const VkCommandBufferAllocateInfo *info,
+    cmdbuf->state.multiview.view_mask = 1;
+    for (uint32_t bucket = 0; bucket < DZN_INTERNAL_BUF_BUCKET_COUNT; ++bucket)
+       list_inithead(&cmdbuf->internal_bufs[bucket]);
++   list_inithead(&cmdbuf->free_upload_bufs);
+    cmdbuf->events.signal = UTIL_DYNARRAY_INIT;
+    cmdbuf->queries.reset = UTIL_DYNARRAY_INIT;
+    cmdbuf->queries.signal = UTIL_DYNARRAY_INIT;
+@@ -1849,6 +1873,21 @@ dzn_cmd_buffer_alloc_internal_buf(struct dzn_cmd_buffer *cmdbuf,
+       /* Align size on 64k (the default alignment) */
+       alloc_size = ALIGN_POT(size, 64 * 1024);
+ 
++   if (bucket == DZN_INTERNAL_BUF_UPLOAD) {
++      list_for_each_entry_safe(struct dzn_internal_resource, res, &cmdbuf->free_upload_bufs, link) {
++         if (res->size < alloc_size)
++            continue;
++         list_del(&res->link);
++         list_addtail(&res->link, &cmdbuf->internal_bufs[bucket]);
++         *out = res->res;
++         if (offset)
++            *offset = 0;
++         cmdbuf->cur_upload_buf = res;
++         cmdbuf->cur_upload_buf_offset = size;
++         return VK_SUCCESS;
++      }
++   }
++
+    D3D12_HEAP_PROPERTIES hprops = dzn_ID3D12Device4_GetCustomHeapProperties(device->dev, 0, heap_type);
+    D3D12_RESOURCE_DESC rdesc = {
+       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+diff --git a/src/microsoft/vulkan/dzn_image.c b/src/microsoft/vulkan/dzn_image.c
+index 613042f..dc55c06 100644
+--- a/src/microsoft/vulkan/dzn_image.c
++++ b/src/microsoft/vulkan/dzn_image.c
+@@ -894,8 +894,11 @@ dzn_GetImageMemoryRequirements2(VkDevice _device,
+          VkMemoryDedicatedRequirements *requirements =
+             (VkMemoryDedicatedRequirements *)ext;
+          requirements->requiresDedicatedAllocation = image->vk.external_handle_types != 0;
+-         requirements->prefersDedicatedAllocation = requirements->requiresDedicatedAllocation ||
+-            image->vk.tiling == VK_IMAGE_TILING_OPTIMAL;
++         /* ONYX: no preference for dedicated allocations. With it, allocators
++          * (VMA) gave every texture its own D3D12 heap, so each texture the
++          * emulator creates or frees was a kernel memory operation on Xbox.
++          * Placed resources in shared heaps avoid that churn. */
++         requirements->prefersDedicatedAllocation = requirements->requiresDedicatedAllocation;
+          break;
+       }
+ 
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index b2a2e3d..63fe064 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2141,6 +2141,31 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
+       }
+ 
+       dzn_graphics_pipeline_cleanup_dxil_shaders(pipeline);
++   } else {
++      /* ONYX: pipelines with dynamic stencil masks, primitive restart or
++       * emulated dynamic depth bias are compiled lazily, per variant, while
++       * commands are recorded. The driver compile takes 0.4-0.7 s on Xbox, so
++       * the frame that first draws with a new pipeline froze for that long,
++       * even though the app compiles pipelines on background threads. Compile
++       * the variants draws almost always use now, on the creating thread: all
++       * dynamic values zero (what pipelines without stencil test always hit),
++       * plus full stencil masks when stencil test is on. */
++      const struct dzn_graphics_pipeline_variant_key zero_key = { 0 };
++      dzn_graphics_pipeline_get_state(pipeline, &zero_key);
++      const D3D12_DEPTH_STENCIL_DESC1 *ds =
++         pdev->options14.IndependentFrontAndBackStencilRefMaskSupported ? NULL :
++         dzn_graphics_pipeline_get_desc_template(pipeline, ds);
++      const D3D12_DEPTH_STENCIL_DESC2 *ds2 =
++         pdev->options14.IndependentFrontAndBackStencilRefMaskSupported ?
++         dzn_graphics_pipeline_get_desc_template(pipeline, ds) : NULL;
++      if ((ds && ds->StencilEnable) || (ds2 && ds2->StencilEnable)) {
++         struct dzn_graphics_pipeline_variant_key full_key = { 0 };
++         full_key.stencil_test.front.compare_mask = 0xff;
++         full_key.stencil_test.back.compare_mask = 0xff;
++         full_key.stencil_test.front.write_mask = 0xff;
++         full_key.stencil_test.back.write_mask = 0xff;
++         dzn_graphics_pipeline_get_state(pipeline, &full_key);
++      }
+    }
+ 
+    dzn_graphics_pipeline_cleanup_nir_shaders(pipeline);
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index 74e4d45..d13fa06 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -728,6 +728,8 @@ struct dzn_cmd_buffer {
+    D3D12_CPU_DESCRIPTOR_HANDLE null_rtv;
+ 
+    struct list_head internal_bufs[DZN_INTERNAL_BUF_BUCKET_COUNT];
++   /* ONYX: upload buffers kept across resets for reuse (see alloc_internal_buf). */
++   struct list_head free_upload_bufs;
+    struct dzn_internal_resource *cur_upload_buf;
+    uint64_t cur_upload_buf_offset;
+ 
+diff --git a/src/microsoft/vulkan/dzn_util.c b/src/microsoft/vulkan/dzn_util.c
+index f68aa91..d436f17 100644
+--- a/src/microsoft/vulkan/dzn_util.c
++++ b/src/microsoft/vulkan/dzn_util.c
+@@ -102,7 +102,7 @@ dzn_trace_call(const char *what, const char *file, int line)
+ 
+    /* Check every call while a game starts (where the Xbox crash happens),
+     * then every 16th call so gameplay doesn't pay for it. */
+-   if (n > 300000 && (n & 15))
++   if (n > 20000 && (n & 4095))
+       return;
+ 
+    HRESULT reason = ID3D12Device4_GetDeviceRemovedReason(dev);
+-- 
+2.43.0
+

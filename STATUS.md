@@ -57,6 +57,14 @@
   castable formats). mesa/0015 makes depth images typeless without relaxed casting.
 - ~500 ms stalls every ~2.5 s: dynarmic W^X re-protected the whole code buffer per
   block; dynarmic/0003 only toggles the pages being written.
+- Build #72 (6ac43864): picture works. Remaining: ~500 ms stall every ~2 s (hardware
+  only; main thread in win32u, i.e. a kernel graphics call) and 0.4-0.7 s freezes per
+  new pipeline (dzn variant compiled at first draw). Crash after ~90 s near
+  "Vertex buffer size exceeds available space" spam (out-of-bounds vertex copy).
+  Next build: mesa/0017 (variant precompile, no dedicated allocations, upload buffer
+  reuse, rarer trace checks), azahar/0034 (bounded vertex copy), no log flushes,
+  custom textures only with a pack, frame rate lock, and "Profile stall" stacks
+  (proper unwinding) for any frame over 100 ms.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

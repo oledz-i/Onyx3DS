@@ -1,0 +1,71 @@
+From d8ed00ed1186f701c703604b68727ec875c1671c Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Mon, 5 Oct 2026 20:19:36 -0400
+Subject: [PATCH] renderer_vulkan: don't read past the memory region for
+ oversized vertex ranges
+
+SetupVertexArray logged that the vertex range ran past the end of the memory
+region and then copied all of it anyway, reading past the mapping (a crash
+once it reaches an unmapped page) and logging on every draw. Copy what the
+region holds, zero the rest, and log only now and then.
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         | 33 ++++++++++++++-----
+ 1 file changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 6bb38e7..707fcac 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -302,24 +302,41 @@ void RasterizerVulkan::SetupVertexArray() {
+         res_cache.FlushRegion(data_addr, data_size);
+ 
+         const MemoryRef src_ref = memory.GetPhysicalRef(data_addr);
+-        if (src_ref.GetSize() < data_size) {
+-            LOG_ERROR(Render_Vulkan,
+-                      "Vertex buffer size {} exceeds available space {} at address {:#016X}",
+-                      data_size, src_ref.GetSize(), data_addr);
++        // Copy only what the region holds. The range comes from the game's index
++        // min/max and can run past the end of the memory region; copying all of
++        // it read past the mapping (a crash once it hit an unmapped page) and the
++        // error was logged on every draw, thousands of lines a second.
++        const u8* src_ptr = src_ref.GetPtr();
++        const u32 copy_size =
++            src_ptr ? static_cast<u32>(std::min<std::size_t>(src_ref.GetSize(), data_size)) : 0;
++        if (copy_size < data_size) {
++            static u32 s_logged = 0;
++            if (s_logged < 8 || (s_logged % 4096) == 0) {
++                LOG_ERROR(Render_Vulkan,
++                          "Vertex buffer size {} exceeds available space {} at address {:#016X} "
++                          "(copying what is there; seen {} times)",
++                          data_size, src_ref.GetSize(), data_addr, s_logged + 1);
++            }
++            ++s_logged;
+         }
+ 
+-        const u8* src_ptr = src_ref.GetPtr();
+         u8* dst_ptr = array_ptr + buffer_offset;
+ 
+         // Align stride up if required by Vulkan implementation.
+         const u32 aligned_stride =
+             Common::AlignUp(static_cast<u32>(loader.byte_count), stride_alignment);
+         if (aligned_stride == loader.byte_count) {
+-            std::memcpy(dst_ptr, src_ptr, data_size);
++            if (copy_size) std::memcpy(dst_ptr, src_ptr, copy_size);
++            if (copy_size < data_size) std::memset(dst_ptr + copy_size, 0, data_size - copy_size);
+         } else {
++            const std::size_t whole = loader.byte_count ? copy_size / loader.byte_count : 0;
+             for (std::size_t vertex = 0; vertex < vertex_num; vertex++) {
+-                std::memcpy(dst_ptr + vertex * aligned_stride, src_ptr + vertex * loader.byte_count,
+-                            loader.byte_count);
++                if (vertex < whole) {
++                    std::memcpy(dst_ptr + vertex * aligned_stride,
++                                src_ptr + vertex * loader.byte_count, loader.byte_count);
++                } else {
++                    std::memset(dst_ptr + vertex * aligned_stride, 0, loader.byte_count);
++                }
+             }
+         }
+ 
+-- 
+2.43.0
+

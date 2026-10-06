@@ -219,8 +219,27 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
             // and a bigger output only makes the per-frame copy slower.
             options_[keys::kResolution] = "1";
         }
-        ONYX_INFO("Renderer: %s, CPU: %s", software_ ? "software" : "hardware (Vulkan)",
-                  options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT");
+        // Custom textures: with the option on, the core hashes every texture it
+        // decodes and looks it up in the pack (a warning per miss). Only pay for
+        // that when this game actually has a pack installed.
+        custom_textures_allowed_ = true;
+        if (options_[keys::kCustomTextures] == "enabled") {
+            const std::string pack = JoinPath(Paths().azahar_root,
+                                              "Azahar/load/textures/" + game.TitleIdHex());
+            std::wstring wpack = Wide(pack);
+            for (auto& ch : wpack)
+                if (ch == L'/') ch = L'\\';
+            WIN32_FILE_ATTRIBUTE_DATA d{};
+            const bool has_pack =
+                GetFileAttributesExFromAppW(wpack.c_str(), GetFileExInfoStandard, &d) &&
+                (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+            if (!has_pack) options_[keys::kCustomTextures] = "disabled";
+            custom_textures_allowed_ = has_pack;
+            ONYX_INFO("Custom textures: %s", has_pack ? "pack found, on" : "no pack for this game, off");
+        }
+        UpdateFrameLockLocked();
+        ONYX_INFO("Renderer: %s, CPU: %s, frame rate lock %d", software_ ? "software" : "hardware (Vulkan)",
+                  options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT", frame_lock_.load());
     }
     UpdateFolders(settings.folders);
     ff_speed_ = settings.qol.fast_forward_speed;
@@ -493,7 +512,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             presenter_.SetPaused(false);
         }
         const auto run_begin = std::chrono::steady_clock::now();
+        ProfilerFrameBegin();
         retro_run();
+        ProfilerFrameEnd();
         const double run_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - run_begin).count();
         run_total_ms += run_ms;
@@ -649,7 +670,19 @@ void EmulatorSession::ApplyCoreOptions(const CoreOptions& options) {
     // The renderer cannot change while a game runs.
     options_[keys::kGraphicsApi] = software_ ? "Software" : "Vulkan";
     if (software_) options_[keys::kResolution] = "1";
+    if (!custom_textures_allowed_) options_[keys::kCustomTextures] = "disabled";
+    UpdateFrameLockLocked();
     options_dirty_ = true;
+}
+
+void EmulatorSession::UpdateFrameLockLocked() {
+    const auto it = options_.find(keys::kFrameLock);
+    const int lock = it != options_.end() && it->second == "30" ? 30 : 60;
+    frame_lock_ = lock;
+    // Software renderer at 30: let the core skip drawing the frames that aren't
+    // shown, so the lock also halves the drawing work. (The hardware renderer
+    // drops the frames on our side; see VideoRefresh.)
+    if (software_ && lock == 30) options_[keys::kFrameSkip] = "1";
 }
 
 CoreOptions EmulatorSession::CurrentCoreOptions() const {
@@ -758,7 +791,12 @@ void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned he
                       static_cast<unsigned long long>(s_null));
         return;
     }
-    if (data == RETRO_HW_FRAME_BUFFER_VALID && vulkan_) vulkan_->OnFrame(width, height);
+    if (data == RETRO_HW_FRAME_BUFFER_VALID && vulkan_) {
+        // Frame rate lock 30: show every 2nd frame (the read back and display of a
+        // frame are skipped, not its emulation), for an even 30 fps cadence.
+        if (frame_lock_.load() == 30 && (hw_frames_++ & 1)) return;
+        vulkan_->OnFrame(width, height);
+    }
     // nullptr = duplicate frame: the presenter keeps showing the last one.
 }
 

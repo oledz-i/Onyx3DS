@@ -69,6 +69,12 @@ std::vector<Curated> CuratedOptions() {
          "Makes slow scenes playable; some games may flicker.",
          {{"auto", "Auto (only when slow)"}, {"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
           {"3", "Draw every 4th frame"}}},
+        {keys::kFrameLock, "Frame rate lock",
+         "Holds the picture to an even pace. 60 is full speed. 30 shows every 2nd frame at a "
+         "steady rhythm while the game itself keeps running at full speed: a heavy game feels "
+         "smoother at a locked 30 than jumping between 40 and 60. A lock can't make a game run "
+         "faster than the Xbox manages.",
+         {{"60", "60 fps (default)"}, {"30", "30 fps, steady"}}},
         {keys::kAccurateMul, "Accurate shader multiplication",
          "Fixes rare graphics glitches (e.g. some Pokemon effects). Slower.",
          {{"enabled", "On"}, {"disabled", "Off"}}},
@@ -114,6 +120,7 @@ std::string ValueOf(const std::string& key) {
     auto it = o.find(key);
     if (it != o.end()) return it->second;
     if (const CoreOptionDef* d = Svc().Catalog().Find(key)) return d->default_value;
+    if (key == keys::kFrameLock) return "60";
     return {};
 }
 } // namespace

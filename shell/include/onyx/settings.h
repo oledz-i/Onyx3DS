@@ -49,6 +49,8 @@ inline constexpr const char* kRender3d = "citra_render_3d";
 inline constexpr const char* kAnalogFunction = "citra_analog_function";
 inline constexpr const char* kAnalogDeadzone = "citra_analog_deadzone";
 inline constexpr const char* kUseLibretroSavePath = "citra_use_libretro_save_path";
+// ONYX's own (not a core option): "60" (default) or "30" frames shown per second.
+inline constexpr const char* kFrameLock = "onyx_frame_lock";
 } // namespace keys
 
 using CoreOptions = std::map<std::string, std::string>;

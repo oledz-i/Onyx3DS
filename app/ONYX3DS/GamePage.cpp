@@ -340,6 +340,7 @@ void GamePage::ShowGameSettings() {
         {keys::kFrameSkip, "Frame skip",
          {{"auto", "Auto (only when slow)"}, {"0", "Off"}, {"1", "Draw every 2nd frame"}, {"2", "Draw every 3rd frame"},
           {"3", "Draw every 4th frame"}}},
+        {keys::kFrameLock, "Frame rate lock", {{"60", "60 fps"}, {"30", "30 fps, steady"}}},
         {keys::kCpuClock, "CPU clock",
          {{"50", "50%"}, {"75", "75%"}, {"100", "100% (default)"}, {"125", "125%"}, {"150", "150%"},
           {"200", "200%"}}},

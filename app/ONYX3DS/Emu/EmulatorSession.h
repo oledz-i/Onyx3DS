@@ -144,6 +144,12 @@ private:
     // This game uses Azahar's software renderer: frames arrive as CPU pixels.
     std::atomic<bool> software_{true};
     int frames_since_drain_ = 0;
+    // Frame rate lock (keys::kFrameLock): 60, or 30 = show every 2nd frame at an
+    // even pace while the game keeps running at full speed.
+    std::atomic<int> frame_lock_{60};
+    uint64_t hw_frames_ = 0;
+    bool custom_textures_allowed_ = true; // false: no pack for this game
+    void UpdateFrameLockLocked(); // options_mutex_ held
     std::vector<uint32_t> sw_frame_; // reusable software frame (XRGB8888)
     std::mutex init_mutex_;
 
