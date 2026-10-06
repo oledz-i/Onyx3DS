@@ -128,12 +128,17 @@ private:
     void Mirror(const void* data, uint32_t width, uint32_t height, size_t pitch, bool rgba,
                 bool flip_y);
 
-    // CPU frame uploads (software renderer).
+    // CPU frame uploads into the swap chain path. Two buffers and allocators:
+    // the copy runs on the same queue as the draw, so the CPU only waits when
+    // the GPU is two frames behind.
     std::mutex upload_mutex_;
-    winrt::com_ptr<ID3D12Resource> upload_buffer_;
-    uint64_t upload_size_ = 0;
-    uint8_t* upload_mapped_ = nullptr;
-    winrt::com_ptr<ID3D12CommandAllocator> upload_alloc_;
+    static constexpr int kUploads = 2;
+    winrt::com_ptr<ID3D12Resource> upload_buffer_[kUploads];
+    uint64_t upload_size_[kUploads] = {};
+    uint8_t* upload_mapped_[kUploads] = {};
+    uint64_t upload_value_[kUploads] = {};
+    int upload_index_ = 0;
+    winrt::com_ptr<ID3D12CommandAllocator> upload_alloc_[kUploads];
     winrt::com_ptr<ID3D12GraphicsCommandList> upload_cmd_;
     winrt::com_ptr<ID3D12Fence> upload_fence_;
     uint64_t upload_fence_value_ = 0;

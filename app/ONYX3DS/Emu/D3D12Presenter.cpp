@@ -233,7 +233,8 @@ bool D3D12Presenter::CreateSwapChain(uint32_t width, uint32_t height) {
     sd.BufferCount = kBackBuffers;
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-    sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    // Opaque: the game picture never blends with XAML underneath.
+    sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     winrt::com_ptr<IDXGISwapChain1> sc1;
@@ -408,10 +409,12 @@ void D3D12Presenter::AbortWrite(int slot_index) {
 bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t height,
                                   size_t pitch, bool rgba, bool flip_y) {
     if (!data || width == 0 || height == 0 || !device_) return false;
-    Mirror(data, width, height, pitch, rgba, flip_y);
     cpu_w_ = width;
     cpu_h_ = height;
     if (cpu_view_.load()) {
+        // Only the XAML image view reads the mirror; the swap chain path below
+        // converts straight into its upload buffer (one full-frame pass, not two).
+        Mirror(data, width, height, pitch, rgba, flip_y);
         std::lock_guard lock(slot_mutex_);
         ++frames_in_window_; // still counts toward the game FPS shown in the overlay
         return true;
@@ -428,16 +431,23 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
     };
     try {
         if (!upload_cmd_) {
-            winrt::check_hresult(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                                 IID_PPV_ARGS(upload_alloc_.put())));
+            for (auto& a : upload_alloc_)
+                winrt::check_hresult(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                     IID_PPV_ARGS(a.put())));
             winrt::check_hresult(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                            upload_alloc_.get(), nullptr,
+                                                            upload_alloc_[0].get(), nullptr,
                                                             IID_PPV_ARGS(upload_cmd_.put())));
             upload_cmd_->Close();
             winrt::check_hresult(
                 device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(upload_fence_.put())));
             upload_event_ = CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
         }
+
+        // This upload buffer and allocator were last used two frames ago.
+        const int u = upload_index_;
+        if (upload_fence_->GetCompletedValue() < upload_value_[u] &&
+            !WaitFence(upload_fence_.get(), upload_value_[u], upload_event_, 1000))
+            return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
 
         int s = -1;
         SharedSlot* slot = BeginWrite(width, height, s);
@@ -448,10 +458,10 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         UINT64 total = 0;
         device_->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
 
-        if (!upload_buffer_ || upload_size_ < total) {
-            if (upload_buffer_) upload_buffer_->Unmap(0, nullptr);
-            upload_buffer_ = nullptr;
-            upload_mapped_ = nullptr;
+        if (!upload_buffer_[u] || upload_size_[u] < total) {
+            if (upload_buffer_[u]) upload_buffer_[u]->Unmap(0, nullptr);
+            upload_buffer_[u] = nullptr;
+            upload_mapped_[u] = nullptr;
             D3D12_HEAP_PROPERTIES hp{};
             hp.Type = D3D12_HEAP_TYPE_UPLOAD;
             D3D12_RESOURCE_DESC bd{};
@@ -464,16 +474,16 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
             bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
             HRESULT hr = device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
                                                           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                          IID_PPV_ARGS(upload_buffer_.put()));
+                                                          IID_PPV_ARGS(upload_buffer_[u].put()));
             if (SUCCEEDED(hr))
-                hr = upload_buffer_->Map(0, nullptr, reinterpret_cast<void**>(&upload_mapped_));
+                hr = upload_buffer_[u]->Map(0, nullptr, reinterpret_cast<void**>(&upload_mapped_[u]));
             if (FAILED(hr)) {
-                upload_buffer_ = nullptr;
-                upload_mapped_ = nullptr;
+                upload_buffer_[u] = nullptr;
+                upload_mapped_[u] = nullptr;
                 AbortWrite(s);
                 return fail("upload buffer", hr);
             }
-            upload_size_ = total;
+            upload_size_[u] = total;
         }
 
         // XRGB8888 (bytes B,G,R,X) -> RGBA8 with opaque alpha.
@@ -481,7 +491,7 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         for (uint32_t y = 0; y < height; ++y) {
             const uint32_t* in =
                 reinterpret_cast<const uint32_t*>(src + (flip_y ? height - 1 - y : y) * pitch);
-            uint32_t* out = reinterpret_cast<uint32_t*>(upload_mapped_ + fp.Offset +
+            uint32_t* out = reinterpret_cast<uint32_t*>(upload_mapped_[u] + fp.Offset +
                                                         static_cast<size_t>(y) * fp.Footprint.RowPitch);
             for (uint32_t x = 0; x < width; ++x) {
                 const uint32_t p = in[x];
@@ -490,13 +500,13 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
             }
         }
 
-        upload_alloc_->Reset();
-        upload_cmd_->Reset(upload_alloc_.get(), nullptr);
+        upload_alloc_[u]->Reset();
+        upload_cmd_->Reset(upload_alloc_[u].get(), nullptr);
         D3D12_TEXTURE_COPY_LOCATION dst{};
         dst.pResource = slot->texture.get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         D3D12_TEXTURE_COPY_LOCATION srcloc{};
-        srcloc.pResource = upload_buffer_.get();
+        srcloc.pResource = upload_buffer_[u].get();
         srcloc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         srcloc.PlacedFootprint = fp;
         // Simultaneous-access texture: implicitly promoted to COPY_DEST, decays to COMMON.
@@ -506,13 +516,11 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         queue_->ExecuteCommandLists(1, lists);
         const uint64_t v = ++upload_fence_value_;
         queue_->Signal(upload_fence_.get(), v);
-        if (upload_fence_->GetCompletedValue() < v) {
-            if (!WaitFence(upload_fence_.get(), v, upload_event_, 1000)) {
-                AbortWrite(s);
-                return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
-            }
-        }
-        EndWrite(s, 0); // already complete on the GPU
+        upload_value_[u] = v;
+        upload_index_ = (u + 1) % kUploads;
+        // No CPU wait: the draw that shows this frame is submitted later on the
+        // same queue, so the GPU runs the copy first.
+        EndWrite(s, 0);
         static uint64_t s_frames = 0;
         if (++s_frames == 1 || s_frames == 30 || s_frames % 600 == 0) {
             // How much of the picture is not black, sampled on a grid: tells a

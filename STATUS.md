@@ -106,6 +106,17 @@
   shader load, opacity skip). Core built with ENABLE_OPENGL=ON. azahar/0040 clears
   game_loaded in retro_unload_game (OpenGL context_destroy dereferenced the destroyed
   GPU on every stop; a second game in one run never booted).
+- Build #81 test (39968e73): OpenGL runs well but stalls exactly like Vulkan: GlHost
+  waits ~450 ms for a 3-frame-old fence every ~2.1 s, so the GPU is late on both
+  drivers. Every stalling log shows frames through the XAML WriteableBitmap (7.4 MB
+  hardware frames; software frames are 20x smaller and stall far less), plus an 8 MB
+  step memory sawtooth. Build #82: "Direct display" toggle (qol.direct_display) shows
+  CPU frames through the presenter's swap chain instead (alpha mode IGNORE now, in
+  case premultiplied alpha was why the panel stayed black in #35); mirror copy only
+  for the XAML view; swap chain upload double-buffered with no per-frame CPU wait;
+  XAML frame gap / update time logged; GL output FBO sized to the base geometry
+  (was 7200x4800). WGL can't enable glthread; the D3D12 GL driver already uses
+  Gallium's threaded context.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

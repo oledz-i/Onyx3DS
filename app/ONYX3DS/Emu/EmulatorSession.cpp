@@ -492,7 +492,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
                      : "The emulator did not request Vulkan rendering");
     } else if (!software_ && !use_gl_ && !vulkan_->CreateDevice(err)) {
         fail(err);
-    } else if (use_gl_ && !gl_->CreateContext(av.geometry.max_width, av.geometry.max_height,
+        // OpenGL output sized for the current layout (the core's max geometry
+        // covers every layout at the highest scale); it grows on demand.
+    } else if (use_gl_ && !gl_->CreateContext(av.geometry.base_width, av.geometry.base_height,
                                               hw_render_.depth, hw_render_.stencil, err)) {
         fail("The OpenGL renderer could not start: " + err);
     } else {
@@ -1141,8 +1143,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
         if (use_gl_ && gl_ && gl_->HasContext() && data) {
             const auto* av = static_cast<const retro_system_av_info*>(data);
-            gl_->EnsureSize(std::max(av->geometry.max_width, av->geometry.base_width),
-                            std::max(av->geometry.max_height, av->geometry.base_height));
+            gl_->EnsureSize(av->geometry.base_width, av->geometry.base_height);
         }
         return true;
     case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:

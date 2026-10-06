@@ -165,8 +165,31 @@ void EmulationPage::StopSoftwareView() {
 }
 
 void EmulationPage::UpdateSoftwareView() {
+    // How long the UI thread went without a XAML frame, and how long handing a
+    // frame to XAML took: tells a XAML stall apart from a GPU one in the log.
+    const auto t_in = std::chrono::steady_clock::now();
+    {
+        static auto s_prev = t_in;
+        static int s_logged = 0;
+        const double gap = std::chrono::duration<double, std::milli>(t_in - s_prev).count();
+        s_prev = t_in;
+        if (gap > 100.0 && (s_logged < 30 || s_logged % 50 == 0))
+            ONYX_WARN("XAML frame gap: %.0f ms without a UI frame", gap);
+        if (gap > 100.0) ++s_logged;
+    }
     uint32_t w = 0, h = 0;
     if (!Emu().Presenter().TakeMirror(sw_pixels_, w, h, sw_seq_)) return;
+    struct Timer {
+        std::chrono::steady_clock::time_point t0;
+        ~Timer() {
+            const double ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            static int s_logged = 0;
+            if (ms > 30.0 && (s_logged < 30 || s_logged % 50 == 0))
+                ONYX_WARN("XAML frame update took %.0f ms", ms);
+            if (ms > 30.0) ++s_logged;
+        }
+    } timer{std::chrono::steady_clock::now()};
     try {
         if (!sw_bitmap_ || sw_bitmap_.PixelWidth() != static_cast<int32_t>(w) ||
             sw_bitmap_.PixelHeight() != static_cast<int32_t>(h)) {
@@ -190,11 +213,18 @@ void EmulationPage::OnStarted() {
     // Picture first: nothing below may stop the game from being shown.
     LoadingOverlay().Visibility(Visibility::Collapsed);
     ONYX_INFO("Game started; loading screen hidden");
-    // Software frames are shown by the XAML image view.
+    // CPU frames are shown by the XAML image view, or with Direct display on,
+    // drawn by the presenter into the swap chain under it.
     if (Emu().UsingCpuFrames()) {
-        SoftwareView().Visibility(Visibility::Visible);
-        Emu().Presenter().SetCpuView(true);
-        StartSoftwareView();
+        if (Svc().Config().qol.direct_display) {
+            SoftwareView().Visibility(Visibility::Collapsed);
+            Emu().Presenter().SetCpuView(false);
+            ONYX_INFO("Display: direct (swap chain), XAML image view off");
+        } else {
+            SoftwareView().Visibility(Visibility::Visible);
+            Emu().Presenter().SetCpuView(true);
+            StartSoftwareView();
+        }
     }
     // No system cursor over the game. (Mouse mode itself is turned off once, in
     // the App constructor; changing RequiresPointerMode later throws.)

@@ -193,6 +193,7 @@ std::string Settings::ToJson() const {
         {"show_clock", q.show_clock},
         {"clock_24h", q.clock_24h},
         {"show_fps", q.show_fps},
+        {"direct_display", q.direct_display},
         {"show_battery_style_status", q.show_battery_style_status},
         {"resume_last_game", q.resume_last_game},
         {"quick_launch", q.quick_launch},
@@ -253,6 +254,7 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         Take(*q, "show_clock", o.show_clock);
         Take(*q, "clock_24h", o.clock_24h);
         Take(*q, "show_fps", o.show_fps);
+        Take(*q, "direct_display", o.direct_display);
         Take(*q, "show_battery_style_status", o.show_battery_style_status);
         Take(*q, "resume_last_game", o.resume_last_game);
         Take(*q, "quick_launch", o.quick_launch);
