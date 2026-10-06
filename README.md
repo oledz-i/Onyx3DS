@@ -160,6 +160,8 @@ tools/      Build scripts used locally and by CI
 third_party/  doctest, nlohmann/json, rcheevos
 ```
 
+If you wished to donate for the further advancement of this emulator, you could do so here, completely optional but it would mean a lot! https://ko-fi.com/oledz
+
 ## Credits
 
 ONYX stands on the work of these projects:
