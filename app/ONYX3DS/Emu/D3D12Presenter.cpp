@@ -258,6 +258,19 @@ bool D3D12Presenter::ResizeSwapChain(uint32_t width, uint32_t height) {
             return false;
         sc_width_ = width;
         sc_height_ = height;
+        // XAML requires SetSwapChain again after ResizeBuffers (on its UI thread);
+        // without it the panel can keep showing nothing.
+        if (auto panel = panel_) {
+            winrt::com_ptr<IDXGISwapChain3> sc = swapchain_;
+            panel.Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal,
+                                        [panel, sc]() {
+                                            try {
+                                                panel.as<ISwapChainPanelNative>()->SetSwapChain(sc.get());
+                                            } catch (...) {
+                                            }
+                                        });
+        }
+        ONYX_INFO("Display swap chain resized to %ux%u", width, height);
     }
     D3D12_CPU_DESCRIPTOR_HANDLE h = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
     for (UINT i = 0; i < kBackBuffers; ++i) {
