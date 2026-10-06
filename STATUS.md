@@ -103,7 +103,9 @@
   A guarded startup probe decides availability; OpenGL falls back to Vulkan, then
   Software. Settings v3 moves Vulkan users to OpenGL once. azahar/0039 carries his
   renderer_opengl fixes (vendor detection, no-binary shader cache, single-context
-  shader load, opacity skip). Core built with ENABLE_OPENGL=ON.
+  shader load, opacity skip). Core built with ENABLE_OPENGL=ON. azahar/0040 clears
+  game_loaded in retro_unload_game (OpenGL context_destroy dereferenced the destroyed
+  GPU on every stop; a second game in one run never booted).
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

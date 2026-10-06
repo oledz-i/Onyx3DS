@@ -1,0 +1,33 @@
+From 36bcda2045e3156cc8f2827e275bc8f29ec350c4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 13:40:06 -0400
+Subject: [PATCH] libretro: forget the loaded game on unload
+
+retro_unload_game shut the system down but left game_loaded set. With
+OpenGL, the frontend's context_destroy then released the renderer through
+the destroyed GPU (null dereference), and the next game's context_reset
+skipped loading it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/citra_libretro/citra_libretro.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index 2b5fd1d..011d0e6 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -642,6 +642,9 @@ bool retro_load_game(const struct retro_game_info* info) {
+ void retro_unload_game() {
+     LOG_DEBUG(Frontend, "Unloading game...");
+     Core::System::GetInstance().Shutdown();
++    // The GPU is gone now: context_destroy must not release the OpenGL renderer
++    // through it, and the next context_reset must boot the next game.
++    emu_instance->game_loaded = false;
+ }
+ 
+ unsigned retro_get_region() {
+-- 
+2.43.0
+
