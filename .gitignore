@@ -4,4 +4,5 @@ app/packages/
 build.log
 report.txt
 *.pfx
+!app/ONYX3DS/ONYX3DS_TemporaryKey.pfx
 app/ONYX3DS/*.dll

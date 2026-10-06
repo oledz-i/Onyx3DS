@@ -21,6 +21,16 @@ if (!(Test-Path $pfx)) {
     Export-Certificate -Cert $cert -FilePath (Join-Path $Root "out\ONYX3DS.cer") -Force | Out-Null
 }
 
+# Stable signing key (committed, sideload-only): every build is signed by the same
+# publisher, and the package version rises with each CI run, so a new build installs
+# over the old one and the app's saved data survives.
+Copy-Item (Join-Path $Root "app\ONYX3DS\ONYX3DS.cer") (Join-Path $Root "out\ONYX3DS.cer") -Force
+if ($env:GITHUB_RUN_NUMBER) {
+    $mf = Join-Path $Root "app\ONYX3DS\Package.appxmanifest"
+    $n = [int]$env:GITHUB_RUN_NUMBER % 65535
+    (Get-Content $mf -Raw) -replace '(<Identity[^>]*Version=")(\d+\.\d+\.\d+)\.\d+(")', "`${1}`$2.$n`$3" | Set-Content $mf -NoNewline
+}
+
 # Drivers ship at the package root (LoadPackagedLibrary looks there).
 foreach ($d in "vulkan_dzn.dll", "dxil.dll") {
     $src = Join-Path $Root "deps\bin\$d"

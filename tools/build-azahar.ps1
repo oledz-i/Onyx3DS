@@ -12,7 +12,7 @@ Write-Step "Configuring Azahar for WindowsStore (UWP)"
 $cmakeArgs = @(
     "-S", $src, "-B", $build,
     "-G", "Visual Studio 17 2022", "-A", "x64",
-    "-DCMAKE_SYSTEM_NAME=WindowsStore", "-DCMAKE_SYSTEM_VERSION=10.0",
+    "-DCMAKE_SYSTEM_NAME=WindowsStore", "-DCMAKE_SYSTEM_PROCESSOR=AMD64", "-DCMAKE_SYSTEM_VERSION=10.0",
     "-DENABLE_LIBRETRO=ON", "-DLIBRETRO_STATIC_CORE=ON",
     "-DENABLE_QT=OFF", "-DENABLE_SDL2=OFF", "-DENABLE_WEB_SERVICE=OFF",
     "-DENABLE_SCRIPTING=OFF", "-DENABLE_GDBSTUB=OFF", "-DENABLE_CUBEB=OFF",

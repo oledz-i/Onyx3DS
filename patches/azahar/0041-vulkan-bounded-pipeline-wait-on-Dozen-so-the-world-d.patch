@@ -1,0 +1,136 @@
+From 609ff5e3ee346ad33a17b3855b4d6c4c84d9ec05 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 18:21:59 -0400
+Subject: [PATCH] vulkan: bounded pipeline wait on Dozen so the world does not
+ load in late
+
+---
+ .../renderer_vulkan/vk_graphics_pipeline.h    |  8 +++++++
+ .../renderer_vulkan/vk_pipeline_cache.cpp     | 24 ++++++++++++++++++-
+ .../renderer_vulkan/vk_pipeline_cache.h       |  7 ++++++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  8 +++----
+ 4 files changed, 42 insertions(+), 5 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.h b/src/video_core/renderer_vulkan/vk_graphics_pipeline.h
+index 2d18f10..00748d2 100644
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.h
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <atomic>
+ #include "common/hash.h"
+ #include "common/thread_worker.h"
+@@ -30,6 +31,13 @@ public:
+         condvar.wait(lock, [this] { return is_done.load(std::memory_order::relaxed); });
+     }
+ 
++    // Wait at most `ms` milliseconds; true if the work finished.
++    bool WaitDoneFor(u32 ms) noexcept {
++        std::unique_lock lock{mutex};
++        return condvar.wait_for(lock, std::chrono::milliseconds(ms),
++                                [this] { return is_done.load(std::memory_order::relaxed); });
++    }
++
+     void MarkDone(bool done = true) noexcept {
+         std::scoped_lock lock{mutex};
+         is_done = done;
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index e7ded37..29bb0d0 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <chrono>
+ #include <boost/container/static_vector.hpp>
+ 
+ #include "common/common_paths.h"
+@@ -377,7 +378,28 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
+     // Finish a pending build here rather than on the render thread, so a pipeline
+     // the driver refused is caught before any draw is recorded with it.
+     if (!pipeline->IsDone()) {
+-        pipeline->WaitDone();
++        if (bounded_wait) {
++            // Dozen builds take 0.4-3 s. Wait briefly so world geometry does not pop in
++            // late, but cap the total stall to ~160 ms per second; past that, skip the draw.
++            const auto now = std::chrono::steady_clock::now();
++            if (now - budget_start >= std::chrono::seconds(1)) {
++                budget_start = now;
++                budget_used_ms = 0;
++            }
++            if (budget_used_ms >= 160) {
++                return false;
++            }
++            const u32 slice = std::min<u32>(80, 160 - budget_used_ms);
++            const bool done = pipeline->WaitDoneFor(slice);
++            budget_used_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
++                                  std::chrono::steady_clock::now() - now)
++                                  .count();
++            if (!done) {
++                return false;
++            }
++        } else {
++            pipeline->WaitDone();
++        }
+     }
+     if (pipeline->Failed()) {
+         return false;
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.h b/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+index a943486..6620ac2 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.h
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <bitset>
+ 
+ #include "video_core/rasterizer_interface.h"
+@@ -69,6 +70,9 @@ public:
+     /// Binds a pipeline using the provided information
+     bool BindPipeline(PipelineInfo& info, bool wait_built = false);
+ 
++    // Dozen: wait a little for pipelines instead of skipping draws outright.
++    bool bounded_wait = false;
++
+     Pica::Shader::Generator::ExtraVSConfig CalcExtraConfig(
+         const Pica::Shader::Generator::PicaVSConfig& config);
+ 
+@@ -102,6 +106,9 @@ public:
+     }
+ 
+ private:
++    std::chrono::steady_clock::time_point budget_start{};
++    u32 budget_used_ms = 0;
++
+     friend ShaderDiskCache;
+ 
+     /// Loads the driver pipeline cache
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index b0341b8..1e6538b 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -488,11 +488,11 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+     }
+ 
+     // Upstream waits for small draws (UI quads) so they never flicker in. On Dozen a
+-    // pipeline takes the Xbox driver 0.4-3 s to build, so waiting froze the game each
+-    // time a new effect appeared; skip those draws until their pipeline is ready.
++    // pipeline takes the Xbox driver 0.4-3 s to build: waiting forever froze the game,
++    // skipping made the world load in late. Wait a bounded time per second instead.
+     const bool is_dozen = static_cast<u32>(instance.GetDriverID()) == 23u;
+-    const bool wait_built =
+-        !async_shaders || (regs.pipeline.num_vertices <= 6 && !is_dozen);
++    pipeline_cache.bounded_wait = is_dozen;
++    const bool wait_built = !async_shaders || is_dozen || regs.pipeline.num_vertices <= 6;
+     if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+         return true;
+     }
+-- 
+2.43.0
+
