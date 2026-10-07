@@ -1,8 +1,8 @@
-From 609ff5e3ee346ad33a17b3855b4d6c4c84d9ec05 Mon Sep 17 00:00:00 2001
+From 0c372d42718c2d81e2a78380549d1275ac65c553 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 6 Oct 2026 18:21:59 -0400
-Subject: [PATCH] vulkan: bounded pipeline wait on Dozen so the world does not
- load in late
+Subject: [PATCH 41/44] vulkan: bounded pipeline wait on Dozen so the world
+ does not load in late
 
 ---
  .../renderer_vulkan/vk_graphics_pipeline.h    |  8 +++++++

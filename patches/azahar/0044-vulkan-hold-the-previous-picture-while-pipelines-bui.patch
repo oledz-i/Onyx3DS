@@ -1,7 +1,7 @@
-From 22017e880e79e9502ea0c60bb407da233d36c185 Mon Sep 17 00:00:00 2001
+From 7a52502725ac0de33880736ec16ccda1fc90eb76 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 6 Oct 2026 21:34:35 -0400
-Subject: [PATCH] vulkan: hold the previous picture while pipelines build
+Subject: [PATCH 44/44] vulkan: hold the previous picture while pipelines build
  instead of showing frames with missing scenery
 
 ---

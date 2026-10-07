@@ -173,7 +173,6 @@ ONYX stands on the work of these projects:
 - [dynarmic](https://github.com/azahar-emu/dynarmic): ARM dynamic recompiler
 - [FCEUmm](https://github.com/libretro/libretro-fceumm) (libretro): the NES core, built unmodified from a pinned commit as a separate DLL (GPL-2.0-or-later, see [`vendor/fceumm`](vendor/fceumm))
 - [Mesa / Dozen](https://gitlab.freedesktop.org/mesa/mesa): Vulkan on Direct3D 12 (MIT)
-- [SternXD/mesa-uwp](https://github.com/SternXD/mesa-uwp): Mesa's OpenGL on Direct3D 12 for UWP (MIT); the prebuilt runtime in [`vendor/mesa-gl`](vendor/mesa-gl) and the OpenGL renderer fixes in `patches/azahar` come from [danprice142's Azahar-UWP](https://github.com/danprice142/Azahar-UWP) (GPL-2.0-or-later)
 - [rcheevos](https://github.com/RetroAchievements/rcheevos): RetroAchievements client (MIT)
 - [SteamGridDB](https://www.steamgriddb.com): box art
 - [nlohmann/json](https://github.com/nlohmann/json) and [doctest](https://github.com/doctest/doctest) (MIT)

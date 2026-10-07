@@ -94,18 +94,12 @@
   CreateCommittedResource + release per use, and logs a 5 s summary of every GPU
   memory call (count, total and max time) plus fan conversions, to test whether
   kernel memory mapping lines up with the stalls.
-- Build #79: OpenGL hardware renderer. Mesa GL-on-D3D12 for UWP (SternXD/mesa-uwp
-  26.1.3 + three patches, prebuilt archive from danprice142/Azahar-UWP, vendored in
-  vendor/mesa-gl with licences) loaded with LoadPackagedLibrary. GlHost makes a
-  window-less WGL context on the emulation thread (Mesa then uses a 1x1 offscreen
-  framebuffer, never a CoreWindow swap chain), gives the core an RGBA8 FBO, and reads
-  frames back through a 3-slot PBO ring one frame behind, flipped by the presenter.
-  A guarded startup probe decides availability; OpenGL falls back to Vulkan, then
-  Software. Settings v3 moves Vulkan users to OpenGL once. azahar/0039 carries his
-  renderer_opengl fixes (vendor detection, no-binary shader cache, single-context
-  shader load, opacity skip). Core built with ENABLE_OPENGL=ON. azahar/0040 clears
-  game_loaded in retro_unload_game (OpenGL context_destroy dereferenced the destroyed
-  GPU on every stop; a second game in one run never booted).
+- Build #79: OpenGL hardware renderer (GlHost: window-less WGL context on the emulation
+  thread, RGBA8 FBO, PBO readback). The prebuilt Mesa GL runtime and a patch for it came
+  from a third-party project whose author asked us not to use it, so both were removed in
+  v3.0.3 (vendor/mesa-gl, old azahar/0039). OpenGL is not offered until we have our own
+  Mesa GL-on-D3D12 build; saved OpenGL settings now mean Vulkan. GlHost.cpp is our own
+  code and is kept dormant. azahar/0040 clears game_loaded in retro_unload_game.
 - Build #81 test (39968e73): OpenGL runs well but stalls exactly like Vulkan: GlHost
   waits ~450 ms for a 3-frame-old fence every ~2.1 s, so the GPU is late on both
   drivers. Every stalling log shows frames through the XAML WriteableBitmap (7.4 MB

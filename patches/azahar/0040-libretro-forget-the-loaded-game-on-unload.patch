@@ -1,7 +1,7 @@
-From 36bcda2045e3156cc8f2827e275bc8f29ec350c4 Mon Sep 17 00:00:00 2001
+From 12ddbd3103de51c251ff46229a6c86b4fa6662c9 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 6 Oct 2026 13:40:06 -0400
-Subject: [PATCH] libretro: forget the loaded game on unload
+Subject: [PATCH 40/44] libretro: forget the loaded game on unload
 
 retro_unload_game shut the system down but left game_loaded set. With
 OpenGL, the frontend's context_destroy then released the renderer through

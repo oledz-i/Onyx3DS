@@ -104,10 +104,8 @@ std::vector<Curated> CuratedOptions() {
          {{"English", "English"}, {"Japanese", "Japanese"}, {"French", "French"}, {"Spanish", "Spanish"},
           {"German", "German"}, {"Italian", "Italian"}, {"Dutch", "Dutch"}}},
         {keys::kGraphicsApi, "Renderer",
-         "Software always works but is slow. Hardware OpenGL is the fast one to try first; "
-         "Hardware Vulkan is the older experimental path.",
-         {{"Software", "Software (safe)"}, {"OpenGL", "Hardware (OpenGL)"},
-          {"Vulkan", "Hardware (Vulkan, experimental)"}}},
+         "Software always works but is slow. Hardware (Vulkan) is much faster.",
+         {{"Software", "Software (safe)"}, {"Vulkan", "Hardware (Vulkan)"}}},
         {keys::kCpuJit, "CPU JIT",
          "Off uses the interpreter: much slower, but a fallback if the JIT crashes.",
          {{"enabled", "On (fast)"}, {"disabled", "Off (interpreter)"}}},
@@ -478,15 +476,6 @@ void SettingsPage::BuildEmulation() {
                         "turn it off if the game screen stays black.",
                         kit::Toggle(Cfg().qol.direct_display, [](bool on) {
                             Cfg().qol.direct_display = on;
-                            Save();
-                        })));
-
-    Add(kit::SettingRow("OpenGL fast mode",
-                        "Lets the OpenGL driver skip its error checks, which saves processor time on "
-                        "every draw. Applies the next time ONYX starts. ONYX turns it off by itself "
-                        "if the hardware renderer ever crashes.",
-                        kit::Toggle(Cfg().qol.gl_fast_mode, [](bool on) {
-                            Cfg().qol.gl_fast_mode = on;
                             Save();
                         })));
 
@@ -962,15 +951,13 @@ void SettingsPage::BuildAbout() {
         Note(stamp);
     }
     Note("A Nintendo 3DS emulator frontend for Xbox Series X|S Dev Mode, running the Azahar emulator core "
-         "with OpenGL or Vulkan translated to DirectX 12 by Mesa.");
+         "with Vulkan translated to DirectX 12 by Mesa.");
     Note("Bring your own games: dump cartridges and system files from a 3DS you own. ONYX 3DS does not "
          "include or download any games, firmware or keys.");
     Add(kit::SectionHeader("Credits & licences"));
     for (const char* line : {
              "Azahar emulator (GPLv3+) - azahar-emu.org, built on Citra",
              "Mesa 3D / Dozen Vulkan-on-D3D12 driver (MIT)",
-             "Mesa OpenGL-on-D3D12 for UWP: SternXD/mesa-uwp (MIT); build and OpenGL fixes from "
-             "danprice142's Azahar-UWP (GPLv2+)",
              "rcheevos by RetroAchievements (MIT)",
              "nlohmann/json (MIT), doctest (MIT)",
              "DirectX Shader Compiler DXIL.dll (Microsoft redistributable)",

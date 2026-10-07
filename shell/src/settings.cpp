@@ -134,9 +134,10 @@ CoreOptions Settings::EffectiveCoreOptions(ConsoleModel model,
     if (auto it = per_game.find(title_id_hex); it != per_game.end())
         for (const auto& [k, v] : it->second) out[k] = v;
     // Never let a saved value pick a renderer the console cannot run. The Xbox
-    // build has OpenGL (Mesa on D3D12), Vulkan (Dozen) and Software.
-    const std::string& api = out[keys::kGraphicsApi];
-    if (api != "OpenGL" && api != "Vulkan") out[keys::kGraphicsApi] = "Software";
+    // build has Vulkan (Dozen) and Software. An older saved "OpenGL" means Vulkan.
+    std::string api = out[keys::kGraphicsApi];
+    if (api == "OpenGL") api = "Vulkan";
+    out[keys::kGraphicsApi] = (api == "Vulkan") ? "Vulkan" : "Software";
     out[keys::kUseLibretroSavePath] = "LibRetro Default";
     return out;
 }
@@ -378,6 +379,12 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
     if (s.version < 4) {
         s.qol.direct_display = true;
         s.version = 4;
+    }
+    // OpenGL is not offered in this build; anyone who had it goes to Vulkan.
+    if (s.core[keys::kGraphicsApi] == "OpenGL") s.core[keys::kGraphicsApi] = "Vulkan";
+    for (auto& [title, opts] : s.per_game) {
+        auto it = opts.find(keys::kGraphicsApi);
+        if (it != opts.end() && it->second == "OpenGL") it->second = "Vulkan";
     }
     return s;
 }

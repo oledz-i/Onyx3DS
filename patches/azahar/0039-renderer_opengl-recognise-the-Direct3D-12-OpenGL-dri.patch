@@ -1,0 +1,42 @@
+From 1379917a6b3090dc110fb219798e003650fc1d4b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 7 Oct 2026 03:40:41 -0400
+Subject: [PATCH 39/44] renderer_opengl: recognise the Direct3D 12 OpenGL
+ driver as its own vendor
+
+---
+ src/video_core/renderer_opengl/gl_driver.cpp | 3 +++
+ src/video_core/renderer_opengl/gl_driver.h   | 3 ++-
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_opengl/gl_driver.cpp b/src/video_core/renderer_opengl/gl_driver.cpp
+index 1a6a100..5be2ef0 100644
+--- a/src/video_core/renderer_opengl/gl_driver.cpp
++++ b/src/video_core/renderer_opengl/gl_driver.cpp
+@@ -158,6 +158,9 @@ void Driver::DeduceVendor() {
+         vendor = Vendor::Qualcomm;
+     } else if (gpu_vendor.find("Samsung") != gpu_vendor.npos) {
+         vendor = Vendor::Samsung;
++    } else if (gpu_vendor.find("Microsoft") != gpu_vendor.npos) {
++        // Direct3D 12 based OpenGL (Mesa on D3D12) reports itself as Microsoft.
++        vendor = Vendor::Microsoft;
+     } else if (gpu_vendor.find("GDI Generic") != gpu_vendor.npos) {
+         vendor = Vendor::Generic;
+     }
+diff --git a/src/video_core/renderer_opengl/gl_driver.h b/src/video_core/renderer_opengl/gl_driver.h
+index abd16bd..7a37f60 100644
+--- a/src/video_core/renderer_opengl/gl_driver.h
++++ b/src/video_core/renderer_opengl/gl_driver.h
+@@ -21,7 +21,8 @@ enum class Vendor {
+     ARM = 4,
+     Qualcomm = 5,
+     Samsung = 6,
+-    Generic = 7,
++    Microsoft = 7,
++    Generic = 8,
+ };
+ 
+ enum class DriverBug {
+-- 
+2.43.0
+
