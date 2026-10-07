@@ -1,0 +1,123 @@
+From b12e35daa83e366e7db36e6cdd91d9c4ae25b18b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 21:34:35 -0400
+Subject: [PATCH] vulkan: hold the previous picture while pipelines build
+ instead of showing frames with missing scenery
+
+---
+ .../emu_window/libretro_window.cpp            | 24 +++++++++++++++++++
+ .../renderer_vulkan/vk_frame_state.h          | 10 ++++++++
+ .../renderer_vulkan/vk_pipeline_cache.cpp     |  3 +++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  8 +++----
+ 4 files changed, 41 insertions(+), 4 deletions(-)
+ create mode 100644 src/video_core/renderer_vulkan/vk_frame_state.h
+
+diff --git a/src/citra_libretro/emu_window/libretro_window.cpp b/src/citra_libretro/emu_window/libretro_window.cpp
+index 676d91e..bb60486 100644
+--- a/src/citra_libretro/emu_window/libretro_window.cpp
++++ b/src/citra_libretro/emu_window/libretro_window.cpp
+@@ -8,6 +8,7 @@
+ #include <libretro.h>
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include <vector>
+ #include "audio_core/audio_types.h"
+@@ -21,6 +22,9 @@
+ #include "video_core/renderer_opengl/gl_state.h"
+ #endif
+ #include "video_core/gpu.h"
++#ifdef ENABLE_VULKAN
++#include "video_core/renderer_vulkan/vk_frame_state.h"
++#endif
+ #include "video_core/renderer_software/renderer_software.h"
+ #include "video_core/renderer_software/sw_frame_skip.h"
+ 
+@@ -90,6 +94,26 @@ void EmuWindow_LibRetro::SwapBuffers() {
+     }
+     case Settings::GraphicsAPI::Vulkan: {
+ #ifdef ENABLE_VULKAN
++        // A frame with skipped draws (pipelines still building) is not shown; the
++        // frontend keeps the previous picture. Never hold longer than 3 s, and never
++        // before the first picture.
++        {
++            using Clock = std::chrono::steady_clock;
++            static Clock::time_point hold_since{};
++            static bool shown_any = false;
++            const bool incomplete = Vulkan::g_frame_incomplete.exchange(false);
++            const auto now = Clock::now();
++            if (incomplete && shown_any) {
++                if (hold_since == Clock::time_point{}) hold_since = now;
++                if (now - hold_since < std::chrono::seconds(3)) {
++                    LibRetro::UploadVideoFrame(nullptr, static_cast<unsigned>(width),
++                                               static_cast<unsigned>(height), 0);
++                    break;
++                }
++            }
++            hold_since = {};
++            shown_any = true;
++        }
+         // Cursor is drawn inside the Vulkan render pass (RendererVulkan::DrawCursor)
+         LibRetro::UploadVideoFrame(RETRO_HW_FRAME_BUFFER_VALID, static_cast<unsigned>(width),
+                                    static_cast<unsigned>(height), 0);
+diff --git a/src/video_core/renderer_vulkan/vk_frame_state.h b/src/video_core/renderer_vulkan/vk_frame_state.h
+new file mode 100644
+index 0000000..64d1c21
+--- /dev/null
++++ b/src/video_core/renderer_vulkan/vk_frame_state.h
+@@ -0,0 +1,10 @@
++// ONYX: set when a draw of the current frame was skipped because its pipeline was
++// still being built. The libretro window then shows the previous picture instead of
++// a frame with missing scenery (the blue/empty screens while a new area loads).
++#pragma once
++
++#include <atomic>
++
++namespace Vulkan {
++inline std::atomic<bool> g_frame_incomplete{false};
++}
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 8290ab2..8c0d737 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include "video_core/renderer_vulkan/vk_frame_state.h"
+ #include <chrono>
+ #include <boost/container/static_vector.hpp>
+ 
+@@ -374,6 +375,8 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
+ 
+     GraphicsPipeline* const pipeline = curr_disk_cache->GetPipeline(info);
+     if (!pipeline->IsDone() && !pipeline->TryBuild(wait_built)) {
++        // Still building: this draw is skipped, so the frame lacks something.
++        g_frame_incomplete.store(true, std::memory_order_relaxed);
+         return false;
+     }
+     // Finish a pending build here rather than on the render thread, so a pipeline
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 1e6538b..f47c02c 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -488,11 +488,11 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+     }
+ 
+     // Upstream waits for small draws (UI quads) so they never flicker in. On Dozen a
+-    // pipeline takes the Xbox driver 0.4-3 s to build: waiting forever froze the game,
+-    // skipping made the world load in late. Wait a bounded time per second instead.
++    // pipeline takes the Xbox driver 0.4-3 s to build: waiting froze the game, so the
++    // draw is skipped and the frame is flagged incomplete; the libretro window then
++    // keeps showing the previous picture until the pipelines are ready.
+     const bool is_dozen = static_cast<u32>(instance.GetDriverID()) == 23u;
+-    pipeline_cache.bounded_wait = is_dozen;
+-    const bool wait_built = !async_shaders || is_dozen || regs.pipeline.num_vertices <= 6;
++    const bool wait_built = !async_shaders || (regs.pipeline.num_vertices <= 6 && !is_dozen);
+     if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+         return true;
+     }
+-- 
+2.43.0
+

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
 #include "App.h"
+#include <cstdlib>
 #include "Platform/SaveBackup.h"
 
 #include "MainPage.h"
@@ -129,6 +130,11 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     // Bring up graphics and run the Dozen self-test without blocking the menu.
     RunAsync([] {
         std::string error;
+        // Mesa reads this when the first OpenGL context is created.
+        if (AppServices::Get().Config().qol.gl_fast_mode) {
+            _putenv_s("MESA_NO_ERROR", "true");
+            ONYX_INFO("OpenGL fast mode on (Mesa error checks off)");
+        }
         if (!EmulatorSession::Get().Initialize(error)) {
             ONYX_ERROR("Graphics initialisation failed: %s", error.c_str());
             AppServices::Get().Toast("Graphics setup failed: " + error +

@@ -312,6 +312,7 @@ void EmulationPage::OnStopped(const std::string& reason) {
         auto& cfg = Svc().Config();
         cfg.core[keys::kGraphicsApi] = "Software";
         for (auto& [title, opts] : cfg.per_game) opts.erase(keys::kGraphicsApi);
+        cfg.qol.gl_fast_mode = false; // in case skipped error checks were the cause
         Svc().SaveSettings();
         ONYX_WARN("Hardware renderer crashed; switched to software rendering");
     }

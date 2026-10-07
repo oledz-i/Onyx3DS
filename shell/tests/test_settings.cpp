@@ -182,6 +182,13 @@ TEST_CASE("Direct display: on by default, older files switched on once") {
     CHECK_FALSE(Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS).qol.direct_display);
 }
 
+TEST_CASE("OpenGL fast mode: on by default, survives a round trip") {
+    Settings s = Settings::Defaults(ConsoleModel::SeriesS);
+    CHECK(s.qol.gl_fast_mode);
+    s.qol.gl_fast_mode = false;
+    CHECK_FALSE(Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS).qol.gl_fast_mode);
+}
+
 TEST_CASE("NES games folder: drive layout, accessors and JSON round trip") {
     Settings s = Settings::Defaults(ConsoleModel::SeriesS);
     s.folders.ApplyDriveLayout("E:");

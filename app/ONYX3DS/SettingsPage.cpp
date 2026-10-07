@@ -481,6 +481,15 @@ void SettingsPage::BuildEmulation() {
                             Save();
                         })));
 
+    Add(kit::SettingRow("OpenGL fast mode",
+                        "Lets the OpenGL driver skip its error checks, which saves processor time on "
+                        "every draw. Applies the next time ONYX starts. ONYX turns it off by itself "
+                        "if the hardware renderer ever crashes.",
+                        kit::Toggle(Cfg().qol.gl_fast_mode, [](bool on) {
+                            Cfg().qol.gl_fast_mode = on;
+                            Save();
+                        })));
+
     Add(kit::SectionHeader("All emulator options"));
     if (catalog.options.empty()) {
         Note("The full list from the Azahar core appears here after you start any game once.");

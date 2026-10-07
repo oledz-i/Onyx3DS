@@ -78,6 +78,9 @@ struct QolSettings {
     // Show the game through the DirectX swap chain instead of a XAML image
     // (handing every frame to XAML caused the periodic half-second freezes).
     bool direct_display = true;
+    // OpenGL (Mesa) skips its API error checks: less CPU per draw. Switched off again
+    // by the app if the hardware renderer ever crashes.
+    bool gl_fast_mode = true;
     bool show_battery_style_status = true; // controller battery in the top bar
     bool resume_last_game = false;         // jump straight into the last game on launch
     bool quick_launch = false;             // A on a channel starts the game (skip the preview)
