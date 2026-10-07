@@ -36,6 +36,7 @@ add_library(onyx_shell STATIC
     src/theme.cpp
     src/core_options.cpp
     src/pixel.cpp
+    src/text_input.cpp
     src/patch.cpp
     src/nes_support.cpp)
 target_include_directories(onyx_shell PUBLIC include ${ONYX_THIRD_PARTY})
@@ -57,6 +58,7 @@ if(ONYX_SHELL_TESTS)
         tests/test_cheats.cpp
         tests/test_services.cpp
         tests/test_pixel.cpp
+        tests/test_text_input.cpp
         tests/test_patch.cpp
         tests/test_nes.cpp)
     target_link_libraries(onyx_shell_tests PRIVATE onyx_shell)

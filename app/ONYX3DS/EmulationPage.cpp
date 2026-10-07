@@ -7,9 +7,11 @@
 #endif
 
 #include "Emu/EmulatorSession.h"
+#include "Emu/KeyboardBridge.h"
 #include "Platform/Imaging.h"
 #include "Platform/Log.h"
 #include "Ui/AppServices.h"
+#include "Ui/OnScreenKeyboard.h"
 #include "Ui/UiKit.h"
 
 using namespace winrt;
@@ -83,7 +85,11 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
     auto weak = get_weak();
     // In game, B belongs to the 3DS. Back only closes the ONYX menu.
     Svc().SetBackOverride([weak] {
-        if (auto self = weak.get(); self && self->menu_open_) self->CloseMenu();
+        auto self = weak.get();
+        if (!self) return true;
+        // B belongs to the on-screen keyboard while it is open (it deletes a letter).
+        if (self->KeyboardOpen()) self->kb_->OnBack();
+        else if (self->menu_open_) self->CloseMenu();
         return true;
     });
     Svc().SetToastSink([weak](const std::string& text) {
@@ -109,6 +115,10 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
 }
 
 void EmulationPage::OnNavigatedFrom(NavigationEventArgs const&) {
+    // Nothing may answer to this page any more, and the controller goes back to the game.
+    KeyboardBridge::Get().SetHandlers(KeyboardHandlers{});
+    HideKeyboard();
+    kb_.reset();
     fps_timer_.Stop();
     StopSoftwareView();
     Emu().SetEvents({});
@@ -146,6 +156,7 @@ void EmulationPage::StartGame() {
         if (Svc().Config().services.ra_notifications) Svc().Toast("\U0001F3C6 " + a.title + (a.detail.empty() ? "" : " - " + a.detail));
     };
     session.SetEvents(ev);
+    if (game_.system == GameSystem::N3DS) InstallKeyboard();
     Svc().RetroAchievements().SetEventSink(ev.achievement);
     Svc().RetroAchievements().SetHardcore(cfg.services.ra_hardcore);
 
@@ -273,6 +284,8 @@ void EmulationPage::OnStarted() {
 }
 
 void EmulationPage::OnStopped(const std::string& reason) {
+    KeyboardBridge::Get().SetHandlers(KeyboardHandlers{});
+    HideKeyboard();
     fps_timer_.Stop();
     StopSoftwareView();
     if (started_) {
@@ -374,7 +387,7 @@ void EmulationPage::UpdateFps() {
 }
 
 void EmulationPage::OnPointer(PointerRoutedEventArgs const& e, bool pressed) {
-    if (menu_open_) return;
+    if (menu_open_ || KeyboardOpen()) return;
     const auto pt = e.GetCurrentPoint(Panel()).Position();
     const double w = Panel().ActualWidth(), h = Panel().ActualHeight();
     const auto st = Emu().Presenter().GetStats();
@@ -389,10 +402,64 @@ void EmulationPage::OnPointer(PointerRoutedEventArgs const& e, bool pressed) {
 }
 
 // ---------------------------------------------------------------------------
+// On-screen keyboard (3DS software keyboard requests)
+
+bool EmulationPage::KeyboardOpen() const {
+    return kb_ && kb_->IsOpen();
+}
+
+void EmulationPage::InstallKeyboard() {
+    auto weak = get_weak();
+    KeyboardHandlers h;
+    // These run on the emulation thread: only hop to the UI thread, never touch XAML here.
+    h.open = [weak](const KeyboardRequestInfo& info) {
+        RunOnUi([weak, info] {
+            if (auto s = weak.get()) s->ShowKeyboard(info);
+        });
+    };
+    h.close = [weak] {
+        RunOnUi([weak] {
+            if (auto s = weak.get()) s->HideKeyboard();
+        });
+    };
+    h.rejected = [weak](const std::string& why) {
+        RunOnUi([weak, why] {
+            if (auto s = weak.get(); s && s->kb_) s->kb_->ShowRefusal(why);
+        });
+    };
+    KeyboardBridge::Get().SetHandlers(std::move(h));
+}
+
+void EmulationPage::ShowKeyboard(const KeyboardRequestInfo& info) {
+    if (quitting_) {
+        KeyboardBridge::Get().Abort("");
+        return;
+    }
+    if (!kb_) {
+        kit::OnScreenKeyboard::Callbacks cb;
+        cb.submit = [](const std::string& text, int button) { KeyboardBridge::Get().Submit(text, button); };
+        cb.abort = [](const std::string& fallback) { KeyboardBridge::Get().Abort(fallback); };
+        kb_ = std::make_shared<kit::OnScreenKeyboard>(Root(), std::move(cb));
+    }
+    // The controller belongs to the keyboard now; the game keeps running behind it.
+    Emu().Input().SetBlocked(true);
+    Emu().Input().SetPointer(0.0f, 0.0f, false);
+    kb_->Show(info);
+}
+
+void EmulationPage::HideKeyboard() {
+    const bool was_open = KeyboardOpen();
+    if (kb_) kb_->Hide();
+    Emu().Input().SetBlocked(false);
+    // The A press that confirmed the text must not reach the game.
+    if (was_open) Emu().Input().SuppressFor(std::chrono::milliseconds(300));
+}
+
+// ---------------------------------------------------------------------------
 // The ONYX menu
 
 void EmulationPage::OpenMenu() {
-    if (!started_ || quitting_) return;
+    if (!started_ || quitting_ || KeyboardOpen()) return;
     menu_open_ = true;
     menu_opened_at_ = std::chrono::steady_clock::now();
     Emu().SetPaused(true);
@@ -654,6 +721,8 @@ void EmulationPage::ShowMenuQuickSettings() {
 void EmulationPage::Quit() {
     if (quitting_) return;
     quitting_ = true;
+    KeyboardBridge::Get().SetHandlers(KeyboardHandlers{});
+    HideKeyboard();
     MenuOverlay().Visibility(Visibility::Collapsed);
     LoadingTitle().Text(kit::H(Svc().Config().qol.auto_save_state_on_exit ? "Saving and closing..."
                                                                          : "Closing..."));

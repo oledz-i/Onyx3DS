@@ -63,6 +63,18 @@ std::vector<Hotkey> InputManager::Poll() {
     const GamepadReading r = pad.GetCurrentReading();
     const auto now = std::chrono::steady_clock::now();
     if (now < suppress_until_) return hotkeys;
+    if (blocked_) {
+        // Keep the button tracking current so nothing looks freshly pressed when the
+        // controller is handed back to the game.
+        const uint32_t rb = static_cast<uint32_t>(GamepadButtons::RightShoulder);
+        // A fast-forward hold must not stay latched when RB is let go while blocked.
+        if ((prev_raw_ & rb) && !(static_cast<uint32_t>(r.Buttons) & rb)) hotkeys.push_back(Hotkey::FastForwardUp);
+        prev_raw_ = static_cast<uint32_t>(r.Buttons);
+        view_down_ = false;
+        view_used_for_hotkey_ = true;
+        select_pulse_frames_ = 0;
+        return hotkeys;
+    }
 
     const GamepadButtons b = r.Buttons;
     const bool view = Has(b, GamepadButtons::View);

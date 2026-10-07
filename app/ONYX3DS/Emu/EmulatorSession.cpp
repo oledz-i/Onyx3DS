@@ -6,6 +6,7 @@
 #include <cstdarg>
 
 #include "Emu/AzaharBridge.h"
+#include "Emu/KeyboardBridge.h"
 #include "Platform/CrashHandler.h"
 #include "Platform/Profiler.h"
 #include "Platform/Imaging.h"
@@ -722,6 +723,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     bool pause_flushed = false;
     while (!stop_requested_) {
         RunCommands();
+        // An answer from the on-screen keyboard (3DS games asking for text) goes to the core
+        // here, on this thread, between frames. One atomic load when nothing is waiting.
+        if (!nes) KeyboardBridge::Get().Pump();
         if (pause_requested_) {
             state_ = SessionState::Paused;
             presenter_.SetPaused(true);

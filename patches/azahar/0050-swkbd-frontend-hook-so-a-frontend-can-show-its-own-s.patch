@@ -1,0 +1,314 @@
+From 6f2e54ee4173672540e8d2cd31e1b4d534c0d92a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 21:15:47 -0400
+Subject: [PATCH] swkbd: frontend hook so a frontend can show its own software
+ keyboard
+
+DefaultKeyboard::Execute hands the request (limits, hint, buttons, filters,
+type) to an optional plain-function hook and leaves it open until the
+frontend answers through SubmitKeyboardText / AbortKeyboardRequest. Without a
+hook the console user name is still returned at once. A pending request is
+dropped when the libretro game is unloaded.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/citra_libretro/citra_libretro.cpp |   3 +
+ src/core/frontend/applets/swkbd.cpp   | 130 ++++++++++++++++++++++++++
+ src/core/frontend/applets/swkbd.h     |  63 +++++++++++++
+ src/core/hle/applets/swkbd.cpp        |   2 +
+ 4 files changed, 198 insertions(+)
+
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index 011d0e6..207870c 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -47,6 +47,7 @@
+ #include "core/cheats/cheats.h"
+ #include "core/cheats/gateway_cheat.h"
+ #include "core/frontend/applets/default_applets.h"
++#include "core/frontend/applets/swkbd.h"
+ #include "core/frontend/image_interface.h"
+ #include "core/hle/kernel/kernel.h"
+ #include "core/hle/kernel/memory.h"
+@@ -641,6 +642,8 @@ bool retro_load_game(const struct retro_game_info* info) {
+ 
+ void retro_unload_game() {
+     LOG_DEBUG(Frontend, "Unloading game...");
++    // A keyboard request the frontend is still showing dies with the game.
++    Frontend::DropKeyboardRequest();
+     Core::System::GetInstance().Shutdown();
+     // The GPU is gone now: context_destroy must not release the OpenGL renderer
+     // through it, and the next context_reset must boot the next game.
+diff --git a/src/core/frontend/applets/swkbd.cpp b/src/core/frontend/applets/swkbd.cpp
+index 07c25ea..ec90fa1 100644
+--- a/src/core/frontend/applets/swkbd.cpp
++++ b/src/core/frontend/applets/swkbd.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cctype>
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+@@ -144,11 +145,52 @@ const KeyboardData& SoftwareKeyboard::ReceiveData() {
+     return data;
+ }
+ 
++namespace {
++std::atomic<KeyboardRequestHook> g_request_hook{nullptr};
++std::atomic<DefaultKeyboard*> g_active_keyboard{nullptr}; // the instance with a pending request
++} // namespace
++
+ DefaultKeyboard::DefaultKeyboard(Core::System& system_) : system(system_) {}
+ 
++DefaultKeyboard::~DefaultKeyboard() {
++    DefaultKeyboard* self = this;
++    g_active_keyboard.compare_exchange_strong(self, nullptr);
++}
++
+ void DefaultKeyboard::Execute(const Frontend::KeyboardConfig& config_) {
+     SoftwareKeyboard::Execute(config_);
+ 
++    if (const KeyboardRequestHook hook = g_request_hook.load()) {
++        // A frontend shows its own keyboard: leave the request open until it answers.
++        data_ready = false;
++        g_active_keyboard = this;
++        const auto text_or_empty = [this](size_t i) {
++            return i < config.button_text.size() ? config.button_text[i].c_str() : "";
++        };
++        KeyboardRequest request{};
++        request.button_config = static_cast<int>(config.button_config);
++        request.accept_mode = static_cast<int>(config.accept_mode);
++        request.type = static_cast<int>(config.type);
++        request.multiline = config.multiline_mode;
++        request.password = config.password;
++        request.prevent_digit = config.filters.prevent_digit;
++        request.prevent_at = config.filters.prevent_at;
++        request.prevent_percent = config.filters.prevent_percent;
++        request.prevent_backslash = config.filters.prevent_backslash;
++        request.prevent_profanity = config.filters.prevent_profanity;
++        request.callback = config.filters.enable_callback;
++        request.max_text_length = config.max_text_length;
++        request.max_digits = config.max_digits;
++        request.hint_text = config.hint_text.c_str();
++        for (size_t i = 0; i < 3; ++i) {
++            request.button_text[i] = text_or_empty(i);
++        }
++        request.error_text = last_error.c_str();
++        hook(&request);
++        last_error.clear();
++        return;
++    }
++
+     auto cfg = Service::CFG::GetModule(system);
+     std::string username = Common::UTF16ToUTF8(cfg->GetUsername());
+     switch (this->config.button_config) {
+@@ -169,6 +211,94 @@ void DefaultKeyboard::Execute(const Frontend::KeyboardConfig& config_) {
+ 
+ void DefaultKeyboard::ShowError(const std::string& error) {
+     LOG_ERROR(Applet_SWKBD, "Default keyboard text is unaccepted! error: {}", error);
++    // Kept for the Execute() that follows when the game lets the user try again.
++    last_error = error;
++}
++
++void DefaultKeyboard::ForceFinalize(const std::string& text, u8 button) {
++    data = {text, button};
++    data_ready = true;
++}
++
++void SetKeyboardRequestHook(KeyboardRequestHook hook) {
++    g_request_hook = hook;
++}
++
++bool KeyboardRequestPending() {
++    return g_active_keyboard.load() != nullptr;
++}
++
++int SubmitKeyboardText(const char* utf8, int button) {
++    DefaultKeyboard* kb = g_active_keyboard.load();
++    if (!kb) {
++        return -1;
++    }
++    if (button < 0 || button > 255) {
++        return static_cast<int>(ValidationError::ButtonOutOfRange);
++    }
++    const ValidationError error = kb->Finalize(utf8 ? utf8 : "", static_cast<u8>(button));
++    if (error == ValidationError::None) {
++        g_active_keyboard.compare_exchange_strong(kb, nullptr);
++    }
++    return static_cast<int>(error);
++}
++
++bool AbortKeyboardRequest(const char* utf8_fallback) {
++    DefaultKeyboard* kb = g_active_keyboard.load();
++    if (!kb) {
++        return false;
++    }
++    switch (kb->CurrentConfig().button_config) {
++    case ButtonConfig::Dual:
++    case ButtonConfig::Triple:
++        kb->ForceFinalize("", 0); // the Cancel button
++        break;
++    default:
++        kb->ForceFinalize(utf8_fallback ? utf8_fallback : "", 0);
++        break;
++    }
++    g_active_keyboard.compare_exchange_strong(kb, nullptr);
++    return true;
++}
++
++void DropKeyboardRequest() {
++    DefaultKeyboard* kb = g_active_keyboard.exchange(nullptr);
++    if (kb) {
++        if (const KeyboardRequestHook hook = g_request_hook.load()) {
++            hook(nullptr);
++        }
++    }
++}
++
++const char* KeyboardErrorText(int validation_error) {
++    switch (static_cast<ValidationError>(validation_error)) {
++    case ValidationError::None:
++        return "";
++    case ValidationError::ButtonOutOfRange:
++        return "That button is not available.";
++    case ValidationError::MaxDigitsExceeded:
++        return "Too many digits.";
++    case ValidationError::AtSignNotAllowed:
++        return "The @ sign is not allowed here.";
++    case ValidationError::PercentNotAllowed:
++        return "The % sign is not allowed here.";
++    case ValidationError::BackslashNotAllowed:
++        return "The \\ sign is not allowed here.";
++    case ValidationError::ProfanityNotAllowed:
++        return "That text is not allowed.";
++    case ValidationError::CallbackFailed:
++        return "The game did not accept that text.";
++    case ValidationError::FixedLengthRequired:
++        return "The text has to be exactly the full length.";
++    case ValidationError::MaxLengthExceeded:
++        return "The text is too long.";
++    case ValidationError::BlankInputNotAllowed:
++        return "Enter some text that is not just spaces.";
++    case ValidationError::EmptyInputNotAllowed:
++        return "Enter some text first.";
++    default:
++        return "That text was not accepted.";
++    }
+ }
+ 
+ } // namespace Frontend
+diff --git a/src/core/frontend/applets/swkbd.h b/src/core/frontend/applets/swkbd.h
+index 82a1a2e..27d7b64 100644
+--- a/src/core/frontend/applets/swkbd.h
++++ b/src/core/frontend/applets/swkbd.h
+@@ -4,9 +4,11 @@
+ 
+ #pragma once
+ 
++#include <string>
+ #include <utility>
+ #include <vector>
+ #include "common/assert.h"
++#include "common/common_types.h"
+ 
+ namespace Core {
+ class System;
+@@ -56,6 +58,8 @@ struct KeyboardConfig {
+         bool enable_callback;   /// Use a callback in order to check the input.
+     };
+     Filters filters;
++    u32 type = 0;          /// 0 normal, 1 QWERTY, 2 number pad, 3 western
++    bool password = false; /// The input should be concealed
+ };
+ 
+ struct KeyboardData {
+@@ -142,11 +146,70 @@ protected:
+ class DefaultKeyboard final : public SoftwareKeyboard {
+ public:
+     explicit DefaultKeyboard(Core::System& system_);
++    ~DefaultKeyboard() override;
+     void Execute(const KeyboardConfig& config) override;
+     void ShowError(const std::string& error) override;
+ 
++    /// Stores a result without validating it (used to close a request that cannot be completed).
++    void ForceFinalize(const std::string& text, u8 button);
++    /// The configuration of the request being answered.
++    const KeyboardConfig& CurrentConfig() const {
++        return config;
++    }
++
+ private:
+     Core::System& system;
++    std::string last_error;
+ };
+ 
++// ---------------------------------------------------------------------------------------------
++// Frontend hook: lets a frontend show its own keyboard instead of the default behaviour of
++// answering every request with the console user name. Plain types only, so a frontend can declare
++// these functions without Azahar's headers. All strings are valid only during the hook call.
++// ---------------------------------------------------------------------------------------------
++
++struct KeyboardRequest {
++    int button_config;     /// 0 = Ok, 1 = Cancel | Ok, 2 = Cancel | I forgot | Ok, 3 = none
++    int accept_mode;       /// AcceptedInput
++    int type;              /// 0 normal, 1 QWERTY, 2 number pad, 3 western
++    bool multiline;
++    bool password;
++    bool prevent_digit;
++    bool prevent_at;
++    bool prevent_percent;
++    bool prevent_backslash;
++    bool prevent_profanity;
++    bool callback;         /// the game validates the text itself after Ok
++    int max_text_length;   /// UTF-16 code units
++    int max_digits;
++    const char* hint_text;
++    const char* button_text[3]; /// "" when the game did not name the button
++    const char* error_text;     /// message from the game's filter callback, or ""
++};
++
++/// Called when a game opens the keyboard (on the emulation thread), with nullptr when a pending
++/// request ends without an answer (the game was unloaded). Pass nullptr to restore the default
++/// behaviour. The request is left unanswered until SubmitKeyboardText/AbortKeyboardRequest.
++using KeyboardRequestHook = void (*)(const KeyboardRequest* request);
++void SetKeyboardRequestHook(KeyboardRequestHook hook);
++
++/// True while a request handed to the hook has not been answered.
++bool KeyboardRequestPending();
++
++/// Answers the pending request with `utf8` and the pressed button (0 = left). Returns the
++/// ValidationError as an int (0 = accepted and delivered to the game; the request is still pending
++/// otherwise), or -1 when there is no pending request. Call on the emulation thread only.
++int SubmitKeyboardText(const char* utf8, int button);
++
++/// Closes the pending request no matter what: with the Cancel button when there is one,
++/// otherwise with `utf8_fallback` as the Ok result (without validation). Returns false when
++/// nothing was pending. Call on the emulation thread only.
++bool AbortKeyboardRequest(const char* utf8_fallback);
++
++/// Forgets a pending request without answering (the game is gone). Notifies the hook with nullptr.
++void DropKeyboardRequest();
++
++/// Short human-readable text for a ValidationError value (as returned by SubmitKeyboardText).
++const char* KeyboardErrorText(int validation_error);
++
+ } // namespace Frontend
+diff --git a/src/core/hle/applets/swkbd.cpp b/src/core/hle/applets/swkbd.cpp
+index c4aceb1..96fcfa1 100644
+--- a/src/core/hle/applets/swkbd.cpp
++++ b/src/core/hle/applets/swkbd.cpp
+@@ -200,6 +200,8 @@ Frontend::KeyboardConfig SoftwareKeyboard::ToFrontendConfig(
+         static_cast<bool>(config.filter_flags & SoftwareKeyboardFilter::Profanity);
+     frontend_config.filters.enable_callback =
+         static_cast<bool>(config.filter_flags & SoftwareKeyboardFilter::Callback);
++    frontend_config.type = static_cast<u32>(config.type);
++    frontend_config.password = config.password_mode != SoftwareKeyboardPasswordMode::None;
+     return frontend_config;
+ }
+ } // namespace HLE::Applets
+-- 
+2.43.0
+

@@ -48,6 +48,9 @@ public:
     // Ignore input briefly (after closing the pause menu, so the A press that
     // chose "Resume" does not reach the game).
     void SuppressFor(std::chrono::milliseconds ms);
+    // While true (the on-screen keyboard is open) the game sees no controller input and the
+    // hotkeys are off; the controller belongs to the keyboard.
+    void SetBlocked(bool blocked) { blocked_ = blocked; }
 
     // Mouse / touch pointer in normalised [-1, 1] screen space of the frame.
     void SetPointer(float x, float y, bool pressed);
@@ -65,6 +68,7 @@ private:
     int select_pulse_frames_ = 0;
     uint32_t prev_raw_ = 0;
     std::chrono::steady_clock::time_point suppress_until_{};
+    std::atomic<bool> blocked_{false};
     winrt::Windows::Gaming::Input::Gamepad last_pad_{nullptr};
     // Pointer
     std::atomic<float> ptr_x_{0}, ptr_y_{0};

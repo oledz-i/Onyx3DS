@@ -134,6 +134,7 @@
     <ClInclude Include="Emu\D3D12Presenter.h" />
     <ClInclude Include="Emu\EmulatorSession.h" />
     <ClInclude Include="Emu\InputManager.h" />
+    <ClInclude Include="Emu\KeyboardBridge.h" />
     <ClInclude Include="Emu\GlHost.h" />
     <ClInclude Include="Emu\VulkanHost.h" />
     <ClInclude Include="Platform\CrashHandler.h" />
@@ -144,6 +145,7 @@
     <ClInclude Include="Platform\SaveBackup.h" />
     <ClInclude Include="Ui\AppServices.h" />
     <ClInclude Include="Ui\UiKit.h" />
+    <ClInclude Include="Ui\OnScreenKeyboard.h" />
   </ItemGroup>
   <ItemGroup>
     <ApplicationDefinition Include="App.xaml">
@@ -198,6 +200,7 @@
     <ClCompile Include="Emu\GlHost.cpp" />
     <ClCompile Include="Emu\EmulatorSession.cpp" />
     <ClCompile Include="Emu\InputManager.cpp" />
+    <ClCompile Include="Emu\KeyboardBridge.cpp" />
     <ClCompile Include="Emu\VulkanHost.cpp" />
     <ClCompile Include="Platform\CrashHandler.cpp" />
     <ClCompile Include="Platform\Profiler.cpp" />
@@ -207,6 +210,7 @@
     <ClCompile Include="Platform\SaveBackup.cpp" />
     <ClCompile Include="Ui\AppServices.cpp" />
     <ClCompile Include="Ui\UiKit.cpp" />
+    <ClCompile Include="Ui\OnScreenKeyboard.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="ONYX3DS.idl" />

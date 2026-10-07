@@ -4,6 +4,13 @@
 #include "EmulationPage.g.h"
 #include "onyx/library.h"
 
+namespace onyx::app::ui {
+class OnScreenKeyboard;
+}
+namespace onyx::app {
+struct KeyboardRequestInfo;
+}
+
 namespace winrt::ONYX3DS::implementation {
 
 struct EmulationPage : EmulationPageT<EmulationPage> {
@@ -26,6 +33,14 @@ private:
     void Quit();
     void UpdateFps();
     void OnPointer(Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e, bool pressed);
+
+    // The on-screen keyboard for 3DS games that ask for text (see Ui/OnScreenKeyboard.h).
+    // Created and shown only while a request is open.
+    void InstallKeyboard();
+    void ShowKeyboard(const onyx::app::KeyboardRequestInfo& info);
+    void HideKeyboard();
+    bool KeyboardOpen() const;
+    std::shared_ptr<onyx::app::ui::OnScreenKeyboard> kb_;
 
     onyx::GameEntry game_;
     std::string launch_mode_;

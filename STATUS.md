@@ -162,3 +162,18 @@
   filter, NTSC paced at exactly 60 Hz (audio rate nudge covers the 0.16%). `Settings.nes` + `nes_patch`.
 - ROM patches: `shell/src/patch.cpp` (IPS, BPS, UPS with CRC32 checks), folder kind `NesPatches`
   (`Patches/NES` on the drive layout), game page "Patches".
+
+## On-screen keyboard for 3DS text requests (Oct 6, 2026, not yet built with MSVC or run on a console)
+- Games that open the 3DS software keyboard (names, numbers, messages) get an ONYX keyboard over the game instead
+  of the console user name. azahar/0050: `DefaultKeyboard::Execute` calls an app hook and leaves the request open;
+  the app answers through `Frontend::SubmitKeyboardText` (core validates, returns the error) or
+  `AbortKeyboardRequest`. Without a hook the old behaviour (answer with the user name) stays.
+- Flow: hook (emulation thread) -> `Emu/KeyboardBridge` -> `RunOnUi` -> `Ui/OnScreenKeyboard` (built in code, only
+  while open) -> answer into a mailbox -> `KeyboardBridge::Pump()` applies it on the emulation thread just before
+  `retro_run`. Refused text comes back as a message under the field; the game's own callback refusal reopens it with
+  the text kept.
+- Controls: D-pad / left stick move, A types, B delete, X space, Y Shift (tap again: Caps), LB/RB cursor, LT/RT key
+  page (letters, symbols, accents), Menu = OK, View = Cancel, hold View 1.5 s = close whatever the game wants. USB
+  keyboard and mouse work too. The game gets no controller input and the ONYX menu hotkeys are off while it is open.
+- Text model and key layouts: `shell/src/text_input.cpp` (unit tested).
+- Unverified: everything on a console. Not modelled: custom number-pad keys, predictive input, the game's initial text.

@@ -51,3 +51,33 @@ private:
     double stretch_ratio = 1.0;
 };
 } // namespace AudioCore
+
+// core/frontend/applets/swkbd.h, patch 0050. Plain types only; the struct must match the patched
+// header member for member. Strings are valid only while the hook runs.
+namespace Frontend {
+struct KeyboardRequest {
+    int button_config; // 0 = Ok, 1 = Cancel | Ok, 2 = Cancel | I forgot | Ok, 3 = none
+    int accept_mode;   // 0 anything, 1 not empty, 2 not empty and not blank, 3 not blank, 4 fixed length
+    int type;          // 0 normal, 1 QWERTY, 2 number pad, 3 western
+    bool multiline;
+    bool password;
+    bool prevent_digit;
+    bool prevent_at;
+    bool prevent_percent;
+    bool prevent_backslash;
+    bool prevent_profanity;
+    bool callback;
+    int max_text_length;
+    int max_digits;
+    const char* hint_text;
+    const char* button_text[3];
+    const char* error_text;
+};
+using KeyboardRequestHook = void (*)(const KeyboardRequest* request);
+void SetKeyboardRequestHook(KeyboardRequestHook hook);
+bool KeyboardRequestPending();
+int SubmitKeyboardText(const char* utf8, int button);
+bool AbortKeyboardRequest(const char* utf8_fallback);
+void DropKeyboardRequest();
+const char* KeyboardErrorText(int validation_error);
+} // namespace Frontend
