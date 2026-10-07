@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
 #include "Emu/D3D12Presenter.h"
+#include "onyx/nes_support.h"
 
 #include "Platform/Log.h"
 
