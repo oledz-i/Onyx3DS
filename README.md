@@ -74,7 +74,7 @@ All consoles need **Developer Mode** (see [Requirements](#requirements)). ONYX d
 
 Encrypted dumps are detected and flagged in the library. ONYX cannot decrypt them.
 
-NES games (`.nes`, `.unf`) go in their own folder (default `ONYX3DS/Roms/NES` on a set-up USB drive, or choose one under Settings > Folders > NES games). On NES the face buttons map as on a pad (Xbox B = NES A, Xbox A = NES B), Menu = Start, View tap = Select, X / Y = turbo A / B.
+NES games (`.nes`, `.unf`) go in their own folder (default `ONYX3DS/Roms/NES` on a set-up USB drive, or choose one under Settings > Folders > NES games). On NES the face buttons map as on a pad (Xbox B = NES A, Xbox A = NES B), Menu = Start, View tap = Select, X / Y = turbo A / B. Picture and colours (palette, 4:3 / 8:7 / 16:9, overscan crop, filter) are under Settings > Emulation > NES picture and in the in-game quick settings. ROM patches (`.ips`, `.bps`, `.ups`: widescreen hacks, translations) are applied in memory: name a patch like the game and put it next to the game or in `ONYX3DS/Patches/NES`, or pick one on the game's Patches page; the game file is never changed.
 
 ## Installation
 

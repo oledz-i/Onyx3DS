@@ -141,6 +141,22 @@ CoreOptions Settings::EffectiveCoreOptions(ConsoleModel model,
     return out;
 }
 
+const char* DisplayAspectName(DisplayAspect a) {
+    switch (a) {
+    case DisplayAspect::Tv43: return "4:3";
+    case DisplayAspect::Par87: return "8:7";
+    case DisplayAspect::Wide169: return "16:9";
+    default: return "native";
+    }
+}
+
+DisplayAspect DisplayAspectFromName(std::string_view n) {
+    if (n == "4:3") return DisplayAspect::Tv43;
+    if (n == "8:7") return DisplayAspect::Par87;
+    if (n == "16:9") return DisplayAspect::Wide169;
+    return DisplayAspect::Native;
+}
+
 namespace {
 
 const char* FfName(FastForwardMode m) { return m == FastForwardMode::Toggle ? "toggle" : "hold"; }
@@ -224,6 +240,15 @@ std::string Settings::ToJson() const {
         {"ra_notifications", s.ra_notifications},
         {"cheats_auto_download", s.cheats_auto_download},
     };
+    j["nes"] = {
+        {"palette", nes.palette},
+        {"aspect", DisplayAspectName(nes.aspect)},
+        {"crop_top_bottom", nes.crop_top_bottom},
+        {"crop_sides", nes.crop_sides},
+        {"filter", FilterName(nes.filter)},
+        {"no_sprite_limit", nes.no_sprite_limit},
+    };
+    j["nes_patch"] = nes_patch;
     j["profile"] = PerfProfileName(profile);
     j["core"] = core;
     j["per_game"] = per_game;
@@ -301,6 +326,27 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         Take(*sv, "ra_notifications", o.ra_notifications);
         Take(*sv, "cheats_auto_download", o.cheats_auto_download);
     }
+    if (auto nj = j.find("nes"); nj != j.end() && nj->is_object()) {
+        auto& o = s.nes;
+        Take(*nj, "palette", o.palette);
+        Take(*nj, "crop_top_bottom", o.crop_top_bottom);
+        Take(*nj, "crop_sides", o.crop_sides);
+        Take(*nj, "no_sprite_limit", o.no_sprite_limit);
+        std::string tmp;
+        Take(*nj, "aspect", tmp);
+        if (!tmp.empty()) {
+            const DisplayAspect a = DisplayAspectFromName(tmp);
+            if (a != DisplayAspect::Native) o.aspect = a; // the NES has no "native" choice
+        }
+        tmp.clear();
+        Take(*nj, "filter", tmp);
+        if (tmp == "sharp") o.filter = ScreenFilter::Sharp;
+        else if (tmp == "smooth") o.filter = ScreenFilter::Smooth;
+        else if (tmp == "crt") o.filter = ScreenFilter::Crt;
+        o.crop_top_bottom = std::clamp(o.crop_top_bottom, 0, 24);
+        o.crop_sides = std::clamp(o.crop_sides, 0, 16);
+    }
+    Take(j, "nes_patch", s.nes_patch);
     std::string profile;
     Take(j, "profile", profile);
     s.profile = PerfProfileFromName(profile);

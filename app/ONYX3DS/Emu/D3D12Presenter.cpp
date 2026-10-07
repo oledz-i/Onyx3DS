@@ -461,7 +461,8 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         }
 
         // This upload buffer and allocator were last used two frames ago.
-        const int u = upload_index_;
+        const int uploads = static_cast<uint64_t>(width) * height <= 512u * 512u ? kUploads : 3;
+        const int u = upload_index_ % uploads;
         if (upload_fence_->GetCompletedValue() < upload_value_[u]) {
             // The GPU has not finished reading this buffer yet (the presenter's queue
             // runs at the TV's refresh rate). Never block the emulator on that: drop
@@ -472,6 +473,10 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
                 !WaitFence(upload_fence_.get(), upload_value_[u], upload_event_, 1000))
                 return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
             if (upload_fence_->GetCompletedValue() < upload_value_[u]) {
+                if ((++upload_dropped_ & 63) == 1)
+                    ONYX_INFO("Display: %llu frames dropped so far because the GPU was still reading the "
+                              "upload buffer (%ux%u)",
+                              static_cast<unsigned long long>(upload_dropped_), width, height);
                 return true;
             }
         }
@@ -545,7 +550,7 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         const uint64_t v = ++upload_fence_value_;
         queue_->Signal(upload_fence_.get(), v);
         upload_value_[u] = v;
-        upload_index_ = (u + 1) % kUploads;
+        upload_index_ = (u + 1) % uploads;
         // No CPU wait: the draw that shows this frame is submitted later on the
         // same queue, so the GPU runs the copy first.
         EndWrite(s, 0);
@@ -741,8 +746,20 @@ void D3D12Presenter::DrawFrame(int slot, UINT back) {
         // Letterbox: fit the frame, keep its aspect ratio, centre it.
         const float fw = static_cast<float>(s.width), fh = static_cast<float>(s.height);
         const float ow = static_cast<float>(sc_width_), oh = static_cast<float>(sc_height_);
-        const float scale = std::min(ow / fw, oh / fh);
-        const float dw = fw * scale, dh = fh * scale;
+        float dw, dh;
+        const auto aspect = static_cast<DisplayAspect>(aspect_.load());
+        if (aspect == DisplayAspect::Native) {
+            const float scale = std::min(ow / fw, oh / fh);
+            dw = fw * scale;
+            dh = fh * scale;
+        } else {
+            // NES: 4:3 / 8:7 / 16:9, whole output pixels so the sharp filter's
+            // pixel grid does not shimmer on a fractional edge.
+            const DisplaySize fit = FitDisplay(s.width, s.height, static_cast<int>(sc_width_),
+                                               static_cast<int>(sc_height_), aspect);
+            dw = static_cast<float>(fit.width);
+            dh = static_cast<float>(fit.height);
+        }
         PresentConstants c{};
         c.dst_rect[0] = -dw / ow;
         c.dst_rect[1] = dh / oh;

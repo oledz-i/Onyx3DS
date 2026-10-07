@@ -61,6 +61,12 @@ CoreOptions ProfileOptions(PerfProfile profile);
 enum class FastForwardMode { Toggle, Hold };
 enum class ScreenFilter { Sharp, Smooth, Crt }; // output scaling on the TV
 enum class SortMode { Title, RecentlyPlayed, MostPlayed, Publisher, Region };
+// Shape of the picture on the TV. Native keeps the frame's own proportions (3DS);
+// the others are for the NES: 4:3 (a CRT TV), 8:7 (the console's real pixel shape)
+// and 16:9 (stretched over the whole screen).
+enum class DisplayAspect { Native, Tv43, Par87, Wide169 };
+const char* DisplayAspectName(DisplayAspect a);
+DisplayAspect DisplayAspectFromName(std::string_view name);
 
 struct QolSettings {
     bool menu_music = true;
@@ -103,6 +109,16 @@ struct ServiceSettings {
     bool cheats_auto_download = true;      // grab the cheat file when a game is first opened
 };
 
+// NES picture and colour choices (applied to FCEUmm and the presenter at game start).
+struct NesSettings {
+    std::string palette = "composite-direct-fbx"; // FCEUmm "fceumm_palette" value
+    DisplayAspect aspect = DisplayAspect::Tv43;
+    int crop_top_bottom = 8;   // pixels hidden at the top and the bottom (CRT overscan)
+    int crop_sides = 8;        // pixels hidden at the left and the right
+    ScreenFilter filter = ScreenFilter::Sharp;
+    bool no_sprite_limit = false; // draw every sprite (no flicker, less authentic)
+};
+
 struct Settings {
     int version = 4;
     FolderConfig folders;
@@ -111,6 +127,10 @@ struct Settings {
     PerfProfile profile = PerfProfile::Auto;
     CoreOptions core;                              // global values
     std::map<std::string, CoreOptions> per_game;   // TITLEID -> overrides
+    NesSettings nes;
+    // NES ROM patch per game (GameEntry::SaveKey()): "" / absent = automatic,
+    // "none" = unpatched, otherwise the patch file's path. See onyx/patch.h.
+    std::map<std::string, std::string> nes_patch;
     std::string last_played_path;
 
     // Defaults for a first launch on the given console.

@@ -150,3 +150,15 @@
 - Library: `GameLibrary(fs, cache/nes, GameSystem::Nes)` scans `FolderKind::NesRoms`
   (default `Roms/NES`); the 3DS library skips that folder. Home page tabs 3DS | NES (LT / RT).
 - Shell tests: 41 cases, 268 assertions.
+
+## NES picture, colours and patches (Oct 6, 2026, not yet built with MSVC or run on a console)
+- From the v3.0.0 tester notes (colours too saturated, SMB glitches and hitches, no logs). Causes found in the source: the
+  FCEUmm "default" palette (mean saturation 0.67 like the other vivid ones; the FBX composite/NTSC palettes are ~0.62-0.63);
+  the NES picture used the global "Smooth" filter (bilinear at 4.5x) at 256:224 (square pixels, not 8:7); pacing at
+  60.0988 fps on a 60 Hz screen (a repeated/skipped picture every ~10 s); only 3 upload buffers for a 245 KB frame;
+  battery save written on the emulation thread. Not proven on hardware: check the new "Display: N frames dropped" and
+  "NES: core reports ..." log lines.
+- Defaults: palette `composite-direct-fbx`, 4:3, hide 8 px on every side (core options `fceumm_overscan_*`), Sharp
+  filter, NTSC paced at exactly 60 Hz (audio rate nudge covers the 0.16%). `Settings.nes` + `nes_patch`.
+- ROM patches: `shell/src/patch.cpp` (IPS, BPS, UPS with CRC32 checks), folder kind `NesPatches`
+  (`Patches/NES` on the drive layout), game page "Patches".

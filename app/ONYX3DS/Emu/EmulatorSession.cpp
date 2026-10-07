@@ -343,7 +343,9 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     pixel_format_ = RETRO_PIXEL_FORMAT_XRGB8888;
     {
         std::lock_guard lock(options_mutex_);
-        options_ = nes ? CoreOptions{} : settings.EffectiveCoreOptions(model, game.TitleIdHex());
+        // NES: the user's palette / overscan choices; every other FCEUmm option keeps the
+        // default from the catalog the core registers.
+        options_ = nes ? NesCoreOptions(settings.nes) : settings.EffectiveCoreOptions(model, game.TitleIdHex());
         catalog_ = {};
         if (nes) {
             // The NES core runs with its own option defaults (the catalog it registers).
@@ -401,7 +403,13 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     stop_requested_ = false;
     pause_requested_ = false;
     write_auto_on_stop_ = false;
-    presenter_.SetFilter(settings.qol.screen_filter);
+    presenter_.SetFilter(nes ? settings.nes.filter : settings.qol.screen_filter);
+    presenter_.SetAspect(nes ? settings.nes.aspect : DisplayAspect::Native);
+    nes_patches_dir_ = settings.folders.nes_patches;
+    {
+        const auto it = settings.nes_patch.find(game.SaveKey());
+        nes_patch_choice_ = it == settings.nes_patch.end() ? std::string() : it->second;
+    }
     presenter_.SetPaused(false);
     presenter_.SetDimmed(false);
     state_ = SessionState::Starting;
@@ -617,6 +625,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         while (rom_dir_.size() > 1 && rom_dir_.back() == '/') rom_dir_.pop_back();
         rom_name_ = Stem(file);
         rom_ext_ = Extension(file).empty() ? std::string() : Extension(file).substr(1);
+        if (!rom_data_.empty()) ApplyNesPatch(fs, rom_path);
         game_info_ext_ = {};
         game_info_ext_.full_path = rom_path_.c_str();
         game_info_ext_.dir = rom_dir_.c_str();
@@ -634,7 +643,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     if (loaded) core.get_system_av_info(&av);
     if (loaded && nes) {
         const double fps = av.timing.fps;
-        if (fps > 30.0 && fps < 130.0) core_fps_ = fps;
+        if (fps > 30.0 && fps < 130.0) core_fps_ = NesPacingFps(fps);
+        ONYX_INFO("NES: core reports %.4f fps, %.0f Hz audio, %ux%u; pacing at %.4f fps", fps,
+                  av.timing.sample_rate, av.geometry.base_width, av.geometry.base_height, core_fps_);
     }
     if (!loaded) {
         fail(nes ? (rom_data_.empty() ? "The game file could not be read"
@@ -716,7 +727,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
             presenter_.SetPaused(true);
             if (nes && !pause_flushed) { // the menu is open: a good moment to write the battery save
                 pause_flushed = true;
-                FlushSram();
+                FlushSram(true);
             }
             if (RaActive()) ra_->Idle();
             timer.SleepUntil(std::chrono::steady_clock::now() + std::chrono::milliseconds(16));
@@ -757,7 +768,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         if (RaActive() && ra_->GameLoaded()) ra_->DoFrame();
         if (nes && ++sram_frames >= 600) { // ~10 s: keep the battery save on disk
             sram_frames = 0;
-            FlushSram();
+            FlushSram(false);
         }
         if (++frames_since_drain_ >= 120) { // ~2 s: surface driver warnings
             frames_since_drain_ = 0;
@@ -791,7 +802,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     RunCommands();
     if (write_auto_on_stop_) DoSaveState(0);
     if (RaActive()) ra_->UnloadGame();
-    if (nes) FlushSram();
+    if (nes) FlushSram(true);
     core.unload_game();
     sram_active_ = false;
     if (!software_ && hw_render_.context_destroy) hw_render_.context_destroy();
@@ -1015,6 +1026,31 @@ bool EmulatorSession::InstallCia(const std::string& path, const std::function<vo
 }
 
 // ---------------------------------------------------------------------------
+// NES ROM patches (IPS / BPS / UPS), applied to the ROM bytes in memory; the file is untouched.
+
+void EmulatorSession::ApplyNesPatch(IFileSystem& fs, const std::string& rom_path) {
+    const auto found = FindPatches(fs, rom_path, nes_patches_dir_);
+    const PatchCandidate* chosen = ChoosePatch(found, nes_patch_choice_);
+    if (!chosen) return;
+    const Bytes patch = fs.ReadAll(chosen->path);
+    if (patch.empty()) {
+        ONYX_WARN("Patch %s could not be read", chosen->path.c_str());
+        Message("Patch " + chosen->label + " could not be read");
+        return;
+    }
+    PatchResult result = ApplyPatch(rom_data_, patch);
+    if (result.ok()) {
+        ONYX_INFO("ROM patch applied: %s (%s, %zu -> %zu bytes)", chosen->path.c_str(),
+                  PatchFormatName(chosen->format), rom_data_.size(), result.data.size());
+        rom_data_ = std::move(result.data);
+        Message("Patch applied: " + chosen->label);
+    } else {
+        ONYX_WARN("ROM patch %s not applied: %s", chosen->path.c_str(), result.message.c_str());
+        Message("Patch " + chosen->label + " not applied: " + result.message);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // NES battery saves (SRAM): the core exposes the RAM, ONYX keeps <name>.srm in
 // LocalState/nes (mirrored to the USB drive by SaveBackup).
 
@@ -1040,18 +1076,34 @@ void EmulatorSession::LoadSram() {
     sram_active_ = true;
 }
 
-void EmulatorSession::FlushSram() {
+void EmulatorSession::FlushSram(bool wait) {
     if (!sram_active_) return;
+    if (!wait && sram_busy_.load()) return; // the previous write is still running: try again next time
+    // The core's RAM is only read on this thread; the write itself runs elsewhere.
+    if (sram_thread_.joinable() && (wait || !sram_busy_.load())) sram_thread_.join();
     const size_t size = api_->get_memory_size(RETRO_MEMORY_SAVE_RAM);
     auto* ram = static_cast<const uint8_t*>(api_->get_memory_data(RETRO_MEMORY_SAVE_RAM));
     if (!size || !ram || size != sram_last_.size()) return;
+    if (sram_failed_.exchange(false)) sram_last_.assign(size, static_cast<uint8_t>(~ram[0])); // force a retry after a failed write
     if (std::memcmp(ram, sram_last_.data(), size) == 0) return; // unchanged
-    UwpFileSystem fs;
-    if (fs.WriteAll(SramPath(), std::span<const u8>(ram, size))) {
-        sram_last_.assign(ram, ram + size);
-    } else {
-        ONYX_WARN("Could not write the battery save");
+    sram_last_.assign(ram, ram + size);
+    if (wait) {
+        UwpFileSystem fs;
+        if (!fs.WriteAll(SramPath(), std::span<const u8>(sram_last_.data(), size))) {
+            ONYX_WARN("Could not write the battery save");
+            sram_failed_ = true;
+        }
+        return;
     }
+    sram_busy_ = true;
+    sram_thread_ = std::thread([this, data = sram_last_, path = SramPath()] {
+        UwpFileSystem fs;
+        if (!fs.WriteAll(path, std::span<const u8>(data.data(), data.size()))) {
+            ONYX_WARN("Could not write the battery save");
+            sram_failed_ = true;
+        }
+        sram_busy_ = false;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,6 +1387,16 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
             if (!def) return false;
             it = options_.emplace(key, def->default_value).first;
         }
+        if (system_ == GameSystem::Nes) {
+            // The UI thread rewrites options_ while the game runs (quick settings): give the
+            // core its own copy, from a ring that outlives the call, so it never reads a
+            // string that is being changed.
+            if (option_value_storage_.empty()) option_value_storage_.resize(128);
+            std::string& slot = option_value_storage_[option_value_next_++ % option_value_storage_.size()];
+            slot = it->second;
+            var->value = slot.c_str();
+            return true;
+        }
         var->value = it->second.c_str();
         return true;
     }
@@ -1386,7 +1448,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
         if (system_ == GameSystem::Nes && data) { // e.g. the region option switched NTSC <-> PAL
             const double fps = static_cast<const retro_system_av_info*>(data)->timing.fps;
-            if (fps > 30.0 && fps < 130.0) core_fps_ = fps;
+            if (fps > 30.0 && fps < 130.0) core_fps_ = NesPacingFps(fps);
         }
         if (use_gl_ && gl_ && gl_->HasContext() && data) {
             const auto* av = static_cast<const retro_system_av_info*>(data);

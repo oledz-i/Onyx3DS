@@ -18,6 +18,7 @@ const char* FolderKindKey(FolderKind kind) {
     case FolderKind::Music: return "music";
     case FolderKind::Themes: return "themes";
     case FolderKind::NesRoms: return "nes_roms";
+    case FolderKind::NesPatches: return "nes_patches";
     default: return "unknown";
     }
 }
@@ -35,6 +36,7 @@ const char* FolderKindLabel(FolderKind kind) {
     case FolderKind::Music: return "Menu music";
     case FolderKind::Themes: return "Themes";
     case FolderKind::NesRoms: return "NES games";
+    case FolderKind::NesPatches: return "NES patches";
     default: return "?";
     }
 }
@@ -59,6 +61,9 @@ const char* FolderKindHelp(FolderKind kind) {
     case FolderKind::Music: return "Your own menu music. Leave empty to use the built-in track.";
     case FolderKind::Themes: return "Extra theme folders, each with a theme.json.";
     case FolderKind::NesRoms: return "NES games (.nes, .unf). Subfolders are scanned too.";
+    case FolderKind::NesPatches:
+        return "Patches (.ips .bps .ups) for NES games, e.g. widescreen hacks or translations. Name a patch like "
+               "the game, or put patches for a game in a folder with the game's name.";
     default: return "";
     }
 }
@@ -77,6 +82,7 @@ const std::string& FolderConfig::Get(FolderKind kind) const {
     case FolderKind::Music: return music;
     case FolderKind::Themes: return themes;
     case FolderKind::NesRoms: return nes_roms;
+    case FolderKind::NesPatches: return nes_patches;
     default: return empty;
     }
 }
@@ -97,13 +103,14 @@ void FolderConfig::Set(FolderKind kind, std::string path) {
     case FolderKind::Music: music = path; break;
     case FolderKind::Themes: themes = path; break;
     case FolderKind::NesRoms: nes_roms = path; break;
+    case FolderKind::NesPatches: nes_patches = path; break;
     default: break;
     }
 }
 
 std::vector<std::string> FolderConfig::DriveLayoutSubfolders() {
     return {"Roms",  "Updates & DLC", "Textures", "Mods",  "Cheats",
-            "System", "Screenshots",  "Music",    "Themes",  "Roms/NES"};
+            "System", "Screenshots",  "Music",    "Themes",  "Roms/NES", "Patches/NES"};
 }
 
 void FolderConfig::ApplyDriveLayout(const std::string& drive_root) {
@@ -121,6 +128,7 @@ void FolderConfig::ApplyDriveLayout(const std::string& drive_root) {
     fill(music, "Music");
     fill(themes, "Themes");
     fill(nes_roms, "Roms/NES");
+    fill(nes_patches, "Patches/NES");
     // saves intentionally stays on the console unless the user opts in
 }
 

@@ -17,6 +17,8 @@
 #include "onyx/cheats.h"
 #include "onyx/core_options.h"
 #include "onyx/library.h"
+#include "onyx/nes_support.h"
+#include "onyx/patch.h"
 #include "onyx/paths.h"
 #include "onyx/pixel.h"
 #include "onyx/settings.h"
@@ -149,7 +151,10 @@ private:
     bool EnsureNesCore(std::string& error);
     bool RaActive() const { return ra_ && system_ == GameSystem::N3DS; }
     void LoadSram();
-    void FlushSram();
+    // Writes the battery save if it changed. `wait` = finish the write before returning;
+    // otherwise a worker thread does it (a USB drive can take far longer than a frame).
+    void FlushSram(bool wait);
+    void ApplyNesPatch(IFileSystem& fs, const std::string& rom_path);
     std::string SramPath() const;
     void OnCoreCrashed(const GuardedCrash& crash);
     // If the D3D12 device was removed, logs why (and DRED data when available).
@@ -187,6 +192,12 @@ private:
     retro_game_info_ext game_info_ext_{};
     std::vector<uint8_t> sram_last_;                // battery save as last written
     bool sram_active_ = false;
+    std::thread sram_thread_;                       // background battery save write
+    std::atomic<bool> sram_busy_{false};            // that write is still running
+    std::atomic<bool> sram_failed_{false};          // the last background write failed: retry
+    std::string nes_patches_dir_;                   // Settings folders.nes_patches
+    std::string nes_patch_choice_;                  // Settings nes_patch for this game
+    size_t option_value_next_ = 0;                  // ring position in option_value_storage_
     // Set when the core crashed. Its state is undefined afterwards, so it is
     // never called again in this process; the user restarts the app.
     std::atomic<bool> core_crashed_{false};

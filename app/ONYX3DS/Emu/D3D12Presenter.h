@@ -86,6 +86,8 @@ public:
 
     // --- settings ------------------------------------------------------------
     void SetFilter(ScreenFilter filter) { filter_.store(static_cast<int>(filter)); }
+    // Shape of the picture (Native = the frame's own proportions, as for the 3DS).
+    void SetAspect(DisplayAspect aspect) { aspect_.store(static_cast<int>(aspect)); }
     void SetPaused(bool paused) { paused_.store(paused); }
     void SetDimmed(bool dimmed) { dimmed_.store(dimmed); } // behind the pause menu
     void OnPanelResized(float width, float height, float scale_x, float scale_y);
@@ -135,8 +137,12 @@ private:
     // the copy runs on the same queue as the draw, so the CPU only waits when
     // the GPU is two frames behind.
     std::mutex upload_mutex_;
-    static constexpr int kUploads = 3;
+    // Large frames (3DS hardware read backs) cycle through 3 buffers, small ones (NES, the
+    // 3DS software renderer) through all 6, so a GPU that runs a few frames behind does not
+    // force dropped frames.
+    static constexpr int kUploads = 6;
     uint64_t upload_busy_since_ = 0;
+    uint64_t upload_dropped_ = 0;
     winrt::com_ptr<ID3D12Resource> upload_buffer_[kUploads];
     uint64_t upload_size_[kUploads] = {};
     uint8_t* upload_mapped_[kUploads] = {};
@@ -176,6 +182,7 @@ private:
     int last_drawn_slot_ = -1;
 
     std::atomic<int> filter_{static_cast<int>(ScreenFilter::Smooth)};
+    std::atomic<int> aspect_{static_cast<int>(DisplayAspect::Native)};
     std::atomic<bool> paused_{false};
     std::atomic<bool> dimmed_{false};
 

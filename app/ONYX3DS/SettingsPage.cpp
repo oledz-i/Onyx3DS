@@ -553,6 +553,49 @@ void SettingsPage::BuildControls() {
                                         Save();
                                     })));
 
+    if (EmulatorSession::NesCoreAvailable()) {
+        // NES picture and colours: used by every NES game (also in the in-game quick settings).
+        Add(kit::SectionHeader("NES picture"));
+        const NesSettings nes = Cfg().nes;
+        Add(kit::SettingRow("Colours", "Colour palette of the NES picture. Applies the next time a game starts.",
+                            kit::Choice(NesPaletteChoices(), nes.palette, [](const std::string& v) {
+                                Cfg().nes.palette = v;
+                                Save();
+                            })));
+        Add(kit::SettingRow("Picture shape", "4:3 looks like a TV; 8:7 is the console's exact pixel shape",
+                            kit::Choice(NesAspectChoices(), DisplayAspectName(nes.aspect), [](const std::string& v) {
+                                Cfg().nes.aspect = DisplayAspectFromName(v);
+                                Save();
+                            })));
+        Add(kit::SettingRow("Hide top and bottom", "Like TV overscan; hides scrolling glitches at the edges",
+                            kit::Choice(NesCropChoices(), std::to_string(nes.crop_top_bottom),
+                                        [](const std::string& v) {
+                                            Cfg().nes.crop_top_bottom = std::atoi(v.c_str());
+                                            Save();
+                                        })));
+        Add(kit::SettingRow("Hide left and right", "",
+                            kit::Choice(NesCropChoices(), std::to_string(nes.crop_sides), [](const std::string& v) {
+                                Cfg().nes.crop_sides = std::atoi(v.c_str());
+                                Save();
+                            })));
+        Add(kit::SettingRow("Upscaling look", "How the NES picture is stretched to your TV",
+                            kit::Choice({{"sharp", "Sharp pixels"}, {"smooth", "Smooth"}, {"crt", "CRT scanlines"}},
+                                        nes.filter == ScreenFilter::Sharp ? "sharp"
+                                        : nes.filter == ScreenFilter::Crt ? "crt"
+                                                                          : "smooth",
+                                        [](const std::string& v) {
+                                            Cfg().nes.filter = v == "sharp" ? ScreenFilter::Sharp
+                                                               : v == "crt" ? ScreenFilter::Crt
+                                                                            : ScreenFilter::Smooth;
+                                            Save();
+                                        })));
+        Add(kit::SettingRow("Draw all sprites", "Removes the flicker of the original sprite limit",
+                            kit::Toggle(nes.no_sprite_limit, [](bool on) {
+                                Cfg().nes.no_sprite_limit = on;
+                                Save();
+                            })));
+    }
+
     Add(kit::SectionHeader("Controller"));
     Add(kit::SettingRow("Button layout",
                         "Positional keeps Nintendo's button positions (Xbox B = 3DS A). Labels makes Xbox A = 3DS A.",

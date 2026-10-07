@@ -17,6 +17,7 @@ private:
     void Launch(const std::string& mode);
     void ShowCheats();
     void ShowGameSettings();
+    void ShowNesGameSettings();
     void ShowStates();
     void CloseSide();
     void OnBack(Windows::Foundation::IInspectable const&, Windows::UI::Core::BackRequestedEventArgs const& e);

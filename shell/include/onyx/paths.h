@@ -25,6 +25,7 @@ enum class FolderKind {
     Music,         // menu music playlist (.mp3 .wma .m4a .wav .ogg)
     Themes,        // extra theme packs (folders with theme.json)
     NesRoms,       // NES games: .nes .unf (separate library from the 3DS games)
+    NesPatches,    // NES ROM patches: .ips .bps .ups (widescreen hacks, translations)
     Count
 };
 
@@ -44,6 +45,7 @@ struct FolderConfig {
     std::string music;
     std::string themes;
     std::string nes_roms;
+    std::string nes_patches;
 
     // Single-folder accessors; Roms returns the first entry.
     const std::string& Get(FolderKind kind) const;

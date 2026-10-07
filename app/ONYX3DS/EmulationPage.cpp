@@ -581,12 +581,45 @@ void EmulationPage::ShowMenuQuickSettings() {
         panel.Children().Append(kit::SettingRow(label, "", combo));
     };
     if (game_.system == GameSystem::Nes) {
-        // FCEUmm's own options (only the ones this core version offers are shown).
+        // Picture and colour choices are kept in Settings (all NES games); FCEUmm's own
+        // options (region, filter, turbo) are for this session.
+        auto remember = [](const std::function<void(NesSettings&)>& change) {
+            change(Svc().Config().nes);
+            Svc().SaveSettings();
+        };
+        auto row = [&](const char* label, const char* help,
+                       const std::vector<std::pair<std::string, std::string>>& values, const std::string& current,
+                       std::function<void(const std::string&)> changed) {
+            panel.Children().Append(kit::SettingRow(label, help, kit::Choice(values, current, std::move(changed))));
+        };
+        const NesSettings nes = Svc().Config().nes;
         pick("fceumm_region", "Region");
-        pick("fceumm_palette", "Palette");
+        row("Colours", "", NesPaletteChoices(), nes.palette, [remember](const std::string& v) {
+            remember([&](NesSettings& n) { n.palette = v; });
+            Emu().ApplyCoreOptions({{nes_keys::kPalette, v}});
+        });
+        row("Picture shape", "", NesAspectChoices(), DisplayAspectName(nes.aspect), [remember](const std::string& v) {
+            const DisplayAspect a = DisplayAspectFromName(v);
+            remember([&](NesSettings& n) { n.aspect = a; });
+            Emu().Presenter().SetAspect(a);
+        });
+        row("Hide top and bottom", "Like TV overscan; hides scrolling glitches", NesCropChoices(),
+            std::to_string(nes.crop_top_bottom), [remember](const std::string& v) {
+                remember([&](NesSettings& n) { n.crop_top_bottom = std::atoi(v.c_str()); });
+                Emu().ApplyCoreOptions(NesCoreOptions(Svc().Config().nes));
+            });
+        row("Hide left and right", "", NesCropChoices(), std::to_string(nes.crop_sides),
+            [remember](const std::string& v) {
+                remember([&](NesSettings& n) { n.crop_sides = std::atoi(v.c_str()); });
+                Emu().ApplyCoreOptions(NesCoreOptions(Svc().Config().nes));
+            });
+        panel.Children().Append(kit::SettingRow(
+            "Draw all sprites", "Removes the flicker of the original sprite limit",
+            kit::Toggle(nes.no_sprite_limit, [remember](bool on) {
+                remember([&](NesSettings& n) { n.no_sprite_limit = on; });
+                Emu().ApplyCoreOptions(NesCoreOptions(Svc().Config().nes));
+            })));
         pick("fceumm_ntsc_filter", "NTSC filter");
-        pick("fceumm_overscan", "Hide overscan");
-        pick("fceumm_nospritelimit", "Sprite limit");
         pick("fceumm_turbo_enable", "Turbo buttons");
     } else {
         pick(keys::kResolution, "Internal resolution");
@@ -596,15 +629,18 @@ void EmulationPage::ShowMenuQuickSettings() {
         pick(keys::kTextureFilter, "Texture filter");
         pick(keys::kCpuClock, "CPU clock");
     }
+    const bool nes_game = game_.system == GameSystem::Nes;
+    const ScreenFilter current_filter =
+        nes_game ? Svc().Config().nes.filter : Svc().Config().qol.screen_filter;
     auto filter = kit::Choice({{"sharp", "Sharp pixels"}, {"smooth", "Smooth"}, {"crt", "CRT"}},
-                              Svc().Config().qol.screen_filter == ScreenFilter::Sharp ? "sharp"
-                              : Svc().Config().qol.screen_filter == ScreenFilter::Crt ? "crt"
-                                                                                       : "smooth",
-                              [](const std::string& v) {
+                              current_filter == ScreenFilter::Sharp ? "sharp"
+                              : current_filter == ScreenFilter::Crt ? "crt"
+                                                                    : "smooth",
+                              [nes_game](const std::string& v) {
                                   auto f = v == "sharp" ? ScreenFilter::Sharp
                                            : v == "crt" ? ScreenFilter::Crt
                                                         : ScreenFilter::Smooth;
-                                  Svc().Config().qol.screen_filter = f;
+                                  (nes_game ? Svc().Config().nes.filter : Svc().Config().qol.screen_filter) = f;
                                   Svc().SaveSettings();
                                   Emu().Presenter().SetFilter(f);
                               });

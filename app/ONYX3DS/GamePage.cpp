@@ -180,6 +180,10 @@ void GamePage::Build() {
         row2.Children().Append(kit::ActionButton("Game settings", kit::glyph::Settings, [weak] {
             if (auto self = weak.get()) self->ShowGameSettings();
         }));
+    } else {
+        row2.Children().Append(kit::ActionButton("Patches", kit::glyph::Settings, [weak] {
+            if (auto self = weak.get()) self->ShowNesGameSettings();
+        }));
     }
     row2.Children().Append(kit::ActionButton("Get artwork", kit::glyph::Picture, [weak] {
         auto self = weak.get();
@@ -385,6 +389,47 @@ void GamePage::ShowGameSettings() {
             Svc().SaveSettings();
         });
         panel.Children().Append(kit::SettingRow(p.label, "", combo));
+    }
+    SideScroll().Visibility(Visibility::Visible);
+    if (panel.Children().Size() > 2) {
+        if (auto row = panel.Children().GetAt(2).try_as<Grid>(); row && row.Children().Size() > 1)
+            if (auto c = row.Children().GetAt(1).try_as<Control>()) c.Focus(FocusState::Programmatic);
+    }
+}
+
+// NES: which ROM patch (widescreen hack, translation...) this game starts with.
+void GamePage::ShowNesGameSettings() {
+    auto panel = SidePanel();
+    panel.Children().Clear();
+    panel.Children().Append(kit::SectionHeader("ROM patch"));
+    auto& cfg = Svc().Config();
+    const auto found = FindPatches(Svc().Fs(), game_.path, cfg.folders.nes_patches);
+    if (found.empty()) {
+        panel.Children().Append(kit::Text(
+            "No patches found. Put .ips, .bps or .ups files next to the game, named like the game, or in the "
+            "NES patches folder (Settings > Folders). The original game file is never changed.",
+            20, false, "#D8DEE6"));
+    } else {
+        panel.Children().Append(kit::Text(
+            "The patch is applied in memory when the game starts. Save states are shared with the unpatched game, "
+            "so start fresh after changing the patch.",
+            18, false, "#D8DEE6"));
+        std::vector<std::pair<std::string, std::string>> options;
+        const bool has_exact = found.front().exact;
+        if (has_exact) options.emplace_back("", "Automatic: " + found.front().label);
+        options.emplace_back("none", "No patch");
+        for (const auto& c : found) options.emplace_back(c.path, c.label);
+        const std::string key = game_.SaveKey();
+        std::string current;
+        if (auto it = cfg.nes_patch.find(key); it != cfg.nes_patch.end()) current = it->second;
+        if (current.empty() && !has_exact) current = "none";
+        auto combo = kit::Choice(options, current, [key](const std::string& value) {
+            auto& c = Svc().Config();
+            if (value.empty()) c.nes_patch.erase(key);
+            else c.nes_patch[key] = value;
+            Svc().SaveSettings();
+        });
+        panel.Children().Append(kit::SettingRow("Patch", "", combo));
     }
     SideScroll().Visibility(Visibility::Visible);
     if (panel.Children().Size() > 2) {
