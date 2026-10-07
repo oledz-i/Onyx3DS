@@ -462,9 +462,20 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
 
         // This upload buffer and allocator were last used two frames ago.
         const int u = upload_index_;
-        if (upload_fence_->GetCompletedValue() < upload_value_[u] &&
-            !WaitFence(upload_fence_.get(), upload_value_[u], upload_event_, 1000))
-            return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
+        if (upload_fence_->GetCompletedValue() < upload_value_[u]) {
+            // The GPU has not finished reading this buffer yet (the presenter's queue
+            // runs at the TV's refresh rate). Never block the emulator on that: drop
+            // this frame, the next one replaces it. Only a long stall is an error.
+            const uint64_t now = GetTickCount64();
+            if (upload_busy_since_ == 0) upload_busy_since_ = now;
+            if (now - upload_busy_since_ > 1500 &&
+                !WaitFence(upload_fence_.get(), upload_value_[u], upload_event_, 1000))
+                return fail("GPU copy timed out", device_->GetDeviceRemovedReason());
+            if (upload_fence_->GetCompletedValue() < upload_value_[u]) {
+                return true;
+            }
+        }
+        upload_busy_since_ = 0;
 
         int s = -1;
         SharedSlot* slot = BeginWrite(width, height, s, /*same_queue=*/true);

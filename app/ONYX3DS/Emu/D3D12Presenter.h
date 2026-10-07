@@ -135,7 +135,8 @@ private:
     // the copy runs on the same queue as the draw, so the CPU only waits when
     // the GPU is two frames behind.
     std::mutex upload_mutex_;
-    static constexpr int kUploads = 2;
+    static constexpr int kUploads = 3;
+    uint64_t upload_busy_since_ = 0;
     winrt::com_ptr<ID3D12Resource> upload_buffer_[kUploads];
     uint64_t upload_size_[kUploads] = {};
     uint8_t* upload_mapped_[kUploads] = {};

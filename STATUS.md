@@ -118,6 +118,7 @@
   (was 7200x4800). WGL can't enable glthread; the D3D12 GL driver already uses
   Gallium's threaded context.
 - Build #85 (major): Direct display is the default and CPU uploads skip the vsync-bound fence wait (lifts the 40 fps cap); azahar/0041 waits a bounded time (160 ms/s) for Dozen pipelines instead of skipping draws; Azahar configured with CMAKE_SYSTEM_PROCESSOR=AMD64 (SSE4.2 paths); stable committed sideload signing key and per-run package version so updates install over the old build; saves mirrored to <USB>/ONYX3DS/SaveBackup after each game and restored on a fresh install; NES (FCEUmm) as a second system.
+- Build #88: from the #87 logs. OpenGL gameplay at 30 fps = main thread 56% inside Mesa and 14% memcpy, shader log showed a geometry shader built with every lit shader -> azahar/0042 drops the fixed geometry shader on Mesa D3D12 (same as Vulkan/0038). Vulkan 40 fps menus = emulation thread waiting in the presenter's upload fence -> frames are dropped rather than waited for (3 upload buffers). azahar/0043: pipeline workers hw-1 (max 6) at below-normal priority.
 - Still open: R32_UINT storage views of RGBA8 images are null on Xbox (shadows).
 
 ## v2.1.0 (Oct 5, 2026 checkpoint)

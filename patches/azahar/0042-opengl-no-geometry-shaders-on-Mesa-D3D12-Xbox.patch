@@ -1,0 +1,85 @@
+From 00b7d270192e907be6570bdddf3c7b9a81d92701 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 20:04:33 -0400
+Subject: [PATCH] opengl: no geometry shaders on Mesa D3D12 (Xbox)
+
+---
+ src/video_core/renderer_opengl/gl_driver.h           | 7 +++++++
+ src/video_core/renderer_opengl/gl_rasterizer.cpp     | 2 +-
+ src/video_core/renderer_opengl/gl_shader_manager.cpp | 8 +++++---
+ 3 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/renderer_opengl/gl_driver.h b/src/video_core/renderer_opengl/gl_driver.h
+index da51946..62c0201 100644
+--- a/src/video_core/renderer_opengl/gl_driver.h
++++ b/src/video_core/renderer_opengl/gl_driver.h
+@@ -61,6 +61,13 @@ public:
+     /// Returns true if the driver supports the provided custom format
+     bool IsCustomFormatSupported(VideoCore::CustomPixelFormat format) const;
+ 
++    /// ONYX: Mesa's OpenGL-on-D3D12 driver is slow with geometry shaders (long compiles,
++    /// extra GPU stage on lit scenes), so the fixed quaternion geometry shader is skipped
++    /// there and the fragment shader does the work, as on GPUs without geometry shaders.
++    bool UseGeometryShaders() const {
++        return vendor != Vendor::Microsoft;
++    }
++
+     /// Returns the vendor of the currently selected physical device
+     Vendor GetVendor() const {
+         return vendor;
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.cpp b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+index 1791506..9a25d6b 100644
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -457,7 +457,7 @@ bool RasterizerOpenGL::SetupGeometryShader() {
+     // Enable the quaternion fix-up geometry-shader only if we are actually doing per-fragment
+     // lighting and care about proper quaternions. Otherwise just use standard vertex+fragment
+     // shaders
+-    if (regs.lighting.disable) {
++    if (regs.lighting.disable || !driver.UseGeometryShaders()) {
+         curr_shader_manager->UseTrivialGeometryShader();
+     } else {
+         curr_shader_manager->UseFixedGeometryShader(regs);
+diff --git a/src/video_core/renderer_opengl/gl_shader_manager.cpp b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+index cc6fd9b..e8a3c10 100644
+--- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+@@ -271,7 +271,8 @@ using FragmentShaders = ShaderCache<FSConfig, &GLSL::GenerateFragmentShader, GL_
+ class ShaderProgramManager::Impl {
+ public:
+     explicit Impl(const Driver& driver, u64 title_id, bool separable)
+-        : separable(separable), programmable_vertex_shaders(separable),
++        : separable(separable), use_geometry_shaders(driver.UseGeometryShaders()),
++          programmable_vertex_shaders(separable),
+           trivial_vertex_shader(driver, separable), fixed_geometry_shaders(separable),
+           fragment_shaders(separable), disk_cache(title_id, separable) {
+         if (separable) {
+@@ -280,7 +281,7 @@ public:
+         profile = Pica::Shader::Profile{
+             .has_separable_shaders = separable,
+             .has_clip_planes = driver.HasClipCullDistance(),
+-            .has_geometry_shader = true,
++            .has_geometry_shader = driver.UseGeometryShaders(),
+             .has_custom_border_color = true,
+             .has_fragment_shader_interlock = driver.HasArbFragmentShaderInterlock(),
+             // TODO: This extension requires GLSL 450 / OpenGL 4.5 context.
+@@ -325,6 +326,7 @@ public:
+                   "ShaderTuple layout changed!");
+ 
+     bool separable;
++    bool use_geometry_shaders;
+     Pica::Shader::Profile profile{};
+     ShaderTuple current;
+ 
+@@ -344,7 +346,7 @@ public:
+ 
+         // Enable the geometry-shader only if we are actually doing per-fragment lighting
+         // and care about proper quaternions. Otherwise just use standard vertex+fragment shaders.
+-        const bool use_geometry_shader = !config.state.lighting_disable;
++        const bool use_geometry_shader = use_geometry_shaders && !config.state.lighting_disable;
+ 
+         res.use_clip_planes = profile.has_clip_planes;
+         res.use_geometry_shader = use_geometry_shader;
+-- 
+2.43.0
+

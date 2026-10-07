@@ -1,0 +1,48 @@
+From 8edf7fad0d28471a34499ebcc235fe264bc69532 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 6 Oct 2026 20:07:27 -0400
+Subject: [PATCH] pipeline workers: more threads at below-normal priority so
+ new Dozen pipelines finish sooner without costing frames
+
+---
+ src/common/thread_worker.h                           | 2 ++
+ src/video_core/renderer_vulkan/vk_pipeline_cache.cpp | 3 ++-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/common/thread_worker.h b/src/common/thread_worker.h
+index 5ef3cd5..de3e6d4 100644
+--- a/src/common/thread_worker.h
++++ b/src/common/thread_worker.h
+@@ -41,6 +41,8 @@ public:
+         : workers_queued{num_workers}, thread_name{name} {
+         const auto lambda = [this, func](std::stop_token stop_token, std::size_t index) {
+             Common::SetCurrentThreadName(thread_name.data());
++            // Background compiles must never delay the emulation threads.
++            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+             {
+                 [[maybe_unused]] std::conditional_t<with_state, StateType, int> state{func(index)};
+                 while (!stop_token.stop_requested()) {
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 29bb0d0..8290ab2 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <algorithm>
+ #include <chrono>
+ #include <boost/container/static_vector.hpp>
+ 
+@@ -86,7 +87,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
+     : instance{instance_}, scheduler{scheduler_}, renderpass_cache{renderpass_cache_},
+       update_queue{update_queue_},
+       num_worker_threads{std::max(std::thread::hardware_concurrency(), 2U) / 2},
+-      pipeline_workers{num_worker_threads, "Pipeline workers"},
++      pipeline_workers{std::clamp(std::thread::hardware_concurrency(), 3U, 7U) - 1, "Pipeline workers"},
+       shader_workers{num_worker_threads, "Shader workers"},
+       descriptor_heaps{
+           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
+-- 
+2.43.0
+
