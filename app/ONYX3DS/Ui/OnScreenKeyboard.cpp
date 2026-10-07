@@ -634,11 +634,28 @@ void OnScreenKeyboard::StopHoldClose() {
     if (hold_) hold_.Stop();
 }
 
+namespace {
+// On Xbox the XAML Key can be a translated key (A arrives as Space or Enter); OriginalKey is
+// the real button.
+winrt::Windows::System::VirtualKey RealKey(winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e) {
+    try {
+        return e.OriginalKey();
+    } catch (...) {
+        return e.Key();
+    }
+}
+bool IsPadKey(winrt::Windows::System::VirtualKey k) {
+    const int v = static_cast<int>(k);
+    return v >= 195 && v <= 218;
+}
+} // namespace
+
 void OnScreenKeyboard::OnGamepadKey(KeyRoutedEventArgs const& e) {
     using winrt::Windows::System::VirtualKey;
+    last_pad_key_ = std::chrono::steady_clock::now();
     const bool repeat = e.KeyStatus().WasKeyDown;
     const bool ready = !busy_ && std::chrono::steady_clock::now() - opened_at_ >= kInputGuard;
-    switch (e.Key()) {
+    switch (RealKey(e)) {
     case VirtualKey::GamepadB:
         if (ready) Backspace();
         e.Handled(true);
@@ -682,7 +699,7 @@ void OnScreenKeyboard::OnGamepadKey(KeyRoutedEventArgs const& e) {
 
 void OnScreenKeyboard::OnGamepadKeyUp(KeyRoutedEventArgs const& e) {
     using winrt::Windows::System::VirtualKey;
-    if (e.Key() != VirtualKey::GamepadView) return;
+    if (RealKey(e) != VirtualKey::GamepadView) return;
     e.Handled(true);
     if (!hold_ || !hold_.IsEnabled()) return; // the hold already closed it
     StopHoldClose();
@@ -693,10 +710,14 @@ void OnScreenKeyboard::OnGamepadKeyUp(KeyRoutedEventArgs const& e) {
 
 void OnScreenKeyboard::OnPhysicalKey(KeyRoutedEventArgs const& e) {
     using winrt::Windows::System::VirtualKey;
-    const int k = static_cast<int>(e.Key());
-    if (k >= 195 && k <= 218) return; // controller buttons: OnGamepadKey
+    const auto real = RealKey(e);
+    if (IsPadKey(real)) { // controller buttons: OnGamepadKey
+        last_pad_key_ = std::chrono::steady_clock::now();
+        return;
+    }
+    last_real_key_ = std::chrono::steady_clock::now();
     const bool ready = !busy_ && std::chrono::steady_clock::now() - opened_at_ >= kInputGuard;
-    switch (e.Key()) {
+    switch (real) {
     case VirtualKey::Back:
         if (ready) Backspace();
         e.Handled(true);
@@ -738,6 +759,11 @@ void OnScreenKeyboard::OnPhysicalKey(KeyRoutedEventArgs const& e) {
 void OnScreenKeyboard::OnCharacter(uint32_t code) {
     if (!root_ || busy_) return;
     if (std::chrono::steady_clock::now() - opened_at_ < kInputGuard) return;
+    // Only a real keyboard types. A controller button press can come with a stray space
+    // character; accept characters only right after a real key and not during a pad press.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_pad_key_ < std::chrono::milliseconds(600)) return;
+    if (now - last_real_key_ > std::chrono::milliseconds(600)) return;
     if (code < 0x20 || code == 0x7F || code > 0x10FFFF) return; // Enter, Tab, Backspace, Esc...
     TypeText(CodepointsToUtf8(std::u32string(1, static_cast<char32_t>(code))));
 }

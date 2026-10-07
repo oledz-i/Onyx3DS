@@ -117,6 +117,8 @@ private:
     std::chrono::steady_clock::time_point opened_at_{};
     std::chrono::steady_clock::time_point busy_since_{};
     std::chrono::steady_clock::time_point last_backspace_{};
+    std::chrono::steady_clock::time_point last_pad_key_{};  // last controller button seen
+    std::chrono::steady_clock::time_point last_real_key_{}; // last real keyboard key seen
 };
 
 } // namespace onyx::app::ui
