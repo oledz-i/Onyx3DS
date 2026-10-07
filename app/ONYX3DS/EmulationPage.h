@@ -41,6 +41,7 @@ private:
     void HideKeyboard();
     bool KeyboardOpen() const;
     std::shared_ptr<onyx::app::ui::OnScreenKeyboard> kb_;
+    bool kb_installed_ = false;
 
     onyx::GameEntry game_;
     std::string launch_mode_;

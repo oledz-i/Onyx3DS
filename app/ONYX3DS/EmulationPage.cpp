@@ -119,6 +119,7 @@ void EmulationPage::OnNavigatedFrom(NavigationEventArgs const&) {
     KeyboardBridge::Get().SetHandlers(KeyboardHandlers{});
     HideKeyboard();
     kb_.reset();
+    kb_installed_ = false;
     fps_timer_.Stop();
     StopSoftwareView();
     Emu().SetEvents({});
@@ -429,10 +430,11 @@ void EmulationPage::InstallKeyboard() {
         });
     };
     KeyboardBridge::Get().SetHandlers(std::move(h));
+    kb_installed_ = true;
 }
 
 void EmulationPage::ShowKeyboard(const KeyboardRequestInfo& info) {
-    if (quitting_) {
+    if (quitting_ || !kb_installed_) {
         KeyboardBridge::Get().Abort("");
         return;
     }

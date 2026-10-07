@@ -741,7 +741,7 @@ void D3D12Presenter::DrawFrame(int slot, UINT back) {
     cmd_->ClearRenderTargetView(rtv, clear, 0, nullptr);
 
     uint64_t wait_value = 0;
-    if (slot >= 0 && slots_[slot].texture) {
+    if (slot >= 0 && slots_[slot].texture && sc_width_ > 0 && sc_height_ > 0) {
         const SharedSlot& s = slots_[slot];
         wait_value = s.ready_value;
         // Letterbox: fit the frame, keep its aspect ratio, centre it.
@@ -758,8 +758,12 @@ void D3D12Presenter::DrawFrame(int slot, UINT back) {
             // pixel grid does not shimmer on a fractional edge.
             const DisplaySize fit = FitDisplay(s.width, s.height, static_cast<int>(sc_width_),
                                                static_cast<int>(sc_height_), aspect);
-            dw = static_cast<float>(fit.width);
-            dh = static_cast<float>(fit.height);
+            int iw = fit.width, ih = fit.height;
+            // Same parity as the output so both margins are whole pixels.
+            if (((static_cast<int>(sc_width_) - iw) & 1) && iw > 1) --iw;
+            if (((static_cast<int>(sc_height_) - ih) & 1) && ih > 1) --ih;
+            dw = static_cast<float>(iw);
+            dh = static_cast<float>(ih);
         }
         PresentConstants c{};
         c.dst_rect[0] = -dw / ow;

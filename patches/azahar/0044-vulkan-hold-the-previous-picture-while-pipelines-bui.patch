@@ -1,19 +1,19 @@
-From b12e35daa83e366e7db36e6cdd91d9c4ae25b18b Mon Sep 17 00:00:00 2001
+From 22017e880e79e9502ea0c60bb407da233d36c185 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 6 Oct 2026 21:34:35 -0400
 Subject: [PATCH] vulkan: hold the previous picture while pipelines build
  instead of showing frames with missing scenery
 
 ---
- .../emu_window/libretro_window.cpp            | 24 +++++++++++++++++++
- .../renderer_vulkan/vk_frame_state.h          | 10 ++++++++
- .../renderer_vulkan/vk_pipeline_cache.cpp     |  3 +++
- .../renderer_vulkan/vk_rasterizer.cpp         |  8 +++----
- 4 files changed, 41 insertions(+), 4 deletions(-)
+ .../emu_window/libretro_window.cpp            | 35 +++++++++++++++++++
+ .../renderer_vulkan/vk_frame_state.h          | 10 ++++++
+ .../renderer_vulkan/vk_pipeline_cache.cpp     |  3 ++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  8 ++---
+ 4 files changed, 52 insertions(+), 4 deletions(-)
  create mode 100644 src/video_core/renderer_vulkan/vk_frame_state.h
 
 diff --git a/src/citra_libretro/emu_window/libretro_window.cpp b/src/citra_libretro/emu_window/libretro_window.cpp
-index 676d91e..bb60486 100644
+index 676d91e..477d31f 100644
 --- a/src/citra_libretro/emu_window/libretro_window.cpp
 +++ b/src/citra_libretro/emu_window/libretro_window.cpp
 @@ -8,6 +8,7 @@
@@ -34,7 +34,7 @@ index 676d91e..bb60486 100644
  #include "video_core/renderer_software/renderer_software.h"
  #include "video_core/renderer_software/sw_frame_skip.h"
  
-@@ -90,6 +94,26 @@ void EmuWindow_LibRetro::SwapBuffers() {
+@@ -90,6 +94,37 @@ void EmuWindow_LibRetro::SwapBuffers() {
      }
      case Settings::GraphicsAPI::Vulkan: {
  #ifdef ENABLE_VULKAN
@@ -45,17 +45,28 @@ index 676d91e..bb60486 100644
 +            using Clock = std::chrono::steady_clock;
 +            static Clock::time_point hold_since{};
 +            static bool shown_any = false;
++            static bool gave_up = false;
++            static const void* last_window = nullptr;
++            if (last_window != this) { // new game: start clean
++                last_window = this;
++                hold_since = {};
++                shown_any = gave_up = false;
++            }
 +            const bool incomplete = Vulkan::g_frame_incomplete.exchange(false);
 +            const auto now = Clock::now();
-+            if (incomplete && shown_any) {
++            if (incomplete && shown_any && !gave_up) {
 +                if (hold_since == Clock::time_point{}) hold_since = now;
 +                if (now - hold_since < std::chrono::seconds(3)) {
 +                    LibRetro::UploadVideoFrame(nullptr, static_cast<unsigned>(width),
 +                                               static_cast<unsigned>(height), 0);
 +                    break;
 +                }
++                gave_up = true; // show everything until a complete frame comes along
 +            }
-+            hold_since = {};
++            if (!incomplete) {
++                hold_since = {};
++                gave_up = false;
++            }
 +            shown_any = true;
 +        }
          // Cursor is drawn inside the Vulkan render pass (RendererVulkan::DrawCursor)

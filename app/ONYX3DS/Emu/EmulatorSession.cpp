@@ -324,6 +324,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         error = "A game is already running";
         return false;
     }
+    input_.SetBlocked(false); // never start a game with the controller locked
     if (core_crashed_) {
         error = "The emulator stopped after an error earlier. Restart ONYX 3DS to play again.";
         return false;
@@ -829,6 +830,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
 
 void EmulatorSession::Reset() {
     Post([this] {
+        Frontend::DropKeyboardRequest();
         api_->reset();
         if (RaActive()) ra_->Reset();
         Message("Reset");
