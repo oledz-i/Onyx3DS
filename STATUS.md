@@ -172,3 +172,20 @@
   keyboard and mouse work too. The game gets no controller input and the ONYX menu hotkeys are off while it is open.
 - Text model and key layouts: `shell/src/text_input.cpp` (unit tested).
 - Unverified: everything on a console. Not modelled: custom number-pad keys, predictive input, the game's initial text.
+
+## Planned for the next update (collected 2026-10-07, work starts Monday 10/12 after 4pm)
+Playtest results on v3.0.2 (tester): keyboard works well; Tomodachi Life minor hiccups; Mii Maker fine;
+Mario Kart 7 37-60 fps; 3D Land 40-60 fps; NSMB2 and Shakedown: Hawaii flawless; NES perfect;
+Animal Crossing and Ace Attorney still to report.
+1. Netplay: feasibility first.
+2. Vulkan shader (pipeline) cache saved to disk, to cut first-visit hitching and late graphic load-in.
+3. GBA support, reusing the NES plumbing.
+4. SteamGridDB: let the user choose which game a cover belongs to instead of guessing
+   (Smash 3DS got Smash N64 art; Mario Maker got a DMCA-takedown image). Rank 3DS results first.
+5. Encrypted eShop Ace Attorney will not boot with aes_keys.txt in the System folder (tried the app folder
+   and the USB). Get the log; show a clear "missing key / seeddb.bin" message instead of a generic failure.
+   Check that the System-folder setting actually maps to the folder the user picked.
+6. Optional XMB-style (PS3-like) home layout.
+7. OpenGL returns later, built from upstream Mesa/mesa-uwp sources and our own patches (GlHost.cpp is ours);
+   ask the other author whether they want a mention.
+Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
