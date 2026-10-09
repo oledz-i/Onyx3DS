@@ -1,0 +1,35 @@
+# Experiment, separate from ONYX: builds an unsigned "hi" iOS app as hi.ipa.
+# Download it from this run's Artifacts and sideload it (AltStore, Sideloadly), which signs it for you.
+name: hi-ios
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "experiments/hi-ios/**"
+      - ".github/workflows/hi-ios.yml"
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build hi.app
+        run: |
+          set -euo pipefail
+          cd experiments/hi-ios
+          mkdir -p build/Payload/hi.app
+          xcrun --sdk iphoneos swiftc -parse-as-library -O \
+            -target arm64-apple-ios14.0 App.swift -o build/Payload/hi.app/hi
+          cp Info.plist build/Payload/hi.app/Info.plist
+          plutil -lint build/Payload/hi.app/Info.plist
+          file build/Payload/hi.app/hi
+      - name: Package hi.ipa
+        run: |
+          cd experiments/hi-ios/build
+          zip -qry hi.ipa Payload
+          unzip -l hi.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hi-ipa
+          path: experiments/hi-ios/build/hi.ipa
