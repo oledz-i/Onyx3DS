@@ -178,7 +178,10 @@ Playtest results on v3.0.2 (tester): keyboard works well; Tomodachi Life minor h
 Mario Kart 7 37-60 fps; 3D Land 40-60 fps; NSMB2 and Shakedown: Hawaii flawless; NES perfect;
 Animal Crossing and Ace Attorney still to report.
 1. Netplay: feasibility first.
-2. Vulkan shader (pipeline) cache saved to disk, to cut first-visit hitching and late graphic load-in.
+2. Vulkan performance overhaul (major boost wanted). Starts with the shader (pipeline) cache saved to disk to
+   cut first-visit hitching and late graphic load-in. Then the frame hand-off (hardware frames are read back
+   and re-uploaded to the presenter; a shared-texture path would remove that copy), Dozen stalls, and a
+   profiling pass on Mario Kart 7 and 3D Land to find what else costs frames. Measure before and after.
 3. GBA support, reusing the NES plumbing.
 4. SteamGridDB: let the user choose which game a cover belongs to instead of guessing
    (Smash 3DS got Smash N64 art; Mario Maker got a DMCA-takedown image). Rank 3DS results first.
