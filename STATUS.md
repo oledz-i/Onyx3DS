@@ -212,5 +212,4 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - GBA support, polished from the first run: picture settings right off the bat, ROM hacks supported.
 - XMB-style menu (original assets only).
 - Quick menu: smoother opening, better looking.
-- Xbox One: x64 package already matches; whether it runs is untested (GPU/CPU headroom and UWP target version unknown).
 - The rest of the planned extras.
