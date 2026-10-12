@@ -189,12 +189,10 @@ void GamePage::Build() {
         auto self = weak.get();
         if (!self) return;
         Svc().Toast("Searching SteamGridDB...");
-        Svc().ScrapeArt(self->game_, true, [weak](bool ok) {
-            if (auto s = weak.get(); s && ok) {
-                if (auto g = Svc().FindGame(s->game_.path)) s->game_ = *g;
-                s->Build();
-                Svc().Toast("Artwork updated");
-            }
+        Svc().SearchArtGames(self->game_, [weak](std::vector<SgdbGame> games, int status) {
+            auto s = weak.get();
+            if (!s) return;
+            s->ShowArtPicker(std::move(games), status);
         });
     }));
     row2.Children().Append(kit::ActionButton(game_.favorite ? "Unfavourite" : "Favourite",
@@ -325,6 +323,77 @@ void GamePage::ShowCheats() {
         16, false, "#AAB4C0"));
     SideScroll().Visibility(Visibility::Visible);
     download.Focus(FocusState::Programmatic);
+}
+
+void GamePage::ShowArtPicker(std::vector<SgdbGame> games, int status) {
+    auto panel = SidePanel();
+    panel.Children().Clear();
+    panel.Children().Append(kit::SectionHeader("Choose the artwork"));
+    auto weak = get_weak();
+    auto refreshed = [weak](bool ok) {
+        if (auto s = weak.get(); s && ok) {
+            if (auto g = Svc().FindGame(s->game_.path)) s->game_ = *g;
+            s->CloseSide(); // rebuilds the page with the new art
+            Svc().Toast("Artwork updated");
+        }
+    };
+
+    if (!games.empty()) {
+        panel.Children().Append(kit::Text("Pick which game this is. 3DS releases are listed first.", 18, false,
+                                          "#D8DEE6"));
+        std::vector<std::pair<std::string, std::string>> options;
+        for (const auto& g : games) {
+            std::string label = g.name;
+            if (g.year > 0) label += " (" + std::to_string(g.year) + ")";
+            if (g.verified) label += " - verified";
+            options.emplace_back(std::to_string(g.id), label);
+        }
+        auto chosen = std::make_shared<u64>(games.front().id);
+        panel.Children().Append(kit::SettingRow(
+            "Game", "", kit::Choice(options, std::to_string(*chosen), [chosen](const std::string& v) {
+                *chosen = std::strtoull(v.c_str(), nullptr, 10);
+            })));
+        panel.Children().Append(kit::ActionButton("Use this game's artwork", kit::glyph::Picture,
+                                                  [weak, chosen, refreshed] {
+            auto self = weak.get();
+            if (!self) return;
+            Svc().Toast("Downloading artwork...");
+            Svc().ScrapeArtFor(self->game_, *chosen, refreshed);
+        }, true));
+    } else {
+        std::string why = "SteamGridDB has nothing under this title. You can paste a picture link below.";
+        if (status == -1)
+            why = "Add your SteamGridDB API key in Settings > Online services to search it. "
+                  "You can still paste a picture link below.";
+        else if (status == 401 || status == 403)
+            why = "SteamGridDB rejected the API key. You can still paste a picture link below.";
+        else if (status == 0)
+            why = "Can't reach SteamGridDB. Are you online? You can still paste a picture link below.";
+        panel.Children().Append(kit::Text(why, 18, false, "#D8DEE6"));
+    }
+
+    auto link = std::make_shared<std::string>();
+    panel.Children().Append(kit::SettingRow(
+        "Picture link", "A link straight to a PNG or JPEG picture",
+        kit::Field("", "https://...", [link](const std::string& v) { *link = v; })));
+    panel.Children().Append(kit::ActionButton("Use this picture", kit::glyph::Download, [weak, link, refreshed] {
+        auto self = weak.get();
+        if (!self) return;
+        if (Trim(*link).empty()) {
+            Svc().Toast("Paste a picture link first");
+            return;
+        }
+        Svc().Toast("Downloading picture...");
+        Svc().ArtFromLink(self->game_, *link, refreshed);
+    }));
+    panel.Children().Append(kit::ActionButton("Back", kit::glyph::Back, [weak] {
+        if (auto self = weak.get()) self->CloseSide();
+    }));
+    SideScroll().Visibility(Visibility::Visible);
+    if (panel.Children().Size() > 2) {
+        if (auto row = panel.Children().GetAt(2).try_as<Grid>(); row && row.Children().Size() > 1)
+            if (auto c = row.Children().GetAt(1).try_as<Control>()) c.Focus(FocusState::Programmatic);
+    }
 }
 
 void GamePage::ShowGameSettings() {

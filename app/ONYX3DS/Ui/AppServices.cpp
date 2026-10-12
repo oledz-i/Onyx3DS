@@ -423,6 +423,53 @@ void AppServices::ScrapeArt(const GameEntry& game, bool overwrite, std::function
     });
 }
 
+void AppServices::SearchArtGames(const GameEntry& game,
+                                 std::function<void(std::vector<SgdbGame>, int)> done) {
+    const std::string key = settings_.services.steamgriddb_api_key;
+    if (key.empty()) { // the picture-link option still works without a key
+        if (done) done({}, -1);
+        return;
+    }
+    RunAsync([this, title = game.DisplayTitle(), key, done = std::move(done)] {
+        SteamGridDb sgdb(http_, key);
+        auto results = SteamGridDb::Rank(sgdb.Search(title), title);
+        if (results.size() > 10) results.resize(10);
+        const int status = sgdb.LastStatus();
+        RunOnUi([results = std::move(results), status, done] {
+            if (done) done(results, status);
+        });
+    });
+}
+
+void AppServices::ScrapeArtFor(const GameEntry& game, u64 sgdb_game_id,
+                               std::function<void(bool)> done) {
+    const std::string key = settings_.services.steamgriddb_api_key;
+    RunAsync([this, g = game, key, sgdb_game_id, done = std::move(done)]() mutable {
+        SteamGridDb sgdb(http_, key);
+        ArtScraper scraper(sgdb, fs_, Paths().art);
+        const bool ok = scraper.ScrapeGame(g, sgdb_game_id, true);
+        if (ok) LibraryFor(g.system).Update(g);
+        RunOnUi([this, ok, done] {
+            if (!ok) Toast("That game has no artwork on SteamGridDB");
+            if (done) done(ok);
+        });
+    });
+}
+
+void AppServices::ArtFromLink(const GameEntry& game, const std::string& url,
+                              std::function<void(bool)> done) {
+    RunAsync([this, g = game, url, done = std::move(done)]() mutable {
+        SteamGridDb sgdb(http_, "-"); // only used for the plain image download
+        ArtScraper scraper(sgdb, fs_, Paths().art);
+        const bool ok = scraper.SetGridFromUrl(g, url);
+        if (ok) LibraryFor(g.system).Update(g);
+        RunOnUi([this, ok, done] {
+            if (!ok) Toast("Couldn't use that link. It has to point straight at a PNG or JPEG picture");
+            if (done) done(ok);
+        });
+    });
+}
+
 std::string AppServices::CheatsFolder() const {
     // Azahar's own cheats folder unless the user picked one.
     return settings_.folders.cheats.empty() ? JoinPath(Paths().azahar_root, "Azahar/cheats")

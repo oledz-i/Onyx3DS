@@ -18,6 +18,7 @@ struct SgdbGame {
     u64 id = 0;
     std::string name;
     bool verified = false;
+    int year = 0; // release year when SteamGridDB reports one, else 0
 };
 
 enum class SgdbArt { Grid, Hero, Logo, Icon };
@@ -49,6 +50,11 @@ public:
     // first verified result, then the first result.
     static std::optional<SgdbGame> BestMatch(const std::vector<SgdbGame>& results,
                                              const std::string& title);
+    // All results, best match for a 3DS title first: exact name, then names that
+    // start with it, 3DS-era releases (2011-2020) and "3DS" in the name above
+    // old or unrelated releases (so "Smash Bros." finds the 3DS game, not the
+    // N64 one), then verified entries.
+    static std::vector<SgdbGame> Rank(std::vector<SgdbGame> results, const std::string& title);
     static std::vector<SgdbGame> ParseSearch(std::string_view json);
     static std::vector<SgdbImage> ParseImages(std::string_view json);
     static std::string QueryFor(SgdbArt kind);
@@ -67,6 +73,11 @@ class ArtScraper {
 public:
     ArtScraper(SteamGridDb& sgdb, IFileSystem& fs, std::string art_dir);
     bool Scrape(GameEntry& game, bool overwrite = false);
+    // Same, for a game the user picked themselves.
+    bool ScrapeGame(GameEntry& game, u64 sgdb_game_id, bool overwrite = true);
+    // Uses an image the user pasted a link to as the game's grid art. PNG or
+    // JPEG only; returns false when the download isn't a usable image.
+    bool SetGridFromUrl(GameEntry& game, const std::string& url);
 
 private:
     std::optional<std::string> SaveFirst(SgdbArt kind, u64 game_id, const std::string& base);

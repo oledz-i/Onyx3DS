@@ -83,6 +83,14 @@ public:
     Achievements& RetroAchievements() { return *ra_; }
     // Fetches SteamGridDB art for one game; `done(ok)` on the UI thread.
     void ScrapeArt(const GameEntry& game, bool overwrite, std::function<void(bool)> done);
+    // SteamGridDB games that match a title, best match first (3DS releases above
+    // older ones); `done(results, http_status)` on the UI thread.
+    void SearchArtGames(const GameEntry& game,
+                        std::function<void(std::vector<SgdbGame>, int)> done);
+    // Fetches art for the SteamGridDB game the user picked.
+    void ScrapeArtFor(const GameEntry& game, u64 sgdb_game_id, std::function<void(bool)> done);
+    // Uses a pasted image link (PNG or JPEG) as the game's artwork.
+    void ArtFromLink(const GameEntry& game, const std::string& url, std::function<void(bool)> done);
     // Downloads cheats for a game into the cheats folder (or LocalState).
     void DownloadCheats(u64 title_id, std::function<void(int added)> done);
     std::string CheatsFolder() const;

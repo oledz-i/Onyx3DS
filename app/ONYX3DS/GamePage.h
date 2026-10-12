@@ -4,6 +4,7 @@
 #include "GamePage.g.h"
 #include "onyx/cheats.h"
 #include "onyx/library.h"
+#include "onyx/steamgriddb.h"
 
 namespace winrt::ONYX3DS::implementation {
 
@@ -19,6 +20,8 @@ private:
     void ShowGameSettings();
     void ShowNesGameSettings();
     void ShowStates();
+    // Games SteamGridDB found for this title (best first) plus a link box.
+    void ShowArtPicker(std::vector<onyx::SgdbGame> games, int status);
     void CloseSide();
     void OnBack(Windows::Foundation::IInspectable const&, Windows::UI::Core::BackRequestedEventArgs const& e);
 

@@ -2,6 +2,7 @@
 #include "onyx/steamgriddb.h"
 
 #include <algorithm>
+#include <functional>
 
 #include <nlohmann/json.hpp>
 
@@ -43,6 +44,10 @@ std::vector<SgdbGame> SteamGridDb::ParseSearch(std::string_view text) {
         game.id = g.value("id", u64{0});
         game.name = g.value("name", "");
         game.verified = g.value("verified", false);
+        if (g.contains("release_date") && g["release_date"].is_number_integer()) {
+            const long long secs = g["release_date"].get<long long>();
+            if (secs > 0) game.year = 1970 + static_cast<int>(secs / 31556952LL);
+        }
         if (game.id) out.push_back(game);
     }
     return out;
@@ -107,18 +112,28 @@ std::optional<std::string> SteamGridDb::Download(const std::string& url) {
     return r.body;
 }
 
+std::vector<SgdbGame> SteamGridDb::Rank(std::vector<SgdbGame> results, const std::string& title) {
+    const std::string want = Canonical(title);
+    auto score = [&](const SgdbGame& g) {
+        const std::string name = Canonical(g.name);
+        int s = 0;
+        if (!want.empty() && name == want) s += 100;
+        else if (!want.empty() && name.starts_with(want)) s += 40;
+        if (name.find("3ds") != std::string::npos) s += 60;
+        if (g.year >= 2011 && g.year <= 2020) s += 30;
+        else if (g.year > 0 && g.year < 2010) s -= 20;
+        if (g.verified) s += 10;
+        return s;
+    };
+    std::stable_sort(results.begin(), results.end(),
+                     [&](const SgdbGame& a, const SgdbGame& b) { return score(a) > score(b); });
+    return results;
+}
+
 std::optional<SgdbGame> SteamGridDb::BestMatch(const std::vector<SgdbGame>& results,
                                                const std::string& title) {
     if (results.empty()) return std::nullopt;
-    const std::string want = Canonical(title);
-    for (const auto& g : results)
-        if (Canonical(g.name) == want) return g;
-    // "Pokemon X" vs "Pokémon X and Y": accept a result that starts with the title.
-    for (const auto& g : results)
-        if (!want.empty() && Canonical(g.name).starts_with(want)) return g;
-    for (const auto& g : results)
-        if (g.verified) return g;
-    return results.front();
+    return Rank(results, title).front();
 }
 
 ArtScraper::ArtScraper(SteamGridDb& sgdb, IFileSystem& fs, std::string art_dir)
@@ -142,13 +157,18 @@ bool ArtScraper::Scrape(GameEntry& game, bool overwrite) {
     const auto match = SteamGridDb::BestMatch(sgdb_.Search(game.DisplayTitle()),
                                               game.DisplayTitle());
     if (!match) return false;
+    return ScrapeGame(game, match->id, overwrite);
+}
+
+bool ArtScraper::ScrapeGame(GameEntry& game, u64 sgdb_game_id, bool overwrite) {
+    if (!sgdb_.HasKey() || !sgdb_game_id) return false;
     const std::string key =
-        game.title_id ? game.TitleIdHex() : "game-" + std::to_string(match->id);
+        game.title_id ? game.TitleIdHex() : "game-" + std::to_string(sgdb_game_id);
     const std::string base = JoinPath(art_dir_, key);
     bool any = false;
     auto fetch = [&](std::string& slot, SgdbArt kind, const char* suffix) {
         if (!overwrite && !slot.empty() && fs_.Exists(slot)) return;
-        if (auto p = SaveFirst(kind, match->id, base + suffix)) {
+        if (auto p = SaveFirst(kind, sgdb_game_id, base + suffix)) {
             slot = *p;
             any = true;
         }
@@ -157,6 +177,25 @@ bool ArtScraper::Scrape(GameEntry& game, bool overwrite) {
     fetch(game.hero_art, SgdbArt::Hero, "_hero");
     fetch(game.logo_art, SgdbArt::Logo, "_logo");
     return any;
+}
+
+bool ArtScraper::SetGridFromUrl(GameEntry& game, const std::string& url) {
+    const std::string u = Trim(url);
+    if (!u.starts_with("https://") && !u.starts_with("http://")) return false;
+    const auto data = sgdb_.Download(u);
+    if (!data || data->size() < 8) return false;
+    const std::string& d = *data;
+    const bool png = d.compare(0, 4, "\x89PNG") == 0;
+    const bool jpg = static_cast<unsigned char>(d[0]) == 0xFF && static_cast<unsigned char>(d[1]) == 0xD8;
+    if (!png && !jpg) return false;
+    const std::string key = game.title_id
+                                ? game.TitleIdHex()
+                                : "custom-" + std::to_string(std::hash<std::string>{}(game.path));
+    const std::string path = JoinPath(art_dir_, key + "_grid" + (png ? ".png" : ".jpg"));
+    fs_.CreateDirs(art_dir_);
+    if (!fs_.WriteText(path, d)) return false;
+    game.grid_art = path;
+    return true;
 }
 
 } // namespace onyx

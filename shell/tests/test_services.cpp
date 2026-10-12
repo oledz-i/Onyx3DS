@@ -112,3 +112,54 @@ TEST_CASE("RetroAchievements: offline login reports failure") {
     CHECK_FALSE((ok && done));
     CHECK_FALSE(ra.LoggedIn());
 }
+
+TEST_CASE("SteamGridDB: ranking puts the 3DS game first and parses release years") {
+    const auto parsed = SteamGridDb::ParseSearch(
+        R"({"success":true,"data":[
+            {"id":1,"name":"Super Smash Bros.","verified":true,"release_date":917000000},
+            {"id":2,"name":"Super Smash Bros. for Nintendo 3DS","verified":false,"release_date":1411000000},
+            {"id":3,"name":"Super Smash Bros. Ultimate","verified":true,"release_date":1543000000}]})");
+    REQUIRE(parsed.size() == 3);
+    CHECK(parsed[0].year == 1999);
+    CHECK(parsed[1].year == 2014);
+    const auto ranked = SteamGridDb::Rank(parsed, "Super Smash Bros. for Nintendo 3DS");
+    REQUIRE(ranked.size() == 3);
+    CHECK(ranked[0].id == 2);
+    CHECK(ranked.back().id == 1); // the 1999 game goes last
+    // No years and no 3DS hint: exact name still wins over a longer one.
+    const auto flat = SteamGridDb::Rank({{5, "Mario Kart 7 Deluxe", true}, {6, "Mario Kart 7", false}}, "Mario Kart 7");
+    CHECK(flat.front().id == 6);
+}
+
+TEST_CASE("SteamGridDB: a game picked by the user and an image link") {
+    TempDir art;
+    StdFileSystem fs;
+    FakeHttp http;
+    const std::string base = "https://www.steamgriddb.com/api/v2";
+    http.routes[base + "/grids/game/77?dimensions=920x430,460x215&mimes=image/png,image/jpeg"
+                       "&types=static&nsfw=false&humor=false"] =
+        {200, R"({"success":true,"data":[{"id":1,"score":3,"url":"https://cdn/a.png","mime":"image/png"}]})", ""};
+    http.routes[base + "/heroes/game/77?mimes=image/png,image/jpeg&types=static&nsfw=false&humor=false"] =
+        {200, R"({"success":true,"data":[]})", ""};
+    http.routes[base + "/logos/game/77?mimes=image/png&types=static&nsfw=false&humor=false"] =
+        {200, R"({"success":true,"data":[]})", ""};
+    http.routes["https://cdn/a.png"] = {200, std::string("\x89PNG\r\n\x1a\n", 8) + "x", ""};
+    http.routes["https://pics/x.jpg"] = {200, std::string("\xFF\xD8\xFF\xE0", 4) + "jpegdata", ""};
+    http.routes["https://pics/page.html"] = {200, "<html>not an image</html>", ""};
+
+    SteamGridDb sgdb(http, "key");
+    ArtScraper scraper(sgdb, fs, art.Str());
+    GameEntry g;
+    g.title = "Anything";
+    g.title_id = 0x0004000000012300ull;
+    CHECK(scraper.ScrapeGame(g, 77, true)); // no search: the user chose id 77
+    CHECK(g.grid_art == art.Str() + "/0004000000012300_grid.png");
+    CHECK_FALSE(scraper.ScrapeGame(g, 0, true));
+
+    CHECK(scraper.SetGridFromUrl(g, " https://pics/x.jpg "));
+    CHECK(g.grid_art == art.Str() + "/0004000000012300_grid.jpg");
+    const std::string before = g.grid_art;
+    CHECK_FALSE(scraper.SetGridFromUrl(g, "https://pics/page.html")); // not an image
+    CHECK_FALSE(scraper.SetGridFromUrl(g, "not a link"));
+    CHECK(g.grid_art == before);
+}
