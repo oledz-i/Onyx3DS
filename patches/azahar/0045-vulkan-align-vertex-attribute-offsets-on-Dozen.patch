@@ -1,0 +1,172 @@
+From 9f73f3b00cdd0982a22f7449fe27a17389eee3ae Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 17:59:45 -0400
+Subject: [PATCH] vulkan: align vertex attribute offsets on Dozen
+
+The Xbox driver refuses a pipeline whose vertex attribute sits at an offset
+that is not a multiple of its format's alignment (the dumped refusals all had a
+4-byte format at offset 19, 23 or 27), and the draws using it were skipped. The 3DS
+packs byte attributes back to back, so some meshes (Tomodachi Life's island,
+Smash stages) hit it. When a loader has such an attribute its vertices are
+copied into a layout with every attribute aligned.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         | 109 ++++++++++++++++--
+ 1 file changed, 102 insertions(+), 7 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index f47c02c..cdb0a8a 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -237,7 +237,85 @@ void RasterizerVulkan::SyncDrawState() {
+ 
+ void RasterizerVulkan::SetupVertexArray() {
+     const auto [vs_input_index_min, vs_input_index_max, vs_input_size] = vertex_info;
+-    auto [array_ptr, array_offset, invalidate] = stream_buffer.Map(vs_input_size, 16);
++
++    // The Xbox driver (Dozen) refuses a pipeline whose vertex attribute sits at an offset
++    // that is not a multiple of its format's alignment, and the 3DS packs byte attributes
++    // back to back (a 3-byte attribute followed by another puts the next one at offset 19, 23
++    // or 27). The draws using such a pipeline were silently skipped. When that happens the
++    // loader's vertices are copied into a layout where every attribute is aligned.
++    const bool realign = static_cast<u32>(instance.GetDriverID()) == 23u;
++    struct LoaderRepack {
++        bool repack = false;
++        u32 stride = 0;
++        std::array<u32, 12> src_offset{};
++        std::array<u32, 12> dst_offset{};
++        std::array<u32, 12> size{};
++    };
++    std::array<LoaderRepack, 12> repacks{};
++    u32 reserve_size = vs_input_size;
++    if (realign) {
++        const auto& attrs = regs.pipeline.vertex_attributes;
++        const u32 stride_align = instance.GetMinVertexStrideAlignment();
++        const u32 vertex_count = vs_input_index_max - vs_input_index_min + 1;
++        u32 total = 0;
++        bool any = false;
++        for (std::size_t li = 0; li < attrs.attribute_loaders.size(); li++) {
++            const auto& loader = attrs.attribute_loaders[li];
++            if (loader.component_count == 0 || loader.byte_count == 0) {
++                continue;
++            }
++            LoaderRepack& rp = repacks[li];
++            std::array<bool, 12> used{};
++            u32 offset = 0;
++            bool misaligned = false;
++            for (u32 comp = 0; comp < loader.component_count && comp < 12; comp++) {
++                const u32 attribute_index = loader.GetComponent(comp);
++                if (attribute_index >= 12) {
++                    offset = Common::AlignUp(offset, 4);
++                    offset += (attribute_index - 11) * 4;
++                    continue;
++                }
++                if (attrs.GetNumElements(attribute_index) == 0) {
++                    continue;
++                }
++                offset = Common::AlignUp(offset, attrs.GetElementSizeInBytes(attribute_index));
++                const u32 raw = attrs.GetStride(attribute_index);
++                const u32 need = raw <= 1 ? 1u : (raw == 2 ? 2u : 4u);
++                if (offset % need != 0) {
++                    misaligned = true;
++                }
++                rp.src_offset[comp] = offset;
++                rp.size[comp] = raw;
++                used[comp] = true;
++                offset += raw;
++            }
++            u32 dst = 0;
++            if (misaligned) {
++                for (u32 comp = 0; comp < 12; comp++) {
++                    if (!used[comp]) {
++                        continue;
++                    }
++                    const u32 raw = rp.size[comp];
++                    const u32 need = raw <= 1 ? 1u : (raw == 2 ? 2u : 4u);
++                    dst = Common::AlignUp(dst, need);
++                    rp.dst_offset[comp] = dst;
++                    // 3-byte and 6-byte attributes are read through a 4- or 8-byte format.
++                    dst += raw >= 3 ? Common::AlignUp(raw, 4) : raw;
++                }
++                rp.repack = true;
++                rp.stride = Common::AlignUp(dst, 4u);
++                any = true;
++            }
++            const u32 loader_stride = rp.repack ? rp.stride : loader.byte_count;
++            const u32 aligned_stride = Common::AlignUp(loader_stride, stride_align);
++            total += Common::AlignUp(aligned_stride * vertex_count, 4);
++        }
++        if (any) {
++            reserve_size = std::max(reserve_size, total);
++        }
++    }
++
++    auto [array_ptr, array_offset, invalidate] = stream_buffer.Map(reserve_size, 16);
+ 
+     /**
+      * The Nintendo 3DS has 12 attribute loaders which are used to tell the GPU
+@@ -257,10 +335,13 @@ void RasterizerVulkan::SetupVertexArray() {
+     enable_attributes.fill(false);
+ 
+     u32 buffer_offset = 0;
+-    for (const auto& loader : vertex_attributes.attribute_loaders) {
++    for (std::size_t loader_index = 0; loader_index < vertex_attributes.attribute_loaders.size();
++         loader_index++) {
++        const auto& loader = vertex_attributes.attribute_loaders[loader_index];
+         if (loader.component_count == 0 || loader.byte_count == 0) {
+             continue;
+         }
++        const LoaderRepack& repack = repacks[loader_index];
+ 
+         // Analyze the attribute loader by checking which attributes it provides
+         u32 offset = 0;
+@@ -287,7 +368,7 @@ void RasterizerVulkan::SetupVertexArray() {
+             VertexAttribute& attribute = layout.attributes[input_reg];
+             attribute.binding.Assign(layout.binding_count);
+             attribute.location.Assign(input_reg);
+-            attribute.offset.Assign(offset);
++            attribute.offset.Assign(repack.repack ? repack.dst_offset[comp] : offset);
+             attribute.type.Assign(format);
+             attribute.size.Assign(size);
+ 
+@@ -323,9 +404,23 @@ void RasterizerVulkan::SetupVertexArray() {
+         u8* dst_ptr = array_ptr + buffer_offset;
+ 
+         // Align stride up if required by Vulkan implementation.
+-        const u32 aligned_stride =
+-            Common::AlignUp(static_cast<u32>(loader.byte_count), stride_alignment);
+-        if (aligned_stride == loader.byte_count) {
++        const u32 loader_stride = repack.repack ? repack.stride : static_cast<u32>(loader.byte_count);
++        const u32 aligned_stride = Common::AlignUp(loader_stride, stride_alignment);
++        if (repack.repack) {
++            // Copy each attribute to its aligned place, vertex by vertex.
++            std::memset(dst_ptr, 0, static_cast<std::size_t>(aligned_stride) * vertex_num);
++            const std::size_t whole = loader.byte_count ? copy_size / loader.byte_count : 0;
++            for (std::size_t vertex = 0; vertex < whole && vertex < vertex_num; vertex++) {
++                const u8* from = src_ptr + vertex * loader.byte_count;
++                u8* to = dst_ptr + vertex * aligned_stride;
++                for (u32 comp = 0; comp < 12; comp++) {
++                    if (repack.size[comp]) {
++                        std::memcpy(to + repack.dst_offset[comp], from + repack.src_offset[comp],
++                                    repack.size[comp]);
++                    }
++                }
++            }
++        } else if (aligned_stride == loader.byte_count) {
+             if (copy_size) std::memcpy(dst_ptr, src_ptr, copy_size);
+             if (copy_size < data_size) std::memset(dst_ptr + copy_size, 0, data_size - copy_size);
+         } else {
+@@ -345,7 +440,7 @@ void RasterizerVulkan::SetupVertexArray() {
+         binding.binding.Assign(layout.binding_count);
+         binding.fixed.Assign(0);
+         // Will be adjusted on pipeline build, to keep the info transferable.
+-        binding.byte_count.Assign(loader.byte_count);
++        binding.byte_count.Assign(loader_stride);
+ 
+         // Keep track of the binding offsets so we can bind the vertex buffer later
+         binding_offsets[layout.binding_count++] = static_cast<u32>(array_offset + buffer_offset);
+-- 
+2.43.0
+
