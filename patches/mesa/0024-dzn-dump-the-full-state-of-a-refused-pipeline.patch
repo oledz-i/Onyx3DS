@@ -1,0 +1,165 @@
+From 6139230595fc80ec756675cd6dd820d8c394f009 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 16:41:02 -0400
+Subject: [PATCH] dzn: dump the full state of a refused pipeline
+
+The refused variants pass DXIL validation, so the E_INVALIDARG comes from
+some other part of the pipeline state. Walk the state stream and log the
+blend, render-target, depth, input layout, rasterizer, sample and topology
+parts of the first eight refused pipelines.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
+---
+ src/microsoft/vulkan/dzn_pipeline.c | 128 ++++++++++++++++++++++++++++
+ 1 file changed, 128 insertions(+)
+
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 746c699e..3a145961 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2280,6 +2280,129 @@ update_stencil_state(struct dzn_physical_device *pdev,
+    }
+ }
+ 
++/* ONYX: say what a refused pipeline state contains. Walks the pipeline state
++ * stream (subobjects are laid out by d3d12_pipeline_state_stream_new_desc) and
++ * prints the parts that can make CreatePipelineState return E_INVALIDARG. */
++#define ONYX_SUB(T) do { \
++   off = ALIGN_POT(off, alignof(T)); \
++   d = buf + off; off += sizeof(T); \
++} while (0)
++
++static void
++onyx_dump_pipeline_state(const uint8_t *buf, size_t size)
++{
++   size_t off = 0;
++   unsigned guard = 0;
++   while (off + sizeof(uint32_t) <= size && guard++ < 40) {
++      off = ALIGN_POT(off, alignof(void *));
++      const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = *(const uint32_t *)(buf + off);
++      off += sizeof(uint32_t);
++      const uint8_t *d = NULL;
++      switch ((int)type) {
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
++         ONYX_SUB(ID3D12RootSignature *); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS: {
++         ONYX_SUB(D3D12_SHADER_BYTECODE);
++         const D3D12_SHADER_BYTECODE *bc = (const void *)d;
++         mesa_logw("ONYX PSO: shader stage %d, %u bytes", (int)type, (unsigned)bc->BytecodeLength);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: {
++         ONYX_SUB(D3D12_BLEND_DESC);
++         const D3D12_BLEND_DESC *b = (const void *)d;
++         mesa_logw("ONYX PSO: blend a2c %d independent %d", (int)b->AlphaToCoverageEnable,
++                   (int)b->IndependentBlendEnable);
++         for (unsigned i = 0; i < 2; i++) {
++            const D3D12_RENDER_TARGET_BLEND_DESC *r = &b->RenderTarget[i];
++            mesa_logw("ONYX PSO: blend rt%u enable %d logic %d/%d color %d,%d,%d alpha %d,%d,%d mask %x",
++                      i, (int)r->BlendEnable, (int)r->LogicOpEnable, (int)r->LogicOp,
++                      (int)r->SrcBlend, (int)r->DestBlend, (int)r->BlendOp,
++                      (int)r->SrcBlendAlpha, (int)r->DestBlendAlpha, (int)r->BlendOpAlpha,
++                      (unsigned)r->RenderTargetWriteMask);
++         }
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: ONYX_SUB(UINT); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: {
++         ONYX_SUB(D3D12_RASTERIZER_DESC);
++         const D3D12_RASTERIZER_DESC *r = (const void *)d;
++         mesa_logw("ONYX PSO: raster fill %d cull %d ccw %d clip %d msaa %d forced %u",
++                   (int)r->FillMode, (int)r->CullMode, (int)r->FrontCounterClockwise,
++                   (int)r->DepthClipEnable, (int)r->MultisampleEnable, r->ForcedSampleCount);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER1: ONYX_SUB(D3D12_RASTERIZER_DESC1); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER2: ONYX_SUB(D3D12_RASTERIZER_DESC2); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL: ONYX_SUB(D3D12_DEPTH_STENCIL_DESC); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: {
++         ONYX_SUB(D3D12_DEPTH_STENCIL_DESC1);
++         const D3D12_DEPTH_STENCIL_DESC1 *z = (const void *)d;
++         mesa_logw("ONYX PSO: depth enable %d write %d func %d stencil %d bounds %d",
++                   (int)z->DepthEnable, (int)z->DepthWriteMask, (int)z->DepthFunc,
++                   (int)z->StencilEnable, (int)z->DepthBoundsTestEnable);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2: {
++         ONYX_SUB(D3D12_DEPTH_STENCIL_DESC2);
++         const D3D12_DEPTH_STENCIL_DESC2 *z = (const void *)d;
++         mesa_logw("ONYX PSO: depth enable %d write %d func %d stencil %d bounds %d",
++                   (int)z->DepthEnable, (int)z->DepthWriteMask, (int)z->DepthFunc,
++                   (int)z->StencilEnable, (int)z->DepthBoundsTestEnable);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: {
++         ONYX_SUB(D3D12_INPUT_LAYOUT_DESC);
++         const D3D12_INPUT_LAYOUT_DESC *il = (const void *)d;
++         mesa_logw("ONYX PSO: input layout, %u elements", il->NumElements);
++         for (unsigned i = 0; il->pInputElementDescs && i < il->NumElements && i < 16; i++) {
++            const D3D12_INPUT_ELEMENT_DESC *e = &il->pInputElementDescs[i];
++            mesa_logw("ONYX PSO:   %s%u format %d slot %u offset %u class %d step %u",
++                      e->SemanticName ? e->SemanticName : "?", e->SemanticIndex, (int)e->Format,
++                      e->InputSlot, e->AlignedByteOffset, (int)e->InputSlotClass,
++                      e->InstanceDataStepRate);
++         }
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE: ONYX_SUB(UINT); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY: {
++         ONYX_SUB(D3D12_PRIMITIVE_TOPOLOGY_TYPE);
++         mesa_logw("ONYX PSO: topology type %d", (int)*(const D3D12_PRIMITIVE_TOPOLOGY_TYPE *)d);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: {
++         ONYX_SUB(struct D3D12_RT_FORMAT_ARRAY);
++         const struct D3D12_RT_FORMAT_ARRAY *rt = (const void *)d;
++         mesa_logw("ONYX PSO: %u render targets, format0 %d", rt->NumRenderTargets,
++                   (int)rt->RTFormats[0]);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT: {
++         ONYX_SUB(DXGI_FORMAT);
++         mesa_logw("ONYX PSO: depth format %d", (int)*(const DXGI_FORMAT *)d);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: {
++         ONYX_SUB(DXGI_SAMPLE_DESC);
++         const DXGI_SAMPLE_DESC *sd = (const void *)d;
++         mesa_logw("ONYX PSO: samples %u quality %u", sd->Count, sd->Quality);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS: ONYX_SUB(D3D12_PIPELINE_STATE_FLAGS); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: {
++         ONYX_SUB(D3D12_VIEW_INSTANCING_DESC);
++         mesa_logw("ONYX PSO: view instancing, %u views",
++                   ((const D3D12_VIEW_INSTANCING_DESC *)d)->ViewInstanceCount);
++         break;
++      }
++      default:
++         mesa_logw("ONYX PSO: unknown subobject type %d, stopping", (int)type);
++         return;
++      }
++   }
++}
++
+ ID3D12PipelineState *
+ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+                                 const struct dzn_graphics_pipeline_variant_key *key)
+@@ -2354,6 +2477,11 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+                    masked_key.stencil_test.front.write_mask,
+                    masked_key.stencil_test.back.write_mask);
+          variant->state = NULL;
++         {
++            static unsigned onyx_dumped;
++            if (onyx_dumped++ < 8)
++               onyx_dump_pipeline_state((const uint8_t *)stream_buf, stream_desc.SizeInBytes);
++         }
+          /* Say which stages the pipeline has and what the validator thinks of
+           * each, since modules after the first few are signed unvalidated. */
+          static unsigned onyx_diagnosed;
+-- 
+2.43.0
+

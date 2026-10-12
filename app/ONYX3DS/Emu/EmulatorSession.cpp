@@ -664,6 +664,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
                                               hw_render_.depth, hw_render_.stencil, err)) {
         fail("The OpenGL renderer could not start: " + err);
     } else {
+        // A game quit from the quick menu left the output muted (the menu pauses,
+        // and pausing mutes); the next game must not start silent.
+        audio_.SetMuted(pause_requested_ || fast_forward_);
         audio_.Start(av.timing.sample_rate > 0 ? static_cast<uint32_t>(av.timing.sample_rate)
                                                : kCoreSampleRate);
         // Hardware: context_reset is where Azahar boots the game. Software:
@@ -814,6 +817,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     if (vulkan_ && !software_ && !use_gl_) vulkan_->DestroyDevice();
     if (gl_ && use_gl_) gl_->DestroyContext();
     audio_.Stop();
+    audio_.SetMuted(false);
     presenter_.SetPaused(false);
     state_ = SessionState::Idle;
 

@@ -192,3 +192,9 @@ Animal Crossing and Ace Attorney still to report.
 7. OpenGL returns later, built from upstream Mesa/mesa-uwp sources and our own patches (GlHost.cpp is ours);
    ask the other author whether they want a mention.
 Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
+
+
+## Monday 2026-10-12 progress
+- Mesa patch 0024: a refused Dozen pipeline now logs its full state (blend, render-target and depth formats, input layout, rasterizer, topology). The refused pipelines pass DXIL validation, so the cause is elsewhere in the state; the next log from Smash, Tomodachi Life or the Ocarina title screen will name it. The refusals explain the missing Tomodachi island and the Smash glitches.
+- Audio: the output is un-muted when a game starts and after it quits, so a game quit from the quick menu no longer leaves the next one silent.
+- Still open: texture-view fallback (format 42 from 27, 4-4-4-4 / 5-5-5-1 fallbacks), hold-previous-picture tuning, frame-drop and copy work at the presenter, stream-buffer churn, shader cache, SteamGridDB picker.
