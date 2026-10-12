@@ -1,0 +1,48 @@
+From 675c55769fc97c6d7c80b1901fd53a5e403f034a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 18:02:20 -0400
+Subject: [PATCH] vulkan: log vertex upload volume
+
+---
+ .../renderer_vulkan/vk_rasterizer.cpp          | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index cdb0a8a..b053846 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <chrono>
+ #include "common/alignment.h"
+ #include "common/literals.h"
+ #include "common/logging/log.h"
+@@ -317,6 +318,23 @@ void RasterizerVulkan::SetupVertexArray() {
+ 
+     auto [array_ptr, array_offset, invalidate] = stream_buffer.Map(reserve_size, 16);
+ 
++    // ONYX: measure how much vertex data is copied per second (stream buffer wraps).
++    {
++        static u64 window_bytes = 0, window_draws = 0, window_max = 0;
++        static auto window_start = std::chrono::steady_clock::now();
++        window_bytes += reserve_size;
++        window_draws++;
++        window_max = std::max<u64>(window_max, reserve_size);
++        const auto now = std::chrono::steady_clock::now();
++        if (now - window_start >= std::chrono::seconds(5)) {
++            LOG_INFO(Render_Vulkan,
++                     "Vertex uploads: {} MiB in {} draws over 5 s (largest draw {} KiB)",
++                     window_bytes >> 20, window_draws, window_max >> 10);
++            window_bytes = window_draws = window_max = 0;
++            window_start = now;
++        }
++    }
++
+     /**
+      * The Nintendo 3DS has 12 attribute loaders which are used to tell the GPU
+      * how to interpret vertex data. The program firsts sets GPUREG_ATTR_BUF_BASE to the base
+-- 
+2.43.0
+

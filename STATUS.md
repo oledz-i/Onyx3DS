@@ -200,3 +200,8 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - SteamGridDB picker: Get artwork now lists the games SteamGridDB found (3DS-era releases ranked first, so Smash 3DS beats the N64 game) for the user to pick, plus a paste-a-picture-link box (PNG/JPEG, works without an API key). The automatic scraper uses the same ranking. Untested on the console.
 - Closing a game sometimes sticks on "Saving and closing" after a few games (reported 10/12, no log): every step of closing is now timed in the log ("Closing: ..."), and vkDeviceWaitIdle is bounded to 8 s so a stuck GPU can no longer hang the close forever. Cause still unconfirmed.
 - Still open: texture-view fallback (format 42 from 27, 4-4-4-4 / 5-5-5-1 fallbacks), hold-previous-picture tuning, frame-drop and copy work at the presenter, stream-buffer churn, shader cache, SteamGridDB picker.
+
+### Monday 2026-10-12 — vertex fix + upload measurement
+- Pipeline refusals traced to unaligned 4-byte vertex attributes (Dozen refuses the PSO). Azahar 0045 repacks vertex data to aligned offsets on Dozen. Untested on device: Tomodachi island, Smash stages.
+- Azahar 0046 logs vertex upload volume every 5 s. Smash wraps its 64 MiB vertex stream roughly every 0.3 s (~200 MB/s), so the next log shows which draws are heavy before a vertex cache is designed.
+- Smash bottom-screen noise and the Zelda logo spots are still open. The only driver warning in those logs is the R32_UINT view of an RGBA8 resource (null descriptor); not proven to be the cause.
