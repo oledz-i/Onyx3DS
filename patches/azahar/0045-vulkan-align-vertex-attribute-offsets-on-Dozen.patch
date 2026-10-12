@@ -1,26 +1,26 @@
-From 9f73f3b00cdd0982a22f7449fe27a17389eee3ae Mon Sep 17 00:00:00 2001
+From 45555adc5b6fe281735034ba229e0e2a5da2f3cb Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Mon, 12 Oct 2026 17:59:45 -0400
-Subject: [PATCH] vulkan: align vertex attribute offsets on Dozen
+Date: Mon, 12 Oct 2026 18:10:56 -0400
+Subject: [PATCH] vulkan: align vertex attribute offsets on Dozen; log vertex
+ upload volume
 
-The Xbox driver refuses a pipeline whose vertex attribute sits at an offset
-that is not a multiple of its format's alignment (the dumped refusals all had a
-4-byte format at offset 19, 23 or 27), and the draws using it were skipped. The 3DS
-packs byte attributes back to back, so some meshes (Tomodachi Life's island,
-Smash stages) hit it. When a loader has such an attribute its vertices are
-copied into a layout with every attribute aligned.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01GBZiGZJLWikH7o79f84GTm
 ---
- .../renderer_vulkan/vk_rasterizer.cpp         | 109 ++++++++++++++++--
- 1 file changed, 102 insertions(+), 7 deletions(-)
+ .../renderer_vulkan/vk_rasterizer.cpp         | 127 +++++++++++++++++-
+ 1 file changed, 120 insertions(+), 7 deletions(-)
 
 diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-index f47c02c..cdb0a8a 100644
+index f47c02c..58f8666 100644
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -237,7 +237,85 @@ void RasterizerVulkan::SyncDrawState() {
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <chrono>
+ #include "common/alignment.h"
+ #include "common/literals.h"
+ #include "common/logging/log.h"
+@@ -237,7 +238,102 @@ void RasterizerVulkan::SyncDrawState() {
  
  void RasterizerVulkan::SetupVertexArray() {
      const auto [vs_input_index_min, vs_input_index_max, vs_input_size] = vertex_info;
@@ -47,7 +47,7 @@ index f47c02c..cdb0a8a 100644
 +        const u32 vertex_count = vs_input_index_max - vs_input_index_min + 1;
 +        u32 total = 0;
 +        bool any = false;
-+        for (std::size_t li = 0; li < attrs.attribute_loaders.size(); li++) {
++        for (std::size_t li = 0; li < repacks.size(); li++) {
 +            const auto& loader = attrs.attribute_loaders[li];
 +            if (loader.component_count == 0 || loader.byte_count == 0) {
 +                continue;
@@ -94,7 +94,7 @@ index f47c02c..cdb0a8a 100644
 +                rp.stride = Common::AlignUp(dst, 4u);
 +                any = true;
 +            }
-+            const u32 loader_stride = rp.repack ? rp.stride : loader.byte_count;
++            const u32 loader_stride = rp.repack ? rp.stride : static_cast<u32>(loader.byte_count);
 +            const u32 aligned_stride = Common::AlignUp(loader_stride, stride_align);
 +            total += Common::AlignUp(aligned_stride * vertex_count, 4);
 +        }
@@ -104,10 +104,27 @@ index f47c02c..cdb0a8a 100644
 +    }
 +
 +    auto [array_ptr, array_offset, invalidate] = stream_buffer.Map(reserve_size, 16);
++
++    // ONYX: measure how much vertex data is copied per second (stream buffer wraps).
++    {
++        static u64 window_bytes = 0, window_draws = 0, window_max = 0;
++        static auto window_start = std::chrono::steady_clock::now();
++        window_bytes += reserve_size;
++        window_draws++;
++        window_max = std::max<u64>(window_max, reserve_size);
++        const auto now = std::chrono::steady_clock::now();
++        if (now - window_start >= std::chrono::seconds(5)) {
++            LOG_INFO(Render_Vulkan,
++                     "Vertex uploads: {} MiB in {} draws over 5 s (largest draw {} KiB)",
++                     window_bytes >> 20, window_draws, window_max >> 10);
++            window_bytes = window_draws = window_max = 0;
++            window_start = now;
++        }
++    }
  
      /**
       * The Nintendo 3DS has 12 attribute loaders which are used to tell the GPU
-@@ -257,10 +335,13 @@ void RasterizerVulkan::SetupVertexArray() {
+@@ -257,10 +353,13 @@ void RasterizerVulkan::SetupVertexArray() {
      enable_attributes.fill(false);
  
      u32 buffer_offset = 0;
@@ -122,7 +139,7 @@ index f47c02c..cdb0a8a 100644
  
          // Analyze the attribute loader by checking which attributes it provides
          u32 offset = 0;
-@@ -287,7 +368,7 @@ void RasterizerVulkan::SetupVertexArray() {
+@@ -287,7 +386,7 @@ void RasterizerVulkan::SetupVertexArray() {
              VertexAttribute& attribute = layout.attributes[input_reg];
              attribute.binding.Assign(layout.binding_count);
              attribute.location.Assign(input_reg);
@@ -131,7 +148,7 @@ index f47c02c..cdb0a8a 100644
              attribute.type.Assign(format);
              attribute.size.Assign(size);
  
-@@ -323,9 +404,23 @@ void RasterizerVulkan::SetupVertexArray() {
+@@ -323,9 +422,23 @@ void RasterizerVulkan::SetupVertexArray() {
          u8* dst_ptr = array_ptr + buffer_offset;
  
          // Align stride up if required by Vulkan implementation.
@@ -158,7 +175,7 @@ index f47c02c..cdb0a8a 100644
              if (copy_size) std::memcpy(dst_ptr, src_ptr, copy_size);
              if (copy_size < data_size) std::memset(dst_ptr + copy_size, 0, data_size - copy_size);
          } else {
-@@ -345,7 +440,7 @@ void RasterizerVulkan::SetupVertexArray() {
+@@ -345,7 +458,7 @@ void RasterizerVulkan::SetupVertexArray() {
          binding.binding.Assign(layout.binding_count);
          binding.fixed.Assign(0);
          // Will be adjusted on pipeline build, to keep the info transferable.

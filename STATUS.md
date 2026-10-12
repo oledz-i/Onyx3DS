@@ -203,5 +203,5 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 
 ### Monday 2026-10-12 — vertex fix + upload measurement
 - Pipeline refusals traced to unaligned 4-byte vertex attributes (Dozen refuses the PSO). Azahar 0045 repacks vertex data to aligned offsets on Dozen. Untested on device: Tomodachi island, Smash stages.
-- Azahar 0046 logs vertex upload volume every 5 s. Smash wraps its 64 MiB vertex stream roughly every 0.3 s (~200 MB/s), so the next log shows which draws are heavy before a vertex cache is designed.
+- Azahar 0045 also logs vertex upload volume every 5 s. Smash wraps its 64 MiB vertex stream roughly every 0.3 s (~200 MB/s), so the next log shows which draws are heavy before a vertex cache is designed.
 - Smash bottom-screen noise and the Zelda logo spots are still open. The only driver warning in those logs is the R32_UINT view of an RGBA8 resource (null descriptor); not proven to be the cause.
