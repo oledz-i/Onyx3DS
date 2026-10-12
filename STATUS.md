@@ -205,3 +205,12 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Pipeline refusals traced to unaligned 4-byte vertex attributes (Dozen refuses the PSO). Azahar 0045 repacks vertex data to aligned offsets on Dozen. Untested on device: Tomodachi island, Smash stages.
 - Azahar 0045 also logs vertex upload volume every 5 s. Smash wraps its 64 MiB vertex stream roughly every 0.3 s (~200 MB/s), so the next log shows which draws are heavy before a vertex cache is designed.
 - Smash bottom-screen noise and the Zelda logo spots are still open. The only driver warning in those logs is the R32_UINT view of an RGBA8 resource (null descriptor); not proven to be the cause.
+
+### Next build scope (set Mon 2026-10-12)
+- Full fixes for the graphical errors (Tomodachi island, Smash stages and bottom-screen noise, Zelda logo spots, Mario Kart hitching).
+- Performance: vertex upload volume, presenter drops, extra frame copy, shader cache with background pipeline builds.
+- GBA support, polished from the first run: picture settings right off the bat, ROM hacks supported.
+- XMB-style menu (original assets only).
+- Quick menu: smoother opening, better looking.
+- Xbox One: x64 package already matches; whether it runs is untested (GPU/CPU headroom and UWP target version unknown).
+- The rest of the planned extras.
