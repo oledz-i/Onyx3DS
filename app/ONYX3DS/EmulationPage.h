@@ -26,6 +26,9 @@ private:
     void OnHotkey(int hotkey);
     void OpenMenu();
     void CloseMenu();
+    void AnimateMenuIn();
+    void SlideSideIn();
+    void HideLoadingOverlay();
     void BuildMenu();
     void ShowMenuCheats();
     void ShowMenuStates(bool loading);

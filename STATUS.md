@@ -189,8 +189,7 @@ Animal Crossing and Ace Attorney still to report.
    and the USB). Get the log; show a clear "missing key / seeddb.bin" message instead of a generic failure.
    Check that the System-folder setting actually maps to the folder the user picked.
 6. Optional XMB-style (PS3-like) home layout.
-7. OpenGL returns later, built from upstream Mesa/mesa-uwp sources and our own patches (GlHost.cpp is ours);
-   ask the other author whether they want a mention.
+7. OpenGL returns later, built from public upstream Mesa sources and our own patches (GlHost.cpp is ours).
 Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 
 

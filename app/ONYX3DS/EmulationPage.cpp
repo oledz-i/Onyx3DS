@@ -12,10 +12,12 @@
 #include "Platform/Log.h"
 #include "Ui/AppServices.h"
 #include "Ui/OnScreenKeyboard.h"
+#include "Ui/SystemList.h"
 #include "Ui/UiKit.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Foundation::Numerics;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Controls;
 using namespace winrt::Windows::UI::Xaml::Input;
@@ -28,6 +30,40 @@ namespace kit = onyx::app::ui;
 namespace winrt::ONYX3DS::implementation {
 
 namespace {
+// Runs `fn` once on the UI thread after `ms` (used to let a just-shown element lay out before
+// its implicit transition is triggered, and to collapse it after a fade-out).
+void After(int ms, std::function<void()> fn) {
+    DispatcherTimer timer;
+    timer.Interval(std::chrono::milliseconds(ms));
+    timer.Tick([timer, fn = std::move(fn)](auto&&, auto&&) {
+        timer.Stop();
+        fn();
+    });
+    timer.Start();
+}
+
+// A button that eases up in size while it has focus (composition facade only: no RenderTransform).
+void ArmFocusZoom(Button const& b) {
+    Vector3Transition zoom;
+    zoom.Duration(std::chrono::milliseconds(140));
+    b.ScaleTransition(zoom);
+    b.SizeChanged([b](auto&&, auto&&) {
+        b.CenterPoint(float3{static_cast<float>(b.ActualWidth() / 2), static_cast<float>(b.ActualHeight() / 2), 0});
+    });
+    b.GotFocus([b](auto&&, auto&&) { b.Scale(float3{1.06f, 1.06f, 1.0f}); });
+    b.LostFocus([b](auto&&, auto&&) { b.Scale(float3{1.0f, 1.0f, 1.0f}); });
+}
+
+// Implicit fade / slide on a menu element (the Translation facade; never mixed with RenderTransform).
+void PrepareMotion(UIElement const& e, int ms) {
+    ScalarTransition fade;
+    fade.Duration(std::chrono::milliseconds(ms));
+    e.OpacityTransition(fade);
+    Vector3Transition slide;
+    slide.Duration(std::chrono::milliseconds(ms));
+    e.TranslationTransition(slide);
+}
+
 AppServices& Svc() {
     return AppServices::Get();
 }
@@ -105,6 +141,8 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
                            L"Hold View + press Menu any time for the ONYX menu.");
     if (!game_.icon_path.empty())
         LoadingIcon().Source(IconFromRgba(Svc().Fs().ReadAll(game_.icon_path), 48, 48));
+    LoadingOverlay().Opacity(1);
+    LoadingOverlay().IsHitTestVisible(true);
     LoadingOverlay().Visibility(Visibility::Visible);
     MenuOverlay().Visibility(Visibility::Collapsed);
     FpsText().Visibility(show_fps_ ? Visibility::Visible : Visibility::Collapsed);
@@ -229,7 +267,7 @@ void EmulationPage::UpdateSoftwareView() {
 void EmulationPage::OnStarted() {
     started_ = true;
     // Picture first: nothing below may stop the game from being shown.
-    LoadingOverlay().Visibility(Visibility::Collapsed);
+    HideLoadingOverlay();
     ONYX_INFO("Game started; loading screen hidden");
     // CPU frames are shown by the XAML image view, or with Direct display on,
     // drawn by the presenter into the swap chain under it.
@@ -469,17 +507,93 @@ void EmulationPage::OpenMenu() {
     if (!started_ || quitting_ || KeyboardOpen()) return;
     menu_open_ = true;
     menu_opened_at_ = std::chrono::steady_clock::now();
-    Emu().SetPaused(true);
     Svc().PlaySfx("select");
     BuildMenu();
+    AnimateMenuIn();
+    Emu().SetPaused(true);
+}
+
+// The menu eases in: the scrim fades, the bands slide in from their edges and the buttons rise
+// one after the other. Starting values are set while the overlay is collapsed; the end values a
+// moment after it is shown, so the transitions have a layout to animate from.
+void EmulationPage::AnimateMenuIn() {
+    static bool prepared = false;
+    if (!prepared) {
+        prepared = true;
+        PrepareMotion(MenuOverlay(), 180);
+        PrepareMotion(MenuTopBand(), 260);
+        PrepareMotion(MenuBottomBand(), 260);
+        PrepareMotion(MenuButtons(), 300);
+        PrepareMotion(MenuSideScroll(), 260);
+    }
+    MenuOverlay().Opacity(0);
+    MenuTopBand().Translation(float3{0, -34, 0});
+    MenuBottomBand().Translation(float3{0, 34, 0});
+    MenuButtons().Opacity(0);
+    MenuButtons().Translation(float3{0, 30, 0});
+    MenuOverlay().IsHitTestVisible(true);
     MenuOverlay().Visibility(Visibility::Visible);
+    auto weak = get_weak();
+    After(24, [weak] {
+        auto self = weak.get();
+        if (!self || !self->menu_open_) return;
+        self->MenuOverlay().Opacity(1);
+        self->MenuTopBand().Translation(float3{0, 0, 0});
+        self->MenuBottomBand().Translation(float3{0, 0, 0});
+        self->MenuButtons().Opacity(1);
+        self->MenuButtons().Translation(float3{0, 0, 0});
+    });
+}
+
+// A panel opened from the menu (states, cheats, quick settings) slides in from the right.
+void EmulationPage::SlideSideIn() {
+    auto side = MenuSideScroll();
+    side.Opacity(0);
+    side.Translation(float3{46, 0, 0});
+    auto weak = get_weak();
+    After(24, [weak] {
+        auto self = weak.get();
+        if (!self || !self->menu_open_) return;
+        self->MenuSideScroll().Opacity(1);
+        self->MenuSideScroll().Translation(float3{0, 0, 0});
+    });
+}
+
+// The loading screen fades away instead of cutting to the game.
+void EmulationPage::HideLoadingOverlay() {
+    static bool prepared = false;
+    auto overlay = LoadingOverlay();
+    if (overlay.Visibility() != Visibility::Visible) return;
+    if (!prepared) {
+        prepared = true;
+        ScalarTransition fade;
+        fade.Duration(std::chrono::milliseconds(320));
+        overlay.OpacityTransition(fade);
+    }
+    overlay.IsHitTestVisible(false);
+    overlay.Opacity(0);
+    auto weak = get_weak();
+    After(360, [weak] {
+        auto self = weak.get();
+        if (!self) return;
+        // A later load (resume after an error, say) shows it again with Opacity restored.
+        if (self->LoadingOverlay().Opacity() < 0.05) self->LoadingOverlay().Visibility(Visibility::Collapsed);
+    });
 }
 
 void EmulationPage::CloseMenu() {
     menu_open_ = false;
-    MenuOverlay().Visibility(Visibility::Collapsed);
-    MenuSideScroll().Visibility(Visibility::Collapsed);
-    MenuSide().Children().Clear();
+    // Fade out, then collapse (unless the menu was opened again in the meantime).
+    MenuOverlay().IsHitTestVisible(false);
+    MenuOverlay().Opacity(0);
+    auto weak = get_weak();
+    After(200, [weak] {
+        auto self = weak.get();
+        if (!self || self->menu_open_) return;
+        self->MenuOverlay().Visibility(Visibility::Collapsed);
+        self->MenuSideScroll().Visibility(Visibility::Collapsed);
+        self->MenuSide().Children().Clear();
+    });
     Svc().PlaySfx("back");
     // The A press that picked "Resume" must not reach the game.
     Emu().Input().SuppressFor(std::chrono::milliseconds(250));
@@ -488,23 +602,56 @@ void EmulationPage::CloseMenu() {
 
 void EmulationPage::BuildMenu() {
     const Theme& t = Svc().CurrentTheme();
-    MenuTopBand().Background(Svc().ThemeBrush(t.colors.panel));
-    MenuBottomBand().Background(Svc().ThemeBrush(t.colors.panel));
+    MenuTopBand().Background(Svc().ThemeBrush(kit::WithAlpha(t.colors.panel, 0xE8)));
+    MenuBottomBand().Background(Svc().ThemeBrush(kit::WithAlpha(t.colors.panel, 0xE8)));
     MenuTitle().Foreground(Svc().ThemeBrush(t.colors.text));
+    MenuSubtitle().Foreground(Svc().ThemeBrush(t.colors.text_muted));
     MenuClock().Foreground(Svc().ThemeBrush(t.colors.text_muted));
     MenuHint().Foreground(Svc().ThemeBrush(t.colors.text_muted));
     MenuTitle().Text(kit::H(game_.DisplayTitle()));
+    // The game's cover (or its icon) in the corner, rounded.
+    {
+        std::string art = game_.grid_art;
+        if (art.empty() || !Svc().Fs().Exists(art)) art = game_.icon_path;
+        if (!art.empty() && Svc().Fs().Exists(art)) {
+            ImageBrush brush;
+            brush.Stretch(Stretch::UniformToFill);
+            if (art == game_.icon_path) brush.ImageSource(IconFromRgba(Svc().Fs().ReadAll(art), 48, 48));
+            else brush.ImageSource(ImageFromFile(art, 256));
+            MenuCover().Background(brush);
+            MenuCover().Visibility(Visibility::Visible);
+        } else {
+            MenuCover().Visibility(Visibility::Collapsed);
+        }
+    }
     SYSTEMTIME st;
     GetLocalTime(&st);
-    char clock[64];
-    std::snprintf(clock, sizeof(clock), "%d:%02d   ·   Playing for %s", st.wHour % 12 ? st.wHour % 12 : 12,
-                  st.wMinute, FormatPlayTime(Emu().SessionSeconds()).c_str());
+    char clock[32];
+    std::snprintf(clock, sizeof(clock), "%d:%02d %s", st.wHour % 12 ? st.wHour % 12 : 12, st.wMinute,
+                  st.wHour < 12 ? "AM" : "PM");
     MenuClock().Text(kit::H(clock));
+    MenuSubtitle().Text(kit::H(std::string(SystemLabel(game_.system)) + "   ·   Playing for " +
+                               FormatPlayTime(Emu().SessionSeconds())));
     MenuHint().Text(kit::H("State slot " + std::to_string(Emu().CurrentSlot()) +
                            "    ·    In game: View + D-pad Up/Down save/load, View + RB fast forward, "
                            "View + Y screenshot" +
                            std::string(IsRetroSystem(game_.system) ? "" : ", View + LB layout")));
-    MenuOverlay().Background(SolidColorBrush({0x99, 0, 0, 0}));
+    {
+        // A scrim that is lighter in the middle, so the paused picture stays visible behind the buttons.
+        LinearGradientBrush scrim;
+        scrim.StartPoint(winrt::Windows::Foundation::Point{0.5f, 0.0f});
+        scrim.EndPoint(winrt::Windows::Foundation::Point{0.5f, 1.0f});
+        auto stop = [&](double offset, uint8_t alpha) {
+            GradientStop g;
+            g.Color({alpha, 0, 0, 0});
+            g.Offset(offset);
+            scrim.GradientStops().Append(g);
+        };
+        stop(0.0, 0xB0);
+        stop(0.45, 0x70);
+        stop(1.0, 0xC8);
+        MenuOverlay().Background(scrim);
+    }
 
     auto host = MenuButtons();
     host.Children().Clear();
@@ -560,6 +707,10 @@ void EmulationPage::BuildMenu() {
             s->Quit();
         }
     }));
+    for (uint32_t i = 0; i < host.Children().Size(); ++i)
+        if (auto rowpanel = host.Children().GetAt(i).try_as<StackPanel>())
+            for (uint32_t j = 0; j < rowpanel.Children().Size(); ++j)
+                if (auto btn = rowpanel.Children().GetAt(j).try_as<Button>()) ArmFocusZoom(btn);
     resume.Focus(FocusState::Programmatic);
 }
 
@@ -606,6 +757,7 @@ void EmulationPage::ShowMenuStates(bool loading) {
     }
     if (!first) panel.Children().Append(kit::Text("No save states yet.", 22));
     MenuSideScroll().Visibility(Visibility::Visible);
+    SlideSideIn();
     if (first) first.Focus(FocusState::Programmatic);
 }
 
@@ -630,6 +782,7 @@ void EmulationPage::ShowMenuCheats() {
         if (!first) first = toggle;
     }
     MenuSideScroll().Visibility(Visibility::Visible);
+    SlideSideIn();
     if (first) first.Focus(FocusState::Programmatic);
 }
 
@@ -761,6 +914,7 @@ void EmulationPage::ShowMenuQuickSettings() {
                                                                               : "How the 3DS image is scaled to your TV",
                                             filter));
     MenuSideScroll().Visibility(Visibility::Visible);
+    SlideSideIn();
 }
 
 void EmulationPage::Quit() {

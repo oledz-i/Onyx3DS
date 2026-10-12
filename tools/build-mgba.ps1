@@ -20,6 +20,11 @@ if (!(Test-Path "$src\.git")) {
 }
 $head = (git -C $src rev-parse HEAD).Trim()
 if ($head -ne $commit) { throw "mGBA checkout is at $head, expected $commit" }
+git -C $src checkout --quiet --force -- . 2>$null
+foreach ($p in (Get-ChildItem (Join-Path $Root "patches\mgba") -Filter *.patch | Sort-Object Name)) {
+    Write-Host "applying $($p.Name)"
+    Invoke-Checked git -C $src apply --whitespace=nowarn $p.FullName
+}
 
 Write-Step "Configuring mGBA for WindowsStore (UWP)"
 $off = "ENABLE_SCRIPTING","ENABLE_GDB_STUB","ENABLE_DEBUGGERS","USE_EDITLINE","USE_FFMPEG","USE_ZLIB",
@@ -30,7 +35,7 @@ $cmakeArgs = @(
     "-S", ($src -replace '\\','/'), "-B", $build,
     "-G", "Visual Studio 17 2022", "-A", "x64",
     "-DCMAKE_SYSTEM_NAME=WindowsStore", "-DCMAKE_SYSTEM_PROCESSOR=AMD64", "-DCMAKE_SYSTEM_VERSION=10.0",
-    "-DBUILD_LIBRETRO=ON", "-DSKIP_LIBRARY=ON", "-DBUILD_SHARED=ON", "-DM_CORE_GBA=ON", "-DM_CORE_GB=OFF",
+    "-DBUILD_LIBRETRO=ON", "-DSKIP_LIBRARY=ON", "-DBUILD_SHARED=ON", "-DM_CORE_GBA=ON", "-DM_CORE_GB=ON",
     "-DDISABLE_DEPS=ON", "-DLIBMGBA_ONLY=OFF",
     "-DCMAKE_PROJECT_INCLUDE=$((Join-Path $Root 'tools\uwp-flags.cmake') -replace '\\','/')"
 )

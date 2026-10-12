@@ -36,10 +36,21 @@
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
-            <Border x:Name="MenuTopBand" Padding="96,32,96,28">
+            <Border x:Name="MenuTopBand" Padding="96,26,96,22">
                 <Grid>
-                    <TextBlock x:Name="MenuTitle" FontSize="34" FontWeight="SemiBold" />
-                    <TextBlock x:Name="MenuClock" FontSize="28" HorizontalAlignment="Right" />
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Border x:Name="MenuCover" Width="92" Height="92" CornerRadius="16" Margin="0,0,26,0"
+                            Visibility="Collapsed" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                        <TextBlock x:Name="MenuTitle" FontSize="36" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="MenuSubtitle" FontSize="20" />
+                    </StackPanel>
+                    <TextBlock x:Name="MenuClock" Grid.Column="2" FontSize="30" VerticalAlignment="Center" />
                 </Grid>
             </Border>
             <Grid Grid.Row="1" Margin="96,24,96,24">

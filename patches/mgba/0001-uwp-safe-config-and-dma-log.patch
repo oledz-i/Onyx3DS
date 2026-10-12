@@ -1,0 +1,53 @@
+diff --git a/src/core/config.c b/src/core/config.c
+index 0388c9f..7c84c94 100644
+--- a/src/core/config.c
++++ b/src/core/config.c
+@@ -12,7 +12,7 @@
+ 
+ #include <sys/stat.h>
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(__LIBRETRO__)
+ #include <windows.h>
+ #include <shlwapi.h>
+ #include <shlobj.h>
+@@ -239,7 +239,10 @@ void mCoreConfigDirectory(char* out, size_t outLength) {
+ 		strlcpy(out, portableDir, outLength);
+ 		return;
+ 	}
+-#ifdef _WIN32
++#if defined(__LIBRETRO__)
++	UNUSED(projectName);
++	strlcpy(out, ".", outLength);
++#elif defined(_WIN32)
+ 	WCHAR wpath[MAX_PATH];
+ 	WCHAR wprojectName[MAX_PATH];
+ 	WCHAR* home;
+@@ -285,7 +288,10 @@ void mCoreConfigDirectory(char* out, size_t outLength) {
+ }
+ 
+ void mCoreConfigPortableIniPath(char* out, size_t outLength) {
+-#ifdef _WIN32
++#if defined(__LIBRETRO__)
++	UNUSED(outLength);
++	out[0] = '\0';
++#elif defined(_WIN32)
+ 	wchar_t wpath[MAX_PATH];
+ 	GetModuleFileNameW(NULL, wpath, MAX_PATH);
+ 	PathRemoveFileSpecW(wpath);
+diff --git a/src/gba/dma.c b/src/gba/dma.c
+index 106bd76..12b6b9e 100644
+--- a/src/gba/dma.c
++++ b/src/gba/dma.c
+@@ -127,11 +127,7 @@ uint16_t GBADMAWriteCNT_HI(struct GBA* gba, int dma, uint16_t control) {
+ 		if (currentDma->nextDest & (width - 1)) {
+ 			mLOG(GBA_DMA, GAME_ERROR, "Misaligned DMA destination address: 0x%08X", currentDma->nextDest);
+ 		}
+-#ifndef __LIBRETRO__
+-		mLOG(GBA_DMA, INFO, "Starting DMA %i 0x%08X -> 0x%08X (%04X:%04X)", dma,
+-#else
+ 		mLOG(GBA_DMA, DEBUG, "Starting DMA %i 0x%08X -> 0x%08X (%04X:%04X)", dma,
+-#endif
+ 		     currentDma->nextSource, currentDma->nextDest,
+ 		     currentDma->reg, currentDma->count & 0xFFFF);
+ 
