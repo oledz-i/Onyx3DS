@@ -1,0 +1,40 @@
+From 1cf88188dd5dbed3fe5e348a55831c17593e6f92 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 19:44:52 -0400
+Subject: [PATCH] vulkan: optional complete shader mode on Dozen (wait for
+ pipelines instead of skipping draws)
+
+---
+ src/citra_libretro/libretro_vk.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/citra_libretro/libretro_vk.cpp b/src/citra_libretro/libretro_vk.cpp
+index 71dace0..36381a4 100644
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -5,6 +5,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
++#include <cstdlib>
+ #include <memory>
+ #include <stdexcept>
+ #include <vector>
+@@ -353,8 +354,12 @@ LibRetroVKInstance::LibRetroVKInstance(Frontend::EmuWindow& window,
+         LOG_INFO(Render_Vulkan, "Dozen: triangle fans go through the software vertex path");
+         // Shader compiles through Dozen (SPIR-V -> DXIL -> driver) take long enough to
+         // stall a frame for hundreds of ms; compile in the background instead.
+-        Settings::values.async_shader_compilation.SetValue(true);
+-        LOG_INFO(Render_Vulkan, "Dozen: asynchronous shader compilation on");
++        // ONYX's "complete graphics" mode builds every pipeline before its draw instead:
++        // a skipped draw leaves a hole that stays in cached render targets (Zelda's logo).
++        const char* complete = std::getenv("ONYX_COMPLETE_SHADERS");
++        const bool wait_for_shaders = complete && complete[0] == '1';
++        Settings::values.async_shader_compilation.SetValue(!wait_for_shaders);
++        LOG_INFO(Render_Vulkan, "Dozen: {} shader compilation", wait_for_shaders ? "complete (waiting)" : "asynchronous");
+     }
+ 
+     // Initialize subsystems
+-- 
+2.43.0
+

@@ -457,6 +457,11 @@ void SettingsPage::BuildEmulation() {
              "game from the game's channel page.");
 
     Add(kit::SectionHeader("Emulation"));
+    Add(kit::SettingRow("Complete graphics", "Waits for new effects to be ready so nothing is missing (short pauses the first time). Takes effect on the next game",
+                        kit::Toggle(Cfg().qol.complete_shaders, [](bool on) {
+                            Cfg().qol.complete_shaders = on;
+                            Save();
+                        })));
     const CoreOptionCatalog catalog = Svc().Catalog();
     for (auto c : CuratedOptions()) {
         // The core also lists OpenGL/auto renderers the Xbox build does not have.

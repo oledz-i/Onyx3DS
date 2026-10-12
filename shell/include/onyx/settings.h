@@ -81,6 +81,10 @@ struct QolSettings {
     // OpenGL (Mesa) skips its API error checks: less CPU per draw. Switched off again
     // by the app if the hardware renderer ever crashes.
     bool gl_fast_mode = true;
+    // Vulkan on the Xbox builds each new shader for 1-3 s. Waiting shows every draw (no missing
+    // pieces) at the price of a short pause the first time an effect appears; off skips the
+    // draw instead and keeps the game moving.
+    bool complete_shaders = true;
     bool show_battery_style_status = true; // controller battery in the top bar
     bool resume_last_game = false;         // jump straight into the last game on launch
     bool quick_launch = false;             // A on a channel starts the game (skip the preview)

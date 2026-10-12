@@ -221,3 +221,4 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Crossbar (XMB-style) home layout: Settings > Interface > "Crossbar home screen". Recent, Favourites and per-system categories; D-pad/triggers/bumpers change category.
 - Smash: its glitches were most likely the refused pipelines (same cause as Tomodachi); the vertex alignment fix applies. Zelda logo spots: no cause found in the logs (format fallbacks to RGBA8 are standard conversion paths); needs a new log/photo.
 - Not started: disk shader cache, presenter drop work, extra frame copy.
+- Zelda leap (untested): the log shows async pipeline builds of 1-3 s on Dozen; every draw skipped meanwhile leaves a hole that stays in cached render targets (logo spots). New setting "Complete graphics" (default on, Settings > Emulation, azahar 0047) waits for each pipeline instead. Costs short pauses the first time an effect appears; turn off to get the old behaviour.

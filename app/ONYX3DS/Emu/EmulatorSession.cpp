@@ -4,6 +4,7 @@
 #include "Platform/SaveBackup.h"
 
 #include <cstdarg>
+#include <cstdlib>
 
 #include "Emu/AzaharBridge.h"
 #include "Emu/KeyboardBridge.h"
@@ -431,6 +432,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
                       options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT", frame_lock_.load());
         }
     }
+    _putenv_s("ONYX_COMPLETE_SHADERS", settings.qol.complete_shaders ? "1" : "0");
     UpdateFolders(settings.folders);
     ff_speed_ = settings.qol.fast_forward_speed;
     fast_forward_ = false;
