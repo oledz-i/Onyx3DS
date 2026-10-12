@@ -917,7 +917,31 @@ void VulkanHost::OnFrameReadback(unsigned width, unsigned height) {
 void VulkanHost::DestroyDevice() {
     if (!device_) return;
     auto& f = *fn_;
-    f.DeviceWaitIdle(device_);
+    // vkDeviceWaitIdle has no timeout. If the GPU never finishes (a submission
+    // still waiting on a semaphore nobody will signal now the game is over),
+    // closing the game would hang for good on "Saving and closing". Wait on a
+    // helper thread; after 8 s leave the device alone (a leak) and carry on.
+    {
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        PFN_vkDeviceWaitIdle wait_idle = f.DeviceWaitIdle;
+        VkDevice dev = device_;
+        std::thread([done, wait_idle, dev] {
+            wait_idle(dev);
+            done->store(true);
+        }).detach();
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!done->load()) {
+            if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(8)) {
+                ONYX_ERROR("Vulkan: vkDeviceWaitIdle did not return in 8 s; leaving the device alone so the game can close");
+                device_ = VK_NULL_HANDLE;
+                queue_ = VK_NULL_HANDLE;
+                have_image_ = false;
+                gpu_sync_ = false;
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
     for (auto& s : imports_) ReleaseSlot(s);
     for (auto& fence : fences_)
         if (fence) f.DestroyFence(device_, fence, nullptr);

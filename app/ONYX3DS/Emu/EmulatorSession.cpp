@@ -807,15 +807,39 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     }
 
     state_ = SessionState::Stopping;
+    // Time every step of closing a game: a close that sticks on "Saving and
+    // closing" shows in the log as the last step that started and never ended.
+    const auto close_start = std::chrono::steady_clock::now();
+    auto step = [&](const char* what) {
+        ONYX_INFO("Closing: %s (%lld ms in)", what,
+                  static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - close_start)
+                                             .count()));
+    };
+    step("running queued commands");
     RunCommands();
-    if (write_auto_on_stop_) DoSaveState(0);
+    if (write_auto_on_stop_) {
+        step("saving the resume state");
+        DoSaveState(0);
+    }
     if (RaActive()) ra_->UnloadGame();
-    if (nes) FlushSram(true);
+    if (nes) {
+        step("flushing the NES save");
+        FlushSram(true);
+    }
+    step("unloading the game");
     core.unload_game();
     sram_active_ = false;
-    if (!software_ && hw_render_.context_destroy) hw_render_.context_destroy();
-    if (vulkan_ && !software_ && !use_gl_) vulkan_->DestroyDevice();
+    if (!software_ && hw_render_.context_destroy) {
+        step("destroying the graphics context");
+        hw_render_.context_destroy();
+    }
+    if (vulkan_ && !software_ && !use_gl_) {
+        step("destroying the Vulkan device");
+        vulkan_->DestroyDevice();
+    }
     if (gl_ && use_gl_) gl_->DestroyContext();
+    step("stopping audio");
     audio_.Stop();
     audio_.SetMuted(false);
     presenter_.SetPaused(false);
