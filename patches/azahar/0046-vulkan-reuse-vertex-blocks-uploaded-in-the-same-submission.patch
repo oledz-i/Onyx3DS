@@ -1,0 +1,186 @@
+From 3687775fb664b9eba984ea0f14081792451efa29 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 18:48:22 -0400
+Subject: [PATCH] vulkan: reuse vertex blocks already uploaded in the same
+ submission
+
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         | 89 ++++++++++++++-----
+ .../renderer_vulkan/vk_rasterizer.h           | 11 +++
+ .../renderer_vulkan/vk_stream_buffer.h        |  4 +
+ 3 files changed, 82 insertions(+), 22 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 8fd3626..a3953f1 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <chrono>
+ #include "common/alignment.h"
++#include "common/hash.h"
+ #include "common/literals.h"
+ #include "common/logging/log.h"
+ #include "common/math_util.h"
+@@ -316,22 +317,19 @@ void RasterizerVulkan::SetupVertexArray() {
+         }
+     }
+ 
+-    auto [array_ptr, array_offset, invalidate] = stream_buffer.Map(reserve_size, 16);
+-
+-    // ONYX: measure how much vertex data is copied per second (stream buffer wraps).
+-    {
+-        static u64 window_bytes = 0, window_draws = 0, window_max = 0;
+-        static auto window_start = std::chrono::steady_clock::now();
+-        window_bytes += reserve_size;
+-        window_draws++;
+-        window_max = std::max<u64>(window_max, reserve_size);
+-        const auto now = std::chrono::steady_clock::now();
+-        if (now - window_start >= std::chrono::seconds(5)) {
+-            LOG_INFO(Render_Vulkan,
+-                     "Vertex uploads: {} MiB in {} draws over 5 s (largest draw {} KiB)",
+-                     window_bytes >> 20, window_draws, window_max >> 10);
+-            window_bytes = window_draws = window_max = 0;
+-            window_start = now;
++    // ONYX: per-draw upload statistics (and cache hits), logged every 5 s.
++    static u64 st_bytes = 0, st_saved = 0, st_draws = 0, st_hits = 0, st_max = 0;
++    static auto st_start = std::chrono::steady_clock::now();
++    st_draws++;
++    const u64 tick_now = scheduler.CurrentTick();
++    const u32 wrap_now = stream_buffer.WrapCount();
++    if (vertex_cache_tick != tick_now || vertex_cache_wrap != wrap_now) {
++        // Entries are only valid inside one submission and before the buffer wraps: the
++        // stream buffer's GPU fences only cover the submission that wrote the data.
++        vertex_cache_tick = tick_now;
++        vertex_cache_wrap = wrap_now;
++        for (auto& e : vertex_cache) {
++            e.size = 0;
+         }
+     }
+ 
+@@ -352,7 +350,6 @@ void RasterizerVulkan::SetupVertexArray() {
+     layout.attribute_count = 16;
+     enable_attributes.fill(false);
+ 
+-    u32 buffer_offset = 0;
+     for (std::size_t loader_index = 0; loader_index < std::size(vertex_attributes.attribute_loaders);
+          loader_index++) {
+         const auto& loader = vertex_attributes.attribute_loaders[loader_index];
+@@ -419,12 +416,46 @@ void RasterizerVulkan::SetupVertexArray() {
+             ++s_logged;
+         }
+ 
+-        u8* dst_ptr = array_ptr + buffer_offset;
+-
+         // Align stride up if required by Vulkan implementation.
+         const u32 loader_stride = repack.repack ? repack.stride : static_cast<u32>(loader.byte_count);
+         const u32 aligned_stride = Common::AlignUp(loader_stride, stride_alignment);
++        const u32 block_size = Common::AlignUp(aligned_stride * vertex_num, 4);
++        u64 key = Common::ComputeHash64(src_ptr, copy_size);
++        key ^= (static_cast<u64>(data_addr) << 32) ^ (static_cast<u64>(vertex_num) << 7) ^
++               (static_cast<u64>(aligned_stride) << 1) ^ (repack.repack ? 0x9E3779B97F4A7C15ull : 0);
+         if (repack.repack) {
++            key = Common::ComputeHash64(&repack, sizeof(repack)) ^ (key * 0x100000001B3ull);
++        }
++        u32 loader_offset = 0;
++        bool cached = false;
++        for (auto& e : vertex_cache) {
++            if (e.size == block_size && e.key == key) {
++                loader_offset = e.offset;
++                cached = true;
++                break;
++            }
++        }
++        st_bytes += block_size;
++        st_max = std::max<u64>(st_max, block_size);
++        u8* dst_ptr = nullptr;
++        if (cached) {
++            st_hits++;
++            st_saved += block_size;
++        } else {
++            auto [map_ptr, map_offset, wrapped] = stream_buffer.Map(block_size, 16);
++            dst_ptr = map_ptr;
++            loader_offset = map_offset;
++            if (wrapped) {
++                // The buffer restarted: anything cached earlier may now be overwritten.
++                vertex_cache_wrap = stream_buffer.WrapCount();
++                for (auto& e : vertex_cache) {
++                    e.size = 0;
++                }
++            }
++        }
++        if (cached) {
++            // Nothing to copy.
++        } else if (repack.repack) {
+             // Copy each attribute to its aligned place, vertex by vertex.
+             std::memset(dst_ptr, 0, static_cast<std::size_t>(aligned_stride) * vertex_num);
+             const std::size_t whole = loader.byte_count ? copy_size / loader.byte_count : 0;
+@@ -461,11 +492,25 @@ void RasterizerVulkan::SetupVertexArray() {
+         binding.byte_count.Assign(loader_stride);
+ 
+         // Keep track of the binding offsets so we can bind the vertex buffer later
+-        binding_offsets[layout.binding_count++] = static_cast<u32>(array_offset + buffer_offset);
+-        buffer_offset += Common::AlignUp(aligned_stride * vertex_num, 4);
++        binding_offsets[layout.binding_count++] = loader_offset;
++        if (!cached) {
++            stream_buffer.Commit(block_size);
++            auto& slot = vertex_cache[vertex_cache_next++ % vertex_cache.size()];
++            slot = {key, loader_offset, block_size};
++        }
+     }
+ 
+-    stream_buffer.Commit(buffer_offset);
++    {
++        const auto now = std::chrono::steady_clock::now();
++        if (now - st_start >= std::chrono::seconds(5)) {
++            LOG_INFO(Render_Vulkan,
++                     "Vertex data: {} MiB wanted, {} MiB reused from this frame's uploads, {} "
++                     "draws, {} loader hits, largest block {} KiB",
++                     st_bytes >> 20, st_saved >> 20, st_draws, st_hits, st_max >> 10);
++            st_bytes = st_saved = st_draws = st_hits = st_max = 0;
++            st_start = now;
++        }
++    }
+ 
+     // Assign the rest of the attributes to the last binding
+     SetupFixedAttribs();
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index 0fe71d8..2c80bf7 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -124,6 +124,17 @@ private:
+ 
+     VertexLayout software_layout;
+     std::array<u32, 16> binding_offsets{};
++
++    /// Vertex blocks already uploaded in the current submission (see SetupVertexArray).
++    struct VertexCacheEntry {
++        u64 key{};
++        u32 offset{};
++        u32 size{};
++    };
++    std::array<VertexCacheEntry, 32> vertex_cache{};
++    u32 vertex_cache_next{};
++    u64 vertex_cache_tick{};
++    u32 vertex_cache_wrap{};
+     std::array<bool, 16> enable_attributes{};
+     std::array<vk::Buffer, 16> vertex_buffers;
+     VertexArrayInfo vertex_info;
+diff --git a/src/video_core/renderer_vulkan/vk_stream_buffer.h b/src/video_core/renderer_vulkan/vk_stream_buffer.h
+index 4480524..fd93f69 100644
+--- a/src/video_core/renderer_vulkan/vk_stream_buffer.h
++++ b/src/video_core/renderer_vulkan/vk_stream_buffer.h
+@@ -41,6 +41,10 @@ public:
+     /// Ensures that "size" bytes of memory are available to the GPU, potentially recording a copy.
+     void Commit(u32 size);
+ 
++    u32 WrapCount() const noexcept {
++        return wrap_count;
++    }
++
+     vk::Buffer Handle() const noexcept {
+         return buffer;
+     }
+-- 
+2.43.0
+
