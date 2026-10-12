@@ -145,6 +145,7 @@
     <ClInclude Include="Platform\SaveBackup.h" />
     <ClInclude Include="Ui\AppServices.h" />
     <ClInclude Include="Ui\UiKit.h" />
+    <ClInclude Include="Ui\SystemList.h" />
     <ClInclude Include="Ui\OnScreenKeyboard.h" />
   </ItemGroup>
   <ItemGroup>
@@ -263,6 +264,10 @@
     </None>
     <!-- NES core (FCEUmm, vendor\fceumm), optional: build-app.ps1 copies it here when CI built it. -->
     <None Include="fceumm_libretro.dll" Condition="Exists('fceumm_libretro.dll')">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
+    <!-- GBA core (mGBA, vendor\mgba), optional: build-app.ps1 copies it here when CI built it. -->
+    <None Include="mgba_libretro.dll" Condition="Exists('mgba_libretro.dll')">
       <DeploymentContent>true</DeploymentContent>
     </None>
   </ItemGroup>

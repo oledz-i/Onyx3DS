@@ -26,6 +26,8 @@ enum class FolderKind {
     Themes,        // extra theme packs (folders with theme.json)
     NesRoms,       // NES games: .nes .unf (separate library from the 3DS games)
     NesPatches,    // NES ROM patches: .ips .bps .ups (widescreen hacks, translations)
+    GbaRoms,       // GBA games: .gba .agb (separate library)
+    GbaPatches,    // GBA ROM patches: .ips .bps .ups (ROM hacks, translations)
     Count
 };
 
@@ -46,6 +48,8 @@ struct FolderConfig {
     std::string themes;
     std::string nes_roms;
     std::string nes_patches;
+    std::string gba_roms;
+    std::string gba_patches;
 
     // Single-folder accessors; Roms returns the first entry.
     const std::string& Get(FolderKind kind) const;

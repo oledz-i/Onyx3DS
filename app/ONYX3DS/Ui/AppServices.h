@@ -40,11 +40,16 @@ public:
     GameLibrary& Library() { return *library_; }
     // NES games: a second library with its own cache folder and ROM folder.
     GameLibrary& NesLibrary() { return *nes_library_; }
-    GameLibrary& LibraryFor(GameSystem system) { return system == GameSystem::Nes ? *nes_library_ : *library_; }
-    // Looks a game up by path in both libraries (the path says which system it is).
+    // GBA games (and ROM hacks): a third library, same shape.
+    GameLibrary& GbaLibrary() { return *gba_library_; }
+    GameLibrary& LibraryFor(GameSystem system) {
+        return system == GameSystem::Nes ? *nes_library_ : system == GameSystem::Gba ? *gba_library_ : *library_;
+    }
+    // Looks a game up by path in all libraries (the path says which system it is).
     std::optional<GameEntry> FindGame(const std::string& path) {
         if (auto g = library_->Find(path)) return g;
-        return nes_library_->Find(path);
+        if (auto g = nes_library_->Find(path)) return g;
+        return gba_library_->Find(path);
     }
     // Which system tab the home screen shows (kept for the app's lifetime).
     GameSystem HomeSystem() const { return home_system_; }
@@ -131,6 +136,7 @@ private:
     ConsoleModel model_ = ConsoleModel::Unknown;
     std::unique_ptr<GameLibrary> library_;
     std::unique_ptr<GameLibrary> nes_library_;
+    std::unique_ptr<GameLibrary> gba_library_;
     GameSystem home_system_ = GameSystem::N3DS;
     std::unique_ptr<CheatDatabase> cheat_db_;
     std::unique_ptr<Achievements> ra_;

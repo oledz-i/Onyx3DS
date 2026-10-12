@@ -78,6 +78,7 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
         game_.path = path;
         game_.title = CleanFileTitle(FileName(path));
         if (IsNesRomExtension(Extension(path))) game_.system = GameSystem::Nes;
+        else if (IsGbaRomExtension(Extension(path))) game_.system = GameSystem::Gba;
     }
     show_fps_ = Svc().Config().qol.show_fps;
     started_ = quitting_ = menu_open_ = false;
@@ -97,7 +98,7 @@ void EmulationPage::OnNavigatedTo(NavigationEventArgs const& e) {
     });
 
     LoadingTitle().Text(kit::H(game_.DisplayTitle()));
-    if (game_.system == GameSystem::Nes)
+    if (IsRetroSystem(game_.system))
         LoadingHint().Text(L"Hold View + press Menu any time for the ONYX menu.");
     else
         LoadingHint().Text(L"First launch of a game builds its shader cache, so it can take a little longer. "
@@ -331,6 +332,9 @@ void EmulationPage::OnStopped(const std::string& reason) {
         crashed ? reason
         : game_.system == GameSystem::Nes
             ? reason + "\n\nCheck that the file is a working .nes or .unf game."
+        : game_.system == GameSystem::Gba
+            ? reason + "\n\nCheck that the file is a working .gba game. If it is a ROM hack, try it "
+                       "without its patch (Game settings > ROM patch)."
             : reason + "\n\nCommon fixes: use a decrypted dump, put aes_keys.txt / "
                        "seeddb.bin in your System folder, and check Settings > System check.")));
     d.CloseButtonText(L"Back to menu");
@@ -499,7 +503,7 @@ void EmulationPage::BuildMenu() {
     MenuHint().Text(kit::H("State slot " + std::to_string(Emu().CurrentSlot()) +
                            "    ·    In game: View + D-pad Up/Down save/load, View + RB fast forward, "
                            "View + Y screenshot" +
-                           std::string(game_.system == GameSystem::Nes ? "" : ", View + LB layout")));
+                           std::string(IsRetroSystem(game_.system) ? "" : ", View + LB layout")));
     MenuOverlay().Background(SolidColorBrush({0x99, 0, 0, 0}));
 
     auto host = MenuButtons();
@@ -633,7 +637,7 @@ void EmulationPage::ShowMenuQuickSettings() {
     auto panel = MenuSide();
     panel.Children().Clear();
     panel.Children().Append(kit::SectionHeader("Quick settings"));
-    panel.Children().Append(kit::Text(game_.system == GameSystem::Nes
+    panel.Children().Append(kit::Text(IsRetroSystem(game_.system)
                                           ? "Changes apply now, for this session."
                                           : "Changes apply now, for this session. Use Game settings on the "
                                             "channel page to keep them.", 18));
@@ -691,6 +695,39 @@ void EmulationPage::ShowMenuQuickSettings() {
             })));
         pick("fceumm_ntsc_filter", "NTSC filter");
         pick("fceumm_turbo_enable", "Turbo buttons");
+    } else if (game_.system == GameSystem::Gba) {
+        // Picture choices are kept in Settings (all GBA games); they apply right away.
+        auto remember = [](const std::function<void(GbaSettings&)>& change) {
+            change(Svc().Config().gba);
+            Svc().SaveSettings();
+        };
+        auto row = [&](const char* label, const char* help,
+                       const std::vector<std::pair<std::string, std::string>>& values, const std::string& current,
+                       std::function<void(const std::string&)> changed) {
+            panel.Children().Append(kit::SettingRow(label, help, kit::Choice(values, current, std::move(changed))));
+        };
+        const GbaSettings gba = Svc().Config().gba;
+        row("Colours", "The real GBA screen was dim and washed out; this matches it", GbaColorChoices(), gba.colors,
+            [remember](const std::string& v) {
+                remember([&](GbaSettings& g) { g.colors = v; });
+                Emu().ApplyCoreOptions(GbaCoreOptions(Svc().Config().gba));
+            });
+        row("Picture shape", "", GbaAspectChoices(), DisplayAspectName(gba.aspect), [remember](const std::string& v) {
+            const DisplayAspect a = DisplayAspectFromName(v);
+            remember([&](GbaSettings& g) { g.aspect = a; });
+            Emu().Presenter().SetAspect(a);
+        });
+        row("Ghosting blend", "Some games flicker two pictures to fake see-through; this keeps that look",
+            GbaBlendingChoices(), gba.blending, [remember](const std::string& v) {
+                remember([&](GbaSettings& g) { g.blending = v; });
+                Emu().ApplyCoreOptions(GbaCoreOptions(Svc().Config().gba));
+            });
+        panel.Children().Append(kit::SettingRow(
+            "Softer sound", "A low-pass filter that takes the edge off harsh GBA sound",
+            kit::Toggle(gba.audio_filter, [remember](bool on) {
+                remember([&](GbaSettings& g) { g.audio_filter = on; });
+                Emu().ApplyCoreOptions(GbaCoreOptions(Svc().Config().gba));
+            })));
     } else {
         pick(keys::kResolution, "Internal resolution");
         pick(keys::kFrameSkip, "Frame skip");
@@ -699,24 +736,29 @@ void EmulationPage::ShowMenuQuickSettings() {
         pick(keys::kTextureFilter, "Texture filter");
         pick(keys::kCpuClock, "CPU clock");
     }
-    const bool nes_game = game_.system == GameSystem::Nes;
-    const ScreenFilter current_filter =
-        nes_game ? Svc().Config().nes.filter : Svc().Config().qol.screen_filter;
+    const GameSystem filter_system = game_.system;
+    auto filter_ref = [filter_system]() -> ScreenFilter& {
+        return filter_system == GameSystem::Nes   ? Svc().Config().nes.filter
+               : filter_system == GameSystem::Gba ? Svc().Config().gba.filter
+                                                  : Svc().Config().qol.screen_filter;
+    };
+    const ScreenFilter current_filter = filter_ref();
     auto filter = kit::Choice({{"sharp", "Sharp pixels"}, {"smooth", "Smooth"}, {"crt", "CRT"}},
                               current_filter == ScreenFilter::Sharp ? "sharp"
                               : current_filter == ScreenFilter::Crt ? "crt"
                                                                     : "smooth",
-                              [nes_game](const std::string& v) {
+                              [filter_ref](const std::string& v) {
                                   auto f = v == "sharp" ? ScreenFilter::Sharp
                                            : v == "crt" ? ScreenFilter::Crt
                                                         : ScreenFilter::Smooth;
-                                  (nes_game ? Svc().Config().nes.filter : Svc().Config().qol.screen_filter) = f;
+                                  filter_ref() = f;
                                   Svc().SaveSettings();
                                   Emu().Presenter().SetFilter(f);
                               });
     panel.Children().Append(kit::SettingRow("Upscaling look",
-                                            game_.system == GameSystem::Nes ? "How the NES image is scaled to your TV"
-                                                                            : "How the 3DS image is scaled to your TV",
+                                            game_.system == GameSystem::Nes   ? "How the NES image is scaled to your TV"
+                                            : game_.system == GameSystem::Gba ? "How the GBA image is scaled to your TV"
+                                                                              : "How the 3DS image is scaled to your TV",
                                             filter));
     MenuSideScroll().Visibility(Visibility::Visible);
 }

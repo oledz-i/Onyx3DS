@@ -38,7 +38,8 @@ add_library(onyx_shell STATIC
     src/pixel.cpp
     src/text_input.cpp
     src/patch.cpp
-    src/nes_support.cpp)
+    src/nes_support.cpp
+    src/gba_support.cpp)
 target_include_directories(onyx_shell PUBLIC include ${ONYX_THIRD_PARTY})
 target_link_libraries(onyx_shell PUBLIC rcheevos)
 if(MSVC)
@@ -60,7 +61,8 @@ if(ONYX_SHELL_TESTS)
         tests/test_pixel.cpp
         tests/test_text_input.cpp
         tests/test_patch.cpp
-        tests/test_nes.cpp)
+        tests/test_nes.cpp
+        tests/test_gba.cpp)
     target_link_libraries(onyx_shell_tests PRIVATE onyx_shell)
     add_test(NAME onyx_shell_tests COMMAND onyx_shell_tests)
 endif()

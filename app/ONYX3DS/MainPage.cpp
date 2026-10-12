@@ -8,6 +8,7 @@
 #include "Platform/Imaging.h"
 #include "Platform/Log.h"
 #include "Ui/AppServices.h"
+#include "Ui/SystemList.h"
 #include "Ui/UiKit.h"
 
 using namespace winrt;
@@ -73,7 +74,7 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
 
     if (!initialised_) {
         initialised_ = true;
-        if (!EmulatorSession::NesCoreAvailable()) Svc().SetHomeSystem(GameSystem::N3DS);
+        if (!EmulatorSession::CoreAvailable(Svc().HomeSystem())) Svc().SetHomeSystem(GameSystem::N3DS);
         games_ = Svc().LibraryFor(Svc().HomeSystem()).GridView(Svc().Config().qol);
         Rebuild(false);
         // Always rescan on launch so new files on the USB drive show up.
@@ -138,7 +139,11 @@ void MainPage::ApplyTheme() {
     std::vector<std::pair<std::string, std::string>> hints = {
         {"A", "Open"}, {"Y", "Favourite"}, {"X", "Details"},
         {"LB/RB", "Pages"}, {"Menu", "Tools"}, {"View", "Settings"}};
-    if (EmulatorSession::NesCoreAvailable()) hints.insert(hints.begin() + 4, std::make_pair(std::string("LT/RT"), std::string("3DS / NES")));
+    if (AvailableSystems().size() > 1) {
+        std::string names;
+        for (const GameSystem sys : AvailableSystems()) names += (names.empty() ? "" : " / ") + std::string(SystemLabel(sys));
+        hints.insert(hints.begin() + 4, std::make_pair(std::string("LT/RT"), names));
+    }
     HintHost().Child(kit::HintBar(hints, t.colors.bar_text));
     MarkHost().Child(kit::OnyxMark(56));
     for (auto tb : {GreetingText(), InfoText()}) tb.FontFamily(font);
@@ -220,7 +225,7 @@ void MainPage::MoveParallax(float nx, float ny) {
 void MainPage::Rebuild(bool keep_focus) {
     if (!keep_focus) focused_path_.clear();
     if (theme_applied_ != Svc().CurrentTheme().id) ApplyTheme();
-    if (!EmulatorSession::NesCoreAvailable()) Svc().SetHomeSystem(GameSystem::N3DS);
+    if (!EmulatorSession::CoreAvailable(Svc().HomeSystem())) Svc().SetHomeSystem(GameSystem::N3DS);
     games_ = Svc().LibraryFor(Svc().HomeSystem()).GridView(Svc().Config().qol);
     UpdateSystemTabs();
     columns_ = std::clamp(Svc().Config().qol.grid_columns, 3, 6);
@@ -237,7 +242,7 @@ void MainPage::Rebuild(bool keep_focus) {
 }
 
 // ---------------------------------------------------------------------------
-// 3DS | NES tabs
+// 3DS | NES | GBA tabs
 
 UIElement MainPage::MakeSystemTabs() {
     StackPanel tabs;
@@ -245,9 +250,8 @@ UIElement MainPage::MakeSystemTabs() {
     tabs.Spacing(10);
     const GameSystem current = Svc().HomeSystem();
     auto weak = get_weak();
-    const GameSystem systems[] = {GameSystem::N3DS, GameSystem::Nes};
-    for (const GameSystem system : systems) {
-        auto chip = kit::Chip(system == GameSystem::Nes ? "NES" : "3DS", nullptr, system == current);
+    for (const GameSystem system : AvailableSystems()) {
+        auto chip = kit::Chip(SystemLabel(system), nullptr, system == current);
         chip.Tapped([weak, system](auto&&, auto&&) {
             if (auto self = weak.get()) self->SwitchSystem(system);
         });
@@ -257,14 +261,14 @@ UIElement MainPage::MakeSystemTabs() {
 }
 
 void MainPage::UpdateSystemTabs() {
-    const bool show = EmulatorSession::NesCoreAvailable();
+    const bool show = AvailableSystems().size() > 1;
     SystemTabsHost().Visibility(show ? Visibility::Visible : Visibility::Collapsed);
     if (show) SystemTabsHost().Child(MakeSystemTabs());
 }
 
 void MainPage::SwitchSystem(GameSystem system) {
     if (system == Svc().HomeSystem()) return;
-    if (system == GameSystem::Nes && !EmulatorSession::NesCoreAvailable()) return;
+    if (!EmulatorSession::CoreAvailable(system)) return;
     Svc().SetHomeSystem(system);
     Svc().PlaySfx("move");
     page_ = 0;
@@ -519,8 +523,8 @@ void MainPage::ChangePage(int delta) {
 // Empty state, bar buttons, clock
 
 void MainPage::ShowEmptyState() {
-    if (Svc().HomeSystem() == GameSystem::Nes) {
-        ShowNesEmptyState();
+    if (Svc().HomeSystem() != GameSystem::N3DS) {
+        ShowRetroEmptyState();
         return;
     }
     auto host = EmptyState();
@@ -529,8 +533,8 @@ void MainPage::ShowEmptyState() {
     const auto drives = RemovableDriveRoots();
     StackPanel body;
     body.Spacing(18);
-    // The grid (and its tabs) is hidden while empty: keep the way over to the NES list.
-    if (EmulatorSession::NesCoreAvailable()) body.Children().Append(MakeSystemTabs());
+    // The grid (and its tabs) is hidden while empty: keep the way over to the other lists.
+    if (AvailableSystems().size() > 1) body.Children().Append(MakeSystemTabs());
     body.Children().Append(kit::Text(Svc().Scanning() ? "Looking for games..." : "No games yet", 44, true));
     body.Children().Append(kit::Text(
         drives.empty()
@@ -570,41 +574,44 @@ void MainPage::ShowEmptyState() {
     if (auto first = buttons.Children().GetAt(0).try_as<Control>()) first.Focus(FocusState::Programmatic);
 }
 
-void MainPage::ShowNesEmptyState() {
+void MainPage::ShowRetroEmptyState() {
     auto host = EmptyState();
     host.Children().Clear();
     host.Visibility(Visibility::Visible);
     const auto drives = RemovableDriveRoots();
+    const bool gba = Svc().HomeSystem() == GameSystem::Gba;
+    const std::string label = gba ? "GBA" : "NES";
     StackPanel body;
     body.Spacing(18);
     body.Children().Append(MakeSystemTabs());
-    body.Children().Append(kit::Text(Svc().Scanning() ? "Looking for games..." : "No NES games yet", 44, true));
-    const std::string folder = Svc().Config().folders.nes_roms;
+    body.Children().Append(kit::Text(Svc().Scanning() ? "Looking for games..." : "No " + label + " games yet", 44, true));
+    const std::string folder = gba ? Svc().Config().folders.gba_roms : Svc().Config().folders.nes_roms;
     body.Children().Append(kit::Text(
         folder.empty()
-            ? "Choose the folder with your NES games (.nes, .unf). \"Set up USB drive\" creates a "
-              "Roms/NES folder inside ONYX3DS on the drive."
-            : "No .nes or .unf files found in " + folder + ". Copy your games there and rescan.",
+            ? "Choose the folder with your " + label + " games (" + (gba ? ".gba, .agb; ROM hacks too" : ".nes, .unf") +
+                  "). \"Set up USB drive\" creates a Roms/" + label + " folder inside ONYX3DS on the drive."
+            : std::string(gba ? "No .gba or .agb files found in " : "No .nes or .unf files found in ") + folder +
+                  ". Copy your games there and rescan.",
         24));
     StackPanel buttons;
     buttons.Orientation(Orientation::Horizontal);
     buttons.Spacing(16);
     if (!drives.empty() && folder.empty()) {
-        buttons.Children().Append(kit::ActionButton("Set up USB drive", kit::glyph::Usb, [this, drives] {
+        buttons.Children().Append(kit::ActionButton("Set up USB drive", kit::glyph::Usb, [this, drives, label] {
             auto& cfg = Svc().Config();
             cfg.folders.ApplyDriveLayout(drives.front());
             for (const auto& sub : FolderConfig::DriveLayoutSubfolders())
                 Svc().Fs().CreateDirs(JoinPath(JoinPath(drives.front(), "ONYX3DS"), sub));
             Svc().SaveSettings();
-            Svc().Toast("Created " + drives.front() + "/ONYX3DS/Roms/NES. Copy your NES games into it.");
+            Svc().Toast("Created " + drives.front() + "/ONYX3DS/Roms/" + label + ". Copy your " + label + " games into it.");
             auto weak = get_weak();
             Svc().RescanLibrary([weak](size_t) {
                 if (auto self = weak.get()) self->Rebuild(false);
             });
         }, true));
     }
-    buttons.Children().Append(kit::ActionButton("Choose NES folder", kit::glyph::Folder, [this] {
-        Frame().Navigate(xaml_typename<ONYX3DS::FolderPage>(), box_value(L"nes_roms"));
+    buttons.Children().Append(kit::ActionButton("Choose " + label + " folder", kit::glyph::Folder, [this, gba] {
+        Frame().Navigate(xaml_typename<ONYX3DS::FolderPage>(), box_value(gba ? L"gba_roms" : L"nes_roms"));
     }, buttons.Children().Size() == 0));
     buttons.Children().Append(kit::ActionButton("Rescan", kit::glyph::Refresh, [this] {
         auto weak = get_weak();
@@ -684,9 +691,9 @@ void MainPage::UpdateGreeting() {
     const char* part = st.wHour < 5 ? "Up late" : st.wHour < 12 ? "Good morning"
                        : st.wHour < 18 ? "Good afternoon" : "Good evening";
     const size_t n = games_.size();
-    const bool nes = Svc().HomeSystem() == GameSystem::Nes;
-    const std::string text = std::string(part) + "   ·   " + std::to_string(n) +
-                             (nes ? (n == 1 ? " NES game" : " NES games") : (n == 1 ? " game" : " games"));
+    const GameSystem home = Svc().HomeSystem();
+    const std::string noun = home == GameSystem::N3DS ? std::string() : std::string(" ") + SystemLabel(home);
+    const std::string text = std::string(part) + "   ·   " + std::to_string(n) + noun + (n == 1 ? " game" : " games");
     if (kit::S(GreetingText().Text()) != text) GreetingText().Text(kit::H(text));
 }
 
@@ -854,13 +861,13 @@ void MainPage::HandleKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
             }
     }
     switch (e.Key()) {
-    // LT / RT: switch between the 3DS and NES lists.
+    // LT / RT: step through the 3DS, NES and GBA lists.
     case VirtualKey::GamepadLeftTrigger:
-        SwitchSystem(GameSystem::N3DS);
+        SwitchSystem(NeighbourSystem(Svc().HomeSystem(), -1));
         e.Handled(true);
         break;
     case VirtualKey::GamepadRightTrigger:
-        SwitchSystem(GameSystem::Nes);
+        SwitchSystem(NeighbourSystem(Svc().HomeSystem(), +1));
         e.Handled(true);
         break;
     case VirtualKey::GamepadRightShoulder:

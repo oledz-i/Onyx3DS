@@ -410,7 +410,7 @@ void SettingsPage::BuildFolders() {
                 Save();
                 EmulatorSession::Get().UpdateFolders(Cfg().folders);
                 if (auto s = weak.get()) {
-                    if (kind == FolderKind::NesRoms) s->library_dirty_ = true;
+                    if (kind == FolderKind::NesRoms || kind == FolderKind::GbaRoms) s->library_dirty_ = true;
                     s->Show("folders");
                 }
             }));
@@ -419,6 +419,9 @@ void SettingsPage::BuildFolders() {
                             std::string(FolderKindHelp(kind)) +
                                 (kind == FolderKind::NesRoms && !EmulatorSession::NesCoreAvailable()
                                      ? "\nThe NES core is not part of this build, so NES games stay hidden."
+                                     : "") +
+                                (kind == FolderKind::GbaRoms && !EmulatorSession::GbaCoreAvailable()
+                                     ? "\nThe GBA core is not part of this build, so GBA games stay hidden."
                                      : "") +
                                 "\n" + (current.empty() ? "Not set" : current),
                             buttons));
@@ -594,6 +597,43 @@ void SettingsPage::BuildControls() {
                             })));
     }
 
+    if (EmulatorSession::GbaCoreAvailable()) {
+        // GBA picture and colours: used by every GBA game (also in the in-game quick settings).
+        Add(kit::SectionHeader("GBA picture"));
+        const GbaSettings gba = Cfg().gba;
+        Add(kit::SettingRow("Colours", "The real GBA screen was dim and washed out; this matches it. Applies the next time a game starts.",
+                            kit::Choice(GbaColorChoices(), gba.colors, [](const std::string& v) {
+                                Cfg().gba.colors = v;
+                                Save();
+                            })));
+        Add(kit::SettingRow("Picture shape", "The GBA screen is 3:2",
+                            kit::Choice(GbaAspectChoices(), DisplayAspectName(gba.aspect), [](const std::string& v) {
+                                Cfg().gba.aspect = DisplayAspectFromName(v);
+                                Save();
+                            })));
+        Add(kit::SettingRow("Upscaling look", "How the GBA picture is stretched to your TV",
+                            kit::Choice({{"sharp", "Sharp pixels"}, {"smooth", "Smooth"}, {"crt", "CRT scanlines"}},
+                                        gba.filter == ScreenFilter::Sharp ? "sharp"
+                                        : gba.filter == ScreenFilter::Crt ? "crt"
+                                                                          : "smooth",
+                                        [](const std::string& v) {
+                                            Cfg().gba.filter = v == "sharp" ? ScreenFilter::Sharp
+                                                               : v == "crt" ? ScreenFilter::Crt
+                                                                            : ScreenFilter::Smooth;
+                                            Save();
+                                        })));
+        Add(kit::SettingRow("Ghosting blend", "Some games flicker two pictures to fake see-through; this keeps that look",
+                            kit::Choice(GbaBlendingChoices(), gba.blending, [](const std::string& v) {
+                                Cfg().gba.blending = v;
+                                Save();
+                            })));
+        Add(kit::SettingRow("Softer sound", "A low-pass filter that takes the edge off harsh GBA sound",
+                            kit::Toggle(gba.audio_filter, [](bool on) {
+                                Cfg().gba.audio_filter = on;
+                                Save();
+                            })));
+    }
+
     Add(kit::SectionHeader("Controller"));
     Add(kit::SettingRow("Button layout",
                         "Positional keeps Nintendo's button positions (Xbox B = 3DS A). Labels makes Xbox A = 3DS A.",
@@ -714,6 +754,8 @@ void SettingsPage::BuildInterface() {
         if (g.hidden) hidden.push_back(g);
     for (const auto& g : Svc().NesLibrary().All())
         if (g.hidden) hidden.push_back(g);
+    for (const auto& g : Svc().GbaLibrary().All())
+        if (g.hidden) hidden.push_back(g);
     if (!hidden.empty()) {
         Add(kit::SectionHeader("Hidden games"));
         for (auto g : hidden) {
@@ -797,6 +839,11 @@ void SettingsPage::BuildServices() {
                                     ++n;
                                 }
                             for (const auto& g : Svc().NesLibrary().GridView(Cfg().qol))
+                                if (g.grid_art.empty()) {
+                                    Svc().ScrapeArt(g, false, nullptr);
+                                    ++n;
+                                }
+                            for (const auto& g : Svc().GbaLibrary().GridView(Cfg().qol))
                                 if (g.grid_art.empty()) {
                                     Svc().ScrapeArt(g, false, nullptr);
                                     ++n;

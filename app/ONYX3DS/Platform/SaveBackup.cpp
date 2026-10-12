@@ -16,7 +16,7 @@ std::mutex g_sync; // restore and backup never overlap each other or a game star
 struct Item { const char* rel_local; const char* backup_name; };
 // Relative to LocalState.
 const Item kItems[] = {{"system/Azahar/sdmc", "sdmc"}, {"system/Azahar/nand", "nand"},
-                       {"states", "states"}, {"nes", "nes"}}; // nes: battery saves (.srm)
+                       {"states", "states"}, {"nes", "nes"}, {"gba", "gba"}}; // nes, gba: battery saves (.srm)
 
 std::string Parent(std::string p) {
     for (auto& c : p) if (c == '\\') c = '/';

@@ -19,7 +19,10 @@ namespace onyx {
 
 // Which emulator core plays a game. The 3DS library and the NES library are two
 // separate GameLibrary instances (own cache folder, own scan).
-enum class GameSystem { N3DS, Nes };
+enum class GameSystem { N3DS, Nes, Gba };
+
+// True for the systems that run on a separate DLL core (NES, GBA).
+inline bool IsRetroSystem(GameSystem s) { return s != GameSystem::N3DS; }
 
 struct GameEntry {
     GameSystem system = GameSystem::N3DS;
@@ -52,16 +55,18 @@ struct GameEntry {
     std::string DisplayTitle() const { return user_title.empty() ? title : user_title; }
     std::string TitleIdHex() const { return TitleIdToHex(title_id); }
     // Folder name for per-game data such as save states: the title ID for 3DS
-    // games (unchanged), "nes-<hash of the file name>" for NES games.
+    // games (unchanged), "nes-/gba-<hash of the file name>" for NES / GBA games.
     std::string SaveKey() const;
     bool IsLaunchable() const {
-        return system == GameSystem::Nes || kind == n3ds::TitleKind::Application || kind == n3ds::TitleKind::Demo ||
+        return IsRetroSystem(system) || kind == n3ds::TitleKind::Application || kind == n3ds::TitleKind::Demo ||
                kind == n3ds::TitleKind::System || kind == n3ds::TitleKind::Unknown;
     }
 };
 
 // .nes and .unf (UNIF) files are the NES library's content.
 bool IsNesRomExtension(std::string_view ext);
+// .gba and .agb files are the GBA library's content.
+bool IsGbaRomExtension(std::string_view ext);
 
 // Turns "Mario Kart 7 (USA) (En,Fr,Es) [!].3ds" into "Mario Kart 7".
 std::string CleanFileTitle(std::string_view file_name);
@@ -106,13 +111,14 @@ public:
 private:
     GameEntry Build(const std::string& path, const DirEntry& file);
     GameEntry BuildNes(const std::string& path, const DirEntry& file);
+    GameEntry BuildGba(const std::string& path, const DirEntry& file);
     void Walk(const std::string& dir, int depth, std::vector<std::pair<std::string, DirEntry>>& out,
               const std::atomic<bool>* cancel);
 
     IFileSystem& fs_;
     std::string cache_dir_;
     GameSystem system_;
-    std::string skip_dir_; // lower-case folder the 3DS scan must not enter
+    std::vector<std::string> skip_dirs_; // lower-case folders the 3DS scan must not enter
     mutable std::mutex mutex_;
     std::vector<GameEntry> games_;
 };

@@ -43,6 +43,11 @@ $nes = Join-Path $Root "deps\bin\fceumm_libretro.dll"
 if (Test-Path $nes) { Copy-Item $nes (Join-Path $Root "app\ONYX3DS\fceumm_libretro.dll") -Force }
 else { Write-Warning "fceumm_libretro.dll not found in deps\bin; NES will not be available in this package" }
 
+# Optional GBA core (tools\build-mgba.ps1): without it the app hides GBA.
+$gba = Join-Path $Root "deps\bin\mgba_libretro.dll"
+if (Test-Path $gba) { Copy-Item $gba (Join-Path $Root "app\ONYX3DS\mgba_libretro.dll") -Force }
+else { Write-Warning "mgba_libretro.dll not found in deps\bin; GBA will not be available in this package" }
+
 Write-Step "Building ONYX 3DS ($Configuration|x64)"
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "out") | Out-Null
 Invoke-Checked msbuild $proj /m /restore /p:Configuration=$Configuration /p:Platform=x64 `

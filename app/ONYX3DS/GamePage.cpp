@@ -9,6 +9,7 @@
 #include "Platform/Imaging.h"
 #include "Platform/Log.h"
 #include "Ui/AppServices.h"
+#include "Ui/SystemList.h"
 #include "Ui/UiKit.h"
 
 using namespace winrt;
@@ -83,7 +84,7 @@ void GamePage::Build() {
     auto info = InfoPanel();
     info.Children().Clear();
     const std::string white = "#FFFFFF", soft = "#D8DEE6";
-    const bool nes = game_.system == GameSystem::Nes;
+    const bool nes = IsRetroSystem(game_.system); // NES or GBA: no per-game 3DS settings
 
     if (!game_.logo_art.empty() && Svc().Fs().Exists(game_.logo_art)) {
         Image logo;
@@ -127,7 +128,7 @@ void GamePage::Build() {
     info.Children().Append(kit::Text(meta, 22, false, soft));
     info.Children().Append(kit::Text(FormatLastPlayed(game_.last_played) + "   ·   Play time " +
                                          FormatPlayTime(game_.play_seconds) +
-                                         (nes ? "   ·   NES" : "   ·   Title ID " + game_.TitleIdHex()),
+                                         (nes ? std::string("   ·   ") + SystemLabel(game_.system) : "   ·   Title ID " + game_.TitleIdHex()),
                                      20, false, soft));
     if (!game_.note.empty()) {
         StackPanel warn;
@@ -466,17 +467,18 @@ void GamePage::ShowGameSettings() {
     }
 }
 
-// NES: which ROM patch (widescreen hack, translation...) this game starts with.
+// NES / GBA: which ROM patch (widescreen hack, translation...) this game starts with.
 void GamePage::ShowNesGameSettings() {
     auto panel = SidePanel();
     panel.Children().Clear();
     panel.Children().Append(kit::SectionHeader("ROM patch"));
     auto& cfg = Svc().Config();
-    const auto found = FindPatches(Svc().Fs(), game_.path, cfg.folders.nes_patches);
+    const bool gba = game_.system == GameSystem::Gba;
+    const auto found = FindPatches(Svc().Fs(), game_.path, gba ? cfg.folders.gba_patches : cfg.folders.nes_patches);
     if (found.empty()) {
         panel.Children().Append(kit::Text(
-            "No patches found. Put .ips, .bps or .ups files next to the game, named like the game, or in the "
-            "NES patches folder (Settings > Folders). The original game file is never changed.",
+            std::string("No patches found. Put .ips, .bps or .ups files next to the game, named like the game, or in the ") +
+                (gba ? "GBA" : "NES") + " patches folder (Settings > Folders). The original game file is never changed.",
             20, false, "#D8DEE6"));
     } else {
         panel.Children().Append(kit::Text(

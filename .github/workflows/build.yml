@@ -127,6 +127,39 @@ jobs:
           if-no-files-found: ignore
           path: deps/bin/fceumm_libretro.dll
 
+  # Optional GBA core. The step is allowed to fail: the job still succeeds, no
+  # artifact is uploaded, the package is built without mgba_libretro.dll and
+  # the app hides GBA. A failure shows up as a warning annotation.
+  mgba:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: deps/mgba
+          key: mgba-${{ hashFiles('vendor/mgba/BASE_COMMIT') }}-restore
+          restore-keys: mgba-${{ hashFiles('vendor/mgba/BASE_COMMIT') }}-
+      - name: Build mGBA (GBA core, UWP)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/build-mgba.ps1" 2>&1 | tee build.log
+      - if: always()
+        run: |
+          if [ -f deps/bin/mgba_libretro.dll ]; then echo "GBA core built"; else tools/ci-report.sh build.log "GBA core (optional)" warning; fi
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: deps/mgba
+          key: mgba-${{ hashFiles('vendor/mgba/BASE_COMMIT') }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mgba-bin
+          retention-days: 3
+          if-no-files-found: ignore
+          path: deps/bin/mgba_libretro.dll
+
   # Compiles the app and shell right away (linking needs the other jobs'
   # libraries, so link errors here are expected until the package job).
   app:
@@ -154,7 +187,7 @@ jobs:
             deps/lib/rcheevos.lib
 
   package:
-    needs: [azahar, dozen, app, fceumm]
+    needs: [azahar, dozen, app, fceumm, mgba]
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -167,6 +200,7 @@ jobs:
           cp artifacts/azahar-lib/*.lib artifacts/shell-libs/*.lib deps/lib/
           cp artifacts/dozen-bin/*.dll deps/bin/
           cp artifacts/fceumm-bin/*.dll deps/bin/ || echo "NES core not built; the package ships without NES"
+          cp artifacts/mgba-bin/*.dll deps/bin/ || echo "GBA core not built; the package ships without GBA"
       - name: Build and sign the Xbox package
         run: |
           set -o pipefail

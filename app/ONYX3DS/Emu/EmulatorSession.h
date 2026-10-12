@@ -17,6 +17,7 @@
 #include "onyx/cheats.h"
 #include "onyx/core_options.h"
 #include "onyx/library.h"
+#include "onyx/gba_support.h"
 #include "onyx/nes_support.h"
 #include "onyx/patch.h"
 #include "onyx/paths.h"
@@ -28,7 +29,7 @@ namespace onyx::app {
 struct GuardedCrash;
 
 // The libretro entry points of one core. The Azahar core is linked statically
-// (filled from the retro_* symbols); the NES core is a DLL (filled with
+// (filled from the retro_* symbols); the NES and GBA cores are DLLs (filled with
 // GetProcAddress). Everything that calls into a core goes through one of these.
 struct CoreApi {
     void (RETRO_CALLCONV* init)() = nullptr;
@@ -78,8 +79,11 @@ public:
     // The last game stopped because the hardware (Vulkan) renderer crashed.
     bool CrashedInGpu() const { return crashed_in_gpu_.load(); }
     bool UsingSoftwareRenderer() const { return software_.load(); }
-    // fceumm_libretro.dll is in the package (CI builds it separately and may skip it).
+    // fceumm_libretro.dll / mgba_libretro.dll are in the package (CI builds them separately and
+    // may skip them).
     static bool NesCoreAvailable();
+    static bool GbaCoreAvailable();
+    static bool CoreAvailable(GameSystem system);
     GameSystem System() const { return system_; }
     // Frames arrive as CPU pixels (software renderer, or hardware frames read back).
     bool UsingCpuFrames() const;
@@ -148,13 +152,13 @@ private:
     EmulatorSession();
     void EmulationThread(std::string rom_path);
     void EmulationThreadBody(const std::string& rom_path);
-    bool EnsureNesCore(std::string& error);
+    bool EnsureRetroCore(GameSystem system, std::string& error);
     bool RaActive() const { return ra_ && system_ == GameSystem::N3DS; }
     void LoadSram();
     // Writes the battery save if it changed. `wait` = finish the write before returning;
     // otherwise a worker thread does it (a USB drive can take far longer than a frame).
     void FlushSram(bool wait);
-    void ApplyNesPatch(IFileSystem& fs, const std::string& rom_path);
+    void ApplyRomPatch(IFileSystem& fs, const std::string& rom_path);
     std::string SramPath() const;
     void OnCoreCrashed(const GuardedCrash& crash);
     // If the D3D12 device was removed, logs why (and DRED data when available).
@@ -179,9 +183,10 @@ private:
     Achievements* ra_ = nullptr;
     VulkanProbe probe_{};
     bool ready_ = false;
-    // Core in use: Azahar (static) for 3DS games, FCEUmm (DLL) for NES games.
+    // Core in use: Azahar (static) for 3DS games, FCEUmm (DLL) for NES, mGBA (DLL) for GBA.
     CoreApi azahar_api_;
     CoreApi nes_api_;
+    CoreApi gba_api_;
     CoreApi* api_ = &azahar_api_;
     GameSystem system_ = GameSystem::N3DS;
     double core_fps_ = 60.0;                        // pacing; the NES runs at ~60.1
@@ -195,8 +200,8 @@ private:
     std::thread sram_thread_;                       // background battery save write
     std::atomic<bool> sram_busy_{false};            // that write is still running
     std::atomic<bool> sram_failed_{false};          // the last background write failed: retry
-    std::string nes_patches_dir_;                   // Settings folders.nes_patches
-    std::string nes_patch_choice_;                  // Settings nes_patch for this game
+    std::string rom_patches_dir_;                   // Settings folders.nes_patches / gba_patches
+    std::string rom_patch_choice_;                  // Settings nes_patch for this game
     size_t option_value_next_ = 0;                  // ring position in option_value_storage_
     // Set when the core crashed. Its state is undefined afterwards, so it is
     // never called again in this process; the user restarts the app.

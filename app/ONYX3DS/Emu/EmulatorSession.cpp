@@ -145,24 +145,53 @@ EmulatorSession::EmulatorSession() {
     azahar_api_ = StaticAzaharApi();
 }
 
+namespace {
+const wchar_t* RetroDll(GameSystem system) {
+    return system == GameSystem::Gba ? L"mgba_libretro.dll" : L"fceumm_libretro.dll";
+}
+const char* RetroDllName(GameSystem system) {
+    return system == GameSystem::Gba ? "mgba_libretro.dll" : "fceumm_libretro.dll";
+}
+const char* RetroLabel(GameSystem system) {
+    return system == GameSystem::Gba ? "GBA" : "NES";
+}
+bool DllInPackage(const char* name) {
+    UwpFileSystem fs;
+    return fs.Exists(JoinPath(Paths().install, name));
+}
+} // namespace
+
 bool EmulatorSession::NesCoreAvailable() {
-    static const bool available = [] {
-        UwpFileSystem fs;
-        return fs.Exists(JoinPath(Paths().install, "fceumm_libretro.dll"));
-    }();
+    static const bool available = DllInPackage("fceumm_libretro.dll");
     return available;
 }
 
-// Loads fceumm_libretro.dll and fills nes_api_ (emulation thread, under the crash
-// guard). A missing or broken DLL only costs the NES: the 3DS core is untouched.
-bool EmulatorSession::EnsureNesCore(std::string& error) {
-    if (nes_api_.Complete()) return true;
-    static HMODULE module = nullptr;
+bool EmulatorSession::GbaCoreAvailable() {
+    static const bool available = DllInPackage("mgba_libretro.dll");
+    return available;
+}
+
+bool EmulatorSession::CoreAvailable(GameSystem system) {
+    switch (system) {
+    case GameSystem::Nes: return NesCoreAvailable();
+    case GameSystem::Gba: return GbaCoreAvailable();
+    default: return true;
+    }
+}
+
+// Loads the NES or GBA core DLL and fills its CoreApi (emulation thread, under the crash
+// guard). A missing or broken DLL only costs that system: the 3DS core is untouched.
+bool EmulatorSession::EnsureRetroCore(GameSystem system, std::string& error) {
+    CoreApi& target = system == GameSystem::Gba ? gba_api_ : nes_api_;
+    if (target.Complete()) return true;
+    static HMODULE modules[2] = {nullptr, nullptr};
+    HMODULE& module = modules[system == GameSystem::Gba ? 1 : 0];
     if (!module) {
-        module = LoadPackagedLibrary(L"fceumm_libretro.dll", 0);
+        module = LoadPackagedLibrary(RetroDll(system), 0);
         if (!module) {
-            error = "The NES core (fceumm_libretro.dll) could not be loaded (error " +
-                    std::to_string(GetLastError()) + "). This build may not include NES support.";
+            error = std::string("The ") + RetroLabel(system) + " core (" + RetroDllName(system) +
+                    ") could not be loaded (error " + std::to_string(GetLastError()) +
+                    "). This build may not include " + RetroLabel(system) + " support.";
             return false;
         }
     }
@@ -192,12 +221,12 @@ bool EmulatorSession::EnsureNesCore(std::string& error) {
     load(a.get_memory_data, "retro_get_memory_data");
     load(a.get_memory_size, "retro_get_memory_size");
     if (!missing.empty()) {
-        error = "The NES core is incomplete (missing " + missing + ")";
+        error = std::string("The ") + RetroLabel(system) + " core is incomplete (missing " + missing + ")";
         return false;
     }
-    a.initialised = nes_api_.initialised;
-    nes_api_ = a;
-    ONYX_INFO("NES core loaded (fceumm_libretro.dll)");
+    a.initialised = target.initialised;
+    target = a;
+    ONYX_INFO("%s core loaded (%s)", RetroLabel(system), RetroDllName(system));
     return true;
 }
 
@@ -329,9 +358,10 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         error = "The emulator stopped after an error earlier. Restart ONYX 3DS to play again.";
         return false;
     }
-    const bool nes = game.system == GameSystem::Nes;
-    if (nes && !NesCoreAvailable()) {
-        error = "NES support is not included in this build (fceumm_libretro.dll is missing).";
+    const bool nes = IsRetroSystem(game.system); // "nes" below = a DLL core (NES or GBA)
+    if (nes && !CoreAvailable(game.system)) {
+        error = std::string(RetroLabel(game.system)) + " support is not included in this build (" +
+                RetroDllName(game.system) + " is missing).";
         return false;
     }
     if (thread_.joinable()) thread_.join();
@@ -339,15 +369,17 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     game_ = game;
     model_ = model;
     system_ = game.system;
-    api_ = nes ? &nes_api_ : &azahar_api_; // the NES table is filled on the emulation thread
-    g_core_tag = nes ? "fceumm" : "azahar";
+    api_ = game.system == GameSystem::Gba ? &gba_api_ : nes ? &nes_api_ : &azahar_api_; // the DLL tables are filled on the emulation thread
+    g_core_tag = game.system == GameSystem::Gba ? "mgba" : nes ? "fceumm" : "azahar";
     core_fps_ = kCoreFps;
     pixel_format_ = RETRO_PIXEL_FORMAT_XRGB8888;
     {
         std::lock_guard lock(options_mutex_);
         // NES: the user's palette / overscan choices; every other FCEUmm option keeps the
         // default from the catalog the core registers.
-        options_ = nes ? NesCoreOptions(settings.nes) : settings.EffectiveCoreOptions(model, game.TitleIdHex());
+        options_ = game.system == GameSystem::Gba ? GbaCoreOptions(settings.gba)
+                   : nes                          ? NesCoreOptions(settings.nes)
+                                                  : settings.EffectiveCoreOptions(model, game.TitleIdHex());
         catalog_ = {};
         if (nes) {
             // The NES core runs with its own option defaults (the catalog it registers).
@@ -355,7 +387,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
             software_ = true;
             custom_textures_allowed_ = false;
             frame_lock_ = 60;
-            ONYX_INFO("Core: FCEUmm (NES), software video");
+            ONYX_INFO("Core: %s, software video", game.system == GameSystem::Gba ? "mGBA (GBA)" : "FCEUmm (NES)");
         } else {
             // OpenGL falls back to Vulkan and Vulkan to OpenGL before software.
             const std::string want = options_[keys::kGraphicsApi];
@@ -405,12 +437,17 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     stop_requested_ = false;
     pause_requested_ = false;
     write_auto_on_stop_ = false;
-    presenter_.SetFilter(nes ? settings.nes.filter : settings.qol.screen_filter);
-    presenter_.SetAspect(nes ? settings.nes.aspect : DisplayAspect::Native);
-    nes_patches_dir_ = settings.folders.nes_patches;
+    if (game.system == GameSystem::Gba) {
+        presenter_.SetFilter(settings.gba.filter);
+        presenter_.SetAspect(settings.gba.aspect);
+    } else {
+        presenter_.SetFilter(nes ? settings.nes.filter : settings.qol.screen_filter);
+        presenter_.SetAspect(nes ? settings.nes.aspect : DisplayAspect::Native);
+    }
+    rom_patches_dir_ = game.system == GameSystem::Gba ? settings.folders.gba_patches : settings.folders.nes_patches;
     {
         const auto it = settings.nes_patch.find(game.SaveKey());
-        nes_patch_choice_ = it == settings.nes_patch.end() ? std::string() : it->second;
+        rom_patch_choice_ = it == settings.nes_patch.end() ? std::string() : it->second;
     }
     presenter_.SetPaused(false);
     presenter_.SetDimmed(false);
@@ -566,12 +603,12 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         fail_reason = why;
     };
 
-    const bool nes = system_ == GameSystem::Nes;
+    const bool nes = IsRetroSystem(system_); // a DLL core (NES or GBA)
     if (nes) {
-        // Load the NES core here, under the crash guard. If it is missing or broken
+        // Load the core here, under the crash guard. If it is missing or broken
         // only this game fails to start.
         std::string load_error;
-        if (!EnsureNesCore(load_error)) {
+        if (!EnsureRetroCore(system_, load_error)) {
             ONYX_ERROR("Game failed to start: %s", load_error.c_str());
             state_ = SessionState::Failed;
             std::function<void(const std::string&)> stopped;
@@ -617,8 +654,9 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     retro_game_info info{};
     info.path = rom_path.c_str();
     if (nes) {
-        // FCEUmm asks for the ROM in memory (GET_GAME_INFO_EXT), so it never opens
-        // the file itself: the USB path needs no file-system patch.
+        // FCEUmm asks for the ROM in memory (GET_GAME_INFO_EXT) and mGBA takes it from
+        // retro_game_info.data, so neither opens the file itself: the USB path needs no
+        // file-system patch.
         UwpFileSystem fs;
         rom_data_ = fs.ReadAll(rom_path);
         rom_path_ = NormalizeSlashes(rom_path);
@@ -627,7 +665,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
         while (rom_dir_.size() > 1 && rom_dir_.back() == '/') rom_dir_.pop_back();
         rom_name_ = Stem(file);
         rom_ext_ = Extension(file).empty() ? std::string() : Extension(file).substr(1);
-        if (!rom_data_.empty()) ApplyNesPatch(fs, rom_path);
+        if (!rom_data_.empty()) ApplyRomPatch(fs, rom_path);
         game_info_ext_ = {};
         game_info_ext_.full_path = rom_path_.c_str();
         game_info_ext_.dir = rom_dir_.c_str();
@@ -645,13 +683,15 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     if (loaded) core.get_system_av_info(&av);
     if (loaded && nes) {
         const double fps = av.timing.fps;
-        if (fps > 30.0 && fps < 130.0) core_fps_ = NesPacingFps(fps);
-        ONYX_INFO("NES: core reports %.4f fps, %.0f Hz audio, %ux%u; pacing at %.4f fps", fps,
+        if (fps > 30.0 && fps < 130.0) core_fps_ = system_ == GameSystem::Gba ? GbaPacingFps(fps) : NesPacingFps(fps);
+        ONYX_INFO("%s: core reports %.4f fps, %.0f Hz audio, %ux%u; pacing at %.4f fps", RetroLabel(system_), fps,
                   av.timing.sample_rate, av.geometry.base_width, av.geometry.base_height, core_fps_);
     }
     if (!loaded) {
         fail(nes ? (rom_data_.empty() ? "The game file could not be read"
-                                      : core_reason("The NES core could not open this game. Is it a valid .nes file?"))
+                                      : core_reason(system_ == GameSystem::Gba
+                                                        ? "The GBA core could not open this game. Is it a valid .gba file?"
+                                                        : "The NES core could not open this game. Is it a valid .nes file?"))
                  : core_reason("The emulator could not open this game. Is it a decrypted dump?"));
     } else if (!software_ && !hw_render_set_) {
         fail(use_gl_ ? "The emulator did not request OpenGL rendering"
@@ -824,7 +864,7 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
     }
     if (RaActive()) ra_->UnloadGame();
     if (nes) {
-        step("flushing the NES save");
+        step("flushing the battery save");
         FlushSram(true);
     }
     step("unloading the game");
@@ -946,7 +986,7 @@ void EmulatorSession::SetFastForward(bool on) {
 void EmulatorSession::ApplyCoreOptions(const CoreOptions& options) {
     std::lock_guard lock(options_mutex_);
     for (const auto& [k, v] : options) options_[k] = v;
-    if (system_ == GameSystem::Nes) { // none of the 3DS renderer rules apply
+    if (IsRetroSystem(system_)) { // none of the 3DS renderer rules apply
         options_dirty_ = true;
         return;
     }
@@ -979,8 +1019,8 @@ CoreOptionCatalog EmulatorSession::Catalog() const {
 }
 
 void EmulatorSession::CycleLayout() {
-    if (system_ == GameSystem::Nes) {
-        Message("The NES has a single screen");
+    if (IsRetroSystem(system_)) {
+        Message(system_ == GameSystem::Gba ? "The GBA has a single screen" : "The NES has a single screen");
         return;
     }
     static const char* layouts[] = {"large_screen", "default", "side_by_side", "single_screen"};
@@ -1060,11 +1100,11 @@ bool EmulatorSession::InstallCia(const std::string& path, const std::function<vo
 }
 
 // ---------------------------------------------------------------------------
-// NES ROM patches (IPS / BPS / UPS), applied to the ROM bytes in memory; the file is untouched.
+// NES / GBA ROM patches (IPS / BPS / UPS), applied to the ROM bytes in memory; the file is untouched.
 
-void EmulatorSession::ApplyNesPatch(IFileSystem& fs, const std::string& rom_path) {
-    const auto found = FindPatches(fs, rom_path, nes_patches_dir_);
-    const PatchCandidate* chosen = ChoosePatch(found, nes_patch_choice_);
+void EmulatorSession::ApplyRomPatch(IFileSystem& fs, const std::string& rom_path) {
+    const auto found = FindPatches(fs, rom_path, rom_patches_dir_);
+    const PatchCandidate* chosen = ChoosePatch(found, rom_patch_choice_);
     if (!chosen) return;
     const Bytes patch = fs.ReadAll(chosen->path);
     if (patch.empty()) {
@@ -1085,11 +1125,15 @@ void EmulatorSession::ApplyNesPatch(IFileSystem& fs, const std::string& rom_path
 }
 
 // ---------------------------------------------------------------------------
-// NES battery saves (SRAM): the core exposes the RAM, ONYX keeps <name>.srm in
-// LocalState/nes (mirrored to the USB drive by SaveBackup).
+// NES / GBA battery saves (SRAM): the core exposes the RAM, ONYX keeps <name>.srm in
+// LocalState/nes or LocalState/gba (mirrored to the USB drive by SaveBackup).
+
+namespace {
+const char* SaveFolder(GameSystem system) { return system == GameSystem::Gba ? "gba" : "nes"; }
+} // namespace
 
 std::string EmulatorSession::SramPath() const {
-    return JoinPath(JoinPath(Paths().local_state, "nes"),
+    return JoinPath(JoinPath(Paths().local_state, SaveFolder(system_)),
                     SafeFileName(Stem(FileName(game_.path))) + ".srm");
 }
 
@@ -1100,7 +1144,7 @@ void EmulatorSession::LoadSram() {
     auto* ram = static_cast<uint8_t*>(api_->get_memory_data(RETRO_MEMORY_SAVE_RAM));
     if (!size || !ram) return; // this cartridge has no battery
     UwpFileSystem fs;
-    fs.CreateDirs(JoinPath(Paths().local_state, "nes"));
+    fs.CreateDirs(JoinPath(Paths().local_state, SaveFolder(system_)));
     const Bytes saved = fs.ReadAll(SramPath());
     if (!saved.empty()) {
         std::memcpy(ram, saved.data(), std::min(saved.size(), size));
@@ -1149,7 +1193,7 @@ void EmulatorSession::VideoRefresh(const void* data, unsigned width, unsigned he
         static uint64_t s_calls = 0, s_null = 0;
         ++s_calls;
         if (data && data != RETRO_HW_FRAME_BUFFER_VALID) {
-            if (system_ == GameSystem::Nes && pixel_format_ != RETRO_PIXEL_FORMAT_XRGB8888) {
+            if (IsRetroSystem(system_) && pixel_format_ != RETRO_PIXEL_FORMAT_XRGB8888) {
                 // 0RGB1555 / RGB565 -> XRGB8888 rows, as PushCpuFrame expects.
                 convert_frame_.resize(static_cast<size_t>(width) * height);
                 ConvertToXrgb8888(data, width, height, pitch,
@@ -1308,15 +1352,15 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
     case RETRO_ENVIRONMENT_GET_CORE_ASSETS_DIRECTORY:
         system_dir = Paths().azahar_root;
-        // NES battery saves are kept by ONYX itself (LoadSram/FlushSram), in LocalState/nes.
-        save_dir = system_ == GameSystem::Nes ? JoinPath(Paths().local_state, "nes") : system_dir;
+        // NES / GBA battery saves are kept by ONYX itself (LoadSram/FlushSram), in LocalState/nes|gba.
+        save_dir = IsRetroSystem(system_) ? JoinPath(Paths().local_state, SaveFolder(system_)) : system_dir;
         *static_cast<const char**>(data) =
             (cmd == RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY ? save_dir : system_dir).c_str();
         return true;
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: {
         const auto format = *static_cast<const retro_pixel_format*>(data);
-        if (system_ != GameSystem::Nes) return format == RETRO_PIXEL_FORMAT_XRGB8888;
-        // The NES core is software-only and may pick any of the three formats; VideoRefresh converts.
+        if (!IsRetroSystem(system_)) return format == RETRO_PIXEL_FORMAT_XRGB8888;
+        // The NES and GBA cores are software-only and may pick any of the three formats; VideoRefresh converts.
         if (format != RETRO_PIXEL_FORMAT_XRGB8888 && format != RETRO_PIXEL_FORMAT_RGB565 &&
             format != RETRO_PIXEL_FORMAT_0RGB1555)
             return false;
@@ -1324,7 +1368,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         return true;
     }
     case RETRO_ENVIRONMENT_GET_GAME_INFO_EXT:
-        if (system_ != GameSystem::Nes || rom_data_.empty()) return false;
+        if (!IsRetroSystem(system_) || rom_data_.empty()) return false;
         *static_cast<const retro_game_info_ext**>(data) = &game_info_ext_;
         return true;
     case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
@@ -1373,7 +1417,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         // One reusable frame buffer instead of the core allocating and freeing
         // a multi-megabyte frame every time it presents.
         auto* fb = static_cast<retro_framebuffer*>(data);
-        if (!software_ || system_ == GameSystem::Nes || !fb || fb->width == 0 || fb->height == 0)
+        if (!software_ || IsRetroSystem(system_) || !fb || fb->width == 0 || fb->height == 0)
             return false;
         sw_frame_.resize(static_cast<size_t>(fb->width) * fb->height);
         fb->data = sw_frame_.data();
@@ -1421,7 +1465,7 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
             if (!def) return false;
             it = options_.emplace(key, def->default_value).first;
         }
-        if (system_ == GameSystem::Nes) {
+        if (IsRetroSystem(system_)) {
             // The UI thread rewrites options_ while the game runs (quick settings): give the
             // core its own copy, from a ring that outlives the call, so it never reads a
             // string that is being changed.
@@ -1480,9 +1524,9 @@ bool EmulatorSession::Environment(unsigned cmd, void* data) {
         }
         return true;
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
-        if (system_ == GameSystem::Nes && data) { // e.g. the region option switched NTSC <-> PAL
+        if (IsRetroSystem(system_) && data) { // e.g. the region option switched NTSC <-> PAL
             const double fps = static_cast<const retro_system_av_info*>(data)->timing.fps;
-            if (fps > 30.0 && fps < 130.0) core_fps_ = NesPacingFps(fps);
+            if (fps > 30.0 && fps < 130.0) core_fps_ = system_ == GameSystem::Gba ? GbaPacingFps(fps) : NesPacingFps(fps);
         }
         if (use_gl_ && gl_ && gl_->HasContext() && data) {
             const auto* av = static_cast<const retro_system_av_info*>(data);

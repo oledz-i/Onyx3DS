@@ -42,15 +42,19 @@ bool IsNesRomExtension(std::string_view ext) {
     return ext == ".nes" || ext == ".unf";
 }
 
+bool IsGbaRomExtension(std::string_view ext) {
+    return ext == ".gba" || ext == ".agb";
+}
+
 std::string GameEntry::SaveKey() const {
-    if (system != GameSystem::Nes) return TitleIdHex();
+    if (system == GameSystem::N3DS) return TitleIdHex();
     // FNV-1a over the lower-cased file name: stable across runs and drive letters.
     u64 h = 1469598103934665603ull;
     for (unsigned char c : ToLower(Stem(FileName(path)))) {
         h ^= c;
         h *= 1099511628211ull;
     }
-    return "nes-" + TitleIdToHex(h);
+    return (system == GameSystem::Gba ? "gba-" : "nes-") + TitleIdToHex(h);
 }
 
 namespace {
@@ -87,10 +91,13 @@ void GameLibrary::Walk(const std::string& dir, int depth,
             // has no ROMs in it; skip folders named like a title ID.
             if (e.name.size() == 16 && HexToTitleId(e.name)) continue;
             // NES games live in a subfolder of the 3DS Roms folder on a USB drive.
-            if (!skip_dir_.empty() && ToLower(full) == skip_dir_) continue;
+            if (!skip_dirs_.empty() &&
+                std::find(skip_dirs_.begin(), skip_dirs_.end(), ToLower(full)) != skip_dirs_.end())
+                continue;
             Walk(full, depth + 1, out, cancel);
-        } else if (system_ == GameSystem::Nes ? IsNesRomExtension(Extension(e.name))
-                                              : n3ds::IsRomExtension(Extension(e.name))) {
+        } else if (system_ == GameSystem::Nes   ? IsNesRomExtension(Extension(e.name))
+                   : system_ == GameSystem::Gba ? IsGbaRomExtension(Extension(e.name))
+                                                : n3ds::IsRomExtension(Extension(e.name))) {
             out.emplace_back(full, e);
         }
     }
@@ -124,6 +131,38 @@ GameEntry GameLibrary::Build(const std::string& path, const DirEntry& file) {
     return g;
 }
 
+GameEntry GameLibrary::BuildGba(const std::string& path, const DirEntry& file) {
+    GameEntry g;
+    g.system = GameSystem::Gba;
+    g.path = path;
+    g.file_size = file.size;
+    g.kind = n3ds::TitleKind::Application;
+    g.title = CleanFileTitle(FileName(path));
+    g.region = GuessRegion(FileName(path));
+    // The cartridge header: game code at 0xAC (4 characters), the last one is the region.
+    const Bytes head = fs_.ReadRange(path, 0, 0xC0);
+    if (head.size() < 0xC0) {
+        g.note = "Too small to be a GBA game";
+        return g;
+    }
+    std::string code(reinterpret_cast<const char*>(head.data()) + 0xAC, 4);
+    bool printable = true;
+    for (unsigned char c : code) printable = printable && c >= 0x20 && c < 0x7F;
+    if (printable) {
+        g.product_code = code;
+        if (g.region.empty()) {
+            switch (code[3]) {
+            case 'E': g.region = "USA"; break;
+            case 'P': case 'D': case 'F': case 'I': case 'S': case 'X': case 'Y': g.region = "EUR"; break;
+            case 'J': g.region = "JPN"; break;
+            case 'K': g.region = "KOR"; break;
+            default: break;
+            }
+        }
+    }
+    return g;
+}
+
 GameEntry GameLibrary::BuildNes(const std::string& path, const DirEntry& file) {
     GameEntry g;
     g.system = GameSystem::Nes;
@@ -143,12 +182,21 @@ void GameLibrary::Scan(const FolderConfig& folders,
                        const std::function<void(const ScanProgress&)>& progress,
                        const std::atomic<bool>* cancel) {
     std::vector<std::pair<std::string, DirEntry>> files;
+    auto normal = [](const std::string& dir) {
+        std::string d = ToLower(NormalizeSlashes(dir));
+        while (d.size() > 1 && d.back() == '/') d.pop_back();
+        return d;
+    };
     if (system_ == GameSystem::Nes) {
-        skip_dir_.clear();
+        skip_dirs_.clear();
         if (!folders.nes_roms.empty()) Walk(folders.nes_roms, 0, files, cancel);
+    } else if (system_ == GameSystem::Gba) {
+        skip_dirs_.clear();
+        if (!folders.gba_roms.empty()) Walk(folders.gba_roms, 0, files, cancel);
     } else {
-        skip_dir_ = ToLower(NormalizeSlashes(folders.nes_roms));
-        while (skip_dir_.size() > 1 && skip_dir_.back() == '/') skip_dir_.pop_back();
+        skip_dirs_.clear();
+        if (!folders.nes_roms.empty()) skip_dirs_.push_back(normal(folders.nes_roms));
+        if (!folders.gba_roms.empty()) skip_dirs_.push_back(normal(folders.gba_roms));
         for (const auto& dir : folders.roms) Walk(dir, 0, files, cancel);
         if (!folders.updates_dlc.empty()) Walk(folders.updates_dlc, 0, files, cancel);
     }
@@ -173,7 +221,9 @@ void GameLibrary::Scan(const FolderConfig& folders,
         if (auto it = previous.find(key); it != previous.end() && it->second.file_size == entry.size) {
             result.push_back(it->second); // unchanged: keep art, play time, favourites
         } else {
-            GameEntry g = system_ == GameSystem::Nes ? BuildNes(path, entry) : Build(path, entry);
+            GameEntry g = system_ == GameSystem::Nes   ? BuildNes(path, entry)
+                          : system_ == GameSystem::Gba ? BuildGba(path, entry)
+                                                       : Build(path, entry);
             if (it != previous.end()) { // file replaced (e.g. decrypted copy): keep user data
                 g.favorite = it->second.favorite;
                 g.play_seconds = it->second.play_seconds;
@@ -315,14 +365,16 @@ json ToJson(const GameEntry& g) {
         {"user_title", g.user_title}, {"favorite", g.favorite}, {"hidden", g.hidden},
         {"play_seconds", g.play_seconds}, {"last_played", g.last_played},
         {"launch_count", g.launch_count},
-        {"system", g.system == GameSystem::Nes ? "nes" : "3ds"},
+        {"system", g.system == GameSystem::Nes ? "nes" : g.system == GameSystem::Gba ? "gba" : "3ds"},
     };
 }
 
 GameEntry FromJson(const json& j) {
     GameEntry g;
     auto str = [&](const char* k) { return j.value(k, std::string{}); };
-    g.system = str("system") == "nes" ? GameSystem::Nes : GameSystem::N3DS;
+    g.system = str("system") == "nes"   ? GameSystem::Nes
+               : str("system") == "gba" ? GameSystem::Gba
+                                        : GameSystem::N3DS;
     g.path = str("path");
     g.title = str("title");
     g.long_title = str("long_title");

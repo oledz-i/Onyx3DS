@@ -19,6 +19,8 @@ const char* FolderKindKey(FolderKind kind) {
     case FolderKind::Themes: return "themes";
     case FolderKind::NesRoms: return "nes_roms";
     case FolderKind::NesPatches: return "nes_patches";
+    case FolderKind::GbaRoms: return "gba_roms";
+    case FolderKind::GbaPatches: return "gba_patches";
     default: return "unknown";
     }
 }
@@ -37,6 +39,8 @@ const char* FolderKindLabel(FolderKind kind) {
     case FolderKind::Themes: return "Themes";
     case FolderKind::NesRoms: return "NES games";
     case FolderKind::NesPatches: return "NES patches";
+    case FolderKind::GbaRoms: return "GBA games";
+    case FolderKind::GbaPatches: return "GBA patches";
     default: return "?";
     }
 }
@@ -64,6 +68,10 @@ const char* FolderKindHelp(FolderKind kind) {
     case FolderKind::NesPatches:
         return "Patches (.ips .bps .ups) for NES games, e.g. widescreen hacks or translations. Name a patch like "
                "the game, or put patches for a game in a folder with the game's name.";
+    case FolderKind::GbaRoms: return "GBA games (.gba, .agb), including ROM hacks. Subfolders are scanned too.";
+    case FolderKind::GbaPatches:
+        return "Patches (.ips .bps .ups) for GBA games, e.g. ROM hack patches or translations. Name a patch like "
+               "the game, or put patches for a game in a folder with the game's name.";
     default: return "";
     }
 }
@@ -83,6 +91,8 @@ const std::string& FolderConfig::Get(FolderKind kind) const {
     case FolderKind::Themes: return themes;
     case FolderKind::NesRoms: return nes_roms;
     case FolderKind::NesPatches: return nes_patches;
+    case FolderKind::GbaRoms: return gba_roms;
+    case FolderKind::GbaPatches: return gba_patches;
     default: return empty;
     }
 }
@@ -104,13 +114,15 @@ void FolderConfig::Set(FolderKind kind, std::string path) {
     case FolderKind::Themes: themes = path; break;
     case FolderKind::NesRoms: nes_roms = path; break;
     case FolderKind::NesPatches: nes_patches = path; break;
+    case FolderKind::GbaRoms: gba_roms = path; break;
+    case FolderKind::GbaPatches: gba_patches = path; break;
     default: break;
     }
 }
 
 std::vector<std::string> FolderConfig::DriveLayoutSubfolders() {
     return {"Roms",  "Updates & DLC", "Textures", "Mods",  "Cheats",
-            "System", "Screenshots",  "Music",    "Themes",  "Roms/NES", "Patches/NES"};
+            "System", "Screenshots",  "Music",    "Themes",  "Roms/NES", "Patches/NES", "Roms/GBA", "Patches/GBA"};
 }
 
 void FolderConfig::ApplyDriveLayout(const std::string& drive_root) {
@@ -129,6 +141,8 @@ void FolderConfig::ApplyDriveLayout(const std::string& drive_root) {
     fill(themes, "Themes");
     fill(nes_roms, "Roms/NES");
     fill(nes_patches, "Patches/NES");
+    fill(gba_roms, "Roms/GBA");
+    fill(gba_patches, "Patches/GBA");
     // saves intentionally stays on the console unless the user opts in
 }
 

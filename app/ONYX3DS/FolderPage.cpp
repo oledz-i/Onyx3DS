@@ -131,13 +131,14 @@ void FolderPage::Browse(const std::string& dir) {
         int files = 0;
         for (const auto& e : Svc().Fs().List(dir)) {
             if (e.is_dir) entry(kit::glyph::Folder, e.name, "", JoinPath(dir, e.name));
-            else if (kind_ == FolderKind::NesRoms ? IsNesRomExtension(Extension(e.name))
+            else if (kind_ == FolderKind::NesRoms   ? IsNesRomExtension(Extension(e.name))
+                     : kind_ == FolderKind::GbaRoms ? IsGbaRomExtension(Extension(e.name))
                      : (kind_ != FolderKind::Roms || n3ds::IsRomExtension(Extension(e.name)))) ++files;
         }
         if (files) {
             StackPanel info;
             info.Children().Append(kit::Text(std::to_string(files) +
-                                                 (kind_ == FolderKind::Roms || kind_ == FolderKind::NesRoms
+                                                 (kind_ == FolderKind::Roms || kind_ == FolderKind::NesRoms || kind_ == FolderKind::GbaRoms
                                                       ? " games in this folder"
                                                       : " files in this folder"),
                                              18, false, t.colors.text_muted));
@@ -166,7 +167,8 @@ void FolderPage::Choose() {
         Svc().StopMusic(false);
         Svc().StartMusic();
     }
-    if (kind_ == FolderKind::Roms || kind_ == FolderKind::UpdatesDlc || kind_ == FolderKind::NesRoms)
+    if (kind_ == FolderKind::Roms || kind_ == FolderKind::UpdatesDlc || kind_ == FolderKind::NesRoms ||
+        kind_ == FolderKind::GbaRoms)
         Svc().RescanLibrary(nullptr);
     Svc().Toast(std::string(FolderKindLabel(kind_)) + ": " + dir);
     Frame().GoBack();

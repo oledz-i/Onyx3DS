@@ -250,6 +250,13 @@ std::string Settings::ToJson() const {
         {"filter", FilterName(nes.filter)},
         {"no_sprite_limit", nes.no_sprite_limit},
     };
+    j["gba"] = {
+        {"aspect", DisplayAspectName(gba.aspect)},
+        {"filter", FilterName(gba.filter)},
+        {"colors", gba.colors},
+        {"blending", gba.blending},
+        {"audio_filter", gba.audio_filter},
+    };
     j["nes_patch"] = nes_patch;
     j["profile"] = PerfProfileName(profile);
     j["core"] = core;
@@ -348,6 +355,20 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         else if (tmp == "crt") o.filter = ScreenFilter::Crt;
         o.crop_top_bottom = std::clamp(o.crop_top_bottom, 0, 24);
         o.crop_sides = std::clamp(o.crop_sides, 0, 16);
+    }
+    if (auto gj = j.find("gba"); gj != j.end() && gj->is_object()) {
+        auto& o = s.gba;
+        Take(*gj, "colors", o.colors);
+        Take(*gj, "blending", o.blending);
+        Take(*gj, "audio_filter", o.audio_filter);
+        std::string tmp;
+        Take(*gj, "aspect", tmp);
+        if (!tmp.empty()) o.aspect = DisplayAspectFromName(tmp);
+        tmp.clear();
+        Take(*gj, "filter", tmp);
+        if (tmp == "sharp") o.filter = ScreenFilter::Sharp;
+        else if (tmp == "smooth") o.filter = ScreenFilter::Smooth;
+        else if (tmp == "crt") o.filter = ScreenFilter::Crt;
     }
     Take(j, "nes_patch", s.nes_patch);
     std::string profile;

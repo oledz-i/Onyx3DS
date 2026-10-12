@@ -122,6 +122,15 @@ struct NesSettings {
     bool no_sprite_limit = false; // draw every sprite (no flicker, less authentic)
 };
 
+// GBA picture choices (applied to mGBA and the presenter at game start).
+struct GbaSettings {
+    DisplayAspect aspect = DisplayAspect::Native; // the screen's own 3:2
+    ScreenFilter filter = ScreenFilter::Sharp;
+    std::string colors = "GBA";        // mGBA "mgba_color_correction": OFF / GBA
+    std::string blending = "mix_smart"; // mGBA "mgba_interframe_blending": OFF / mix / mix_smart / lcd_ghosting
+    bool audio_filter = false;         // mGBA low-pass filter (softens harsh sound)
+};
+
 struct Settings {
     int version = 4;
     FolderConfig folders;
@@ -131,8 +140,9 @@ struct Settings {
     CoreOptions core;                              // global values
     std::map<std::string, CoreOptions> per_game;   // TITLEID -> overrides
     NesSettings nes;
-    // NES ROM patch per game (GameEntry::SaveKey()): "" / absent = automatic,
-    // "none" = unpatched, otherwise the patch file's path. See onyx/patch.h.
+    GbaSettings gba;
+    // NES and GBA ROM patch per game (GameEntry::SaveKey(), "nes-..." / "gba-..."): "" / absent
+    // = automatic, "none" = unpatched, otherwise the patch file's path. See onyx/patch.h.
     std::map<std::string, std::string> nes_patch;
     std::string last_played_path;
 
