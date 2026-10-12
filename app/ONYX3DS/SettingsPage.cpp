@@ -701,7 +701,12 @@ void SettingsPage::BuildInterface() {
                             Cfg().qol.background_parallax = on;
                             Save();
                         })));
-    Add(kit::SettingRow("Channels per row", "3 to 6",
+    Add(kit::SettingRow("Crossbar home screen", "Categories across the top and your games in a list, like a console menu",
+                        kit::Toggle(Cfg().qol.xmb_layout, [](bool on) {
+                            Cfg().qol.xmb_layout = on;
+                            Save();
+                        })));
+    Add(kit::SettingRow("Channels per row", "3 to 6 (channel layout)",
                         kit::Range(3, 6, 1, Cfg().qol.grid_columns, [](double v) {
                             Cfg().qol.grid_columns = static_cast<int>(v);
                             Save();

@@ -227,9 +227,28 @@ void MainPage::Rebuild(bool keep_focus) {
     if (theme_applied_ != Svc().CurrentTheme().id) ApplyTheme();
     if (!EmulatorSession::CoreAvailable(Svc().HomeSystem())) Svc().SetHomeSystem(GameSystem::N3DS);
     games_ = Svc().LibraryFor(Svc().HomeSystem()).GridView(Svc().Config().qol);
+    if (Xmb() && xmb_special_ != 0) {
+        std::vector<GameEntry> all;
+        for (const GameSystem s : AvailableSystems()) {
+            auto part = Svc().LibraryFor(s).GridView(Svc().Config().qol);
+            all.insert(all.end(), part.begin(), part.end());
+        }
+        games_.clear();
+        for (auto& g : all)
+            if (xmb_special_ == 2 ? g.favorite : g.last_played > 0) games_.push_back(g);
+        if (xmb_special_ == 1) {
+            std::stable_sort(games_.begin(), games_.end(),
+                             [](const GameEntry& a, const GameEntry& b) { return a.last_played > b.last_played; });
+            if (games_.size() > 24) games_.resize(24);
+        }
+    }
     UpdateSystemTabs();
     columns_ = std::clamp(Svc().Config().qol.grid_columns, 3, 6);
     rows_ = 3;
+    if (Xmb()) {
+        columns_ = 1;
+        rows_ = std::max(1, static_cast<int>(games_.size()));
+    }
     const int per_page = columns_ * rows_;
     const int pages = std::max(1, static_cast<int>((games_.size() + per_page - 1) / per_page));
     // Keep the focused game's page after a rescan.
@@ -261,14 +280,15 @@ UIElement MainPage::MakeSystemTabs() {
 }
 
 void MainPage::UpdateSystemTabs() {
-    const bool show = AvailableSystems().size() > 1;
+    const bool show = AvailableSystems().size() > 1 && !Xmb();
     SystemTabsHost().Visibility(show ? Visibility::Visible : Visibility::Collapsed);
     if (show) SystemTabsHost().Child(MakeSystemTabs());
 }
 
 void MainPage::SwitchSystem(GameSystem system) {
-    if (system == Svc().HomeSystem()) return;
+    if (system == Svc().HomeSystem() && xmb_special_ == 0) return;
     if (!EmulatorSession::CoreAvailable(system)) return;
+    xmb_special_ = 0;
     Svc().SetHomeSystem(system);
     Svc().PlaySfx("move");
     page_ = 0;
@@ -283,13 +303,17 @@ void MainPage::BuildPage() {
     grid.RowDefinitions().Clear();
     grid.ColumnDefinitions().Clear();
 
-    if (games_.empty()) {
+    if (games_.empty() && !(Xmb() && xmb_special_ != 0)) {
         ShowEmptyState();
         ContentArea().Visibility(Visibility::Collapsed);
         return;
     }
     EmptyState().Visibility(Visibility::Collapsed);
     ContentArea().Visibility(Visibility::Visible);
+    if (Xmb()) {
+        BuildXmb();
+        return;
+    }
 
     const double tw = std::min((kAreaWidth - (columns_ - 1) * kGap) / columns_,
                                ((kAreaHeight - (rows_ - 1) * kGap) / rows_) / 0.5625);
@@ -624,6 +648,126 @@ void MainPage::ShowRetroEmptyState() {
     if (auto first = buttons.Children().GetAt(0).try_as<Control>()) first.Focus(FocusState::Programmatic);
 }
 
+bool MainPage::Xmb() const { return Svc().Config().qol.xmb_layout; }
+
+// Categories left to right: Recent, Favourites, then each system.
+void MainPage::StepCategory(int delta) {
+    const auto systems = AvailableSystems();
+    const int count = 2 + static_cast<int>(systems.size());
+    int current = xmb_special_ != 0 ? xmb_special_ - 1 : 2;
+    if (xmb_special_ == 0)
+        for (size_t i = 0; i < systems.size(); ++i)
+            if (systems[i] == Svc().HomeSystem()) current = 2 + static_cast<int>(i);
+    const int next = (current + delta + count) % count;
+    Svc().PlaySfx("move");
+    focused_path_.clear();
+    animate_entrance_ = true;
+    if (next < 2) {
+        xmb_special_ = next + 1;
+        Rebuild(false);
+    } else {
+        xmb_special_ = 0;
+        const GameSystem s = systems[next - 2];
+        if (s != Svc().HomeSystem()) Svc().SetHomeSystem(s);
+        Rebuild(false);
+    }
+}
+
+// The crossbar: category names across the top, the chosen category's games down the page.
+void MainPage::BuildXmb() {
+    const Theme& t = Svc().CurrentTheme();
+    auto grid = ChannelGrid();
+    RowDefinition bar_row;
+    bar_row.Height(GridLengthHelper::FromPixels(86));
+    grid.RowDefinitions().Append(bar_row);
+    RowDefinition list_row;
+    list_row.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+    grid.RowDefinitions().Append(list_row);
+
+    std::vector<std::pair<std::string, bool>> cats;
+    cats.push_back({"Recent", xmb_special_ == 1});
+    cats.push_back({"Favourites", xmb_special_ == 2});
+    for (const GameSystem s : AvailableSystems())
+        cats.push_back({SystemLabel(s), xmb_special_ == 0 && s == Svc().HomeSystem()});
+    StackPanel bar;
+    bar.Orientation(Orientation::Horizontal);
+    bar.Spacing(46);
+    bar.VerticalAlignment(VerticalAlignment::Center);
+    bar.Margin(Thickness{40, 0, 0, 0});
+    int index = 0;
+    auto weak = get_weak();
+    for (const auto& [label, on] : cats) {
+        auto text = kit::Text(label, on ? 38 : 26, on, on ? std::string{} : kit::WithAlpha(t.colors.text_muted, 0xC0));
+        text.VerticalAlignment(VerticalAlignment::Center);
+        const int target = index++;
+        text.Tapped([weak, target](auto&&, auto&&) {
+            if (auto self = weak.get()) {
+                self->xmb_special_ = target < 2 ? target + 1 : 0;
+                if (target >= 2) Svc().SetHomeSystem(AvailableSystems()[target - 2]);
+                self->focused_path_.clear();
+                self->animate_entrance_ = true;
+                self->Rebuild(false);
+            }
+        });
+        bar.Children().Append(text);
+    }
+    Grid::SetRow(bar, 0);
+    grid.Children().Append(bar);
+
+    // The glowing line under the bar
+    Border line;
+    line.Height(2);
+    line.VerticalAlignment(VerticalAlignment::Bottom);
+    line.Margin(Thickness{40, 0, 40, 0});
+    line.Background(Svc().ThemeBrush(kit::WithAlpha(t.colors.accent, 0x90)));
+    Grid::SetRow(line, 0);
+    grid.Children().Append(line);
+
+    ScrollViewer scroll;
+    scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Hidden);
+    scroll.HorizontalScrollMode(ScrollMode::Disabled);
+    scroll.VerticalScrollMode(ScrollMode::Enabled);
+    scroll.Margin(Thickness{40, 14, 0, 0});
+    StackPanel list;
+    list.Spacing(14);
+    list.Padding(Thickness{0, 12, 0, 40});
+    Button focus_target{nullptr};
+    const double th = 118, tw = th / 0.5625;
+    if (games_.empty()) {
+        list.Children().Append(kit::Text(xmb_special_ == 2 ? "Press Y on a game to add it here."
+                                                           : "Games you play show up here.",
+                                         24, false, kit::WithAlpha(t.colors.text_muted, 0xE0)));
+    }
+    int slot = 0;
+    for (const auto& game : games_) {
+        StackPanel row;
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(26);
+        auto tile = MakeTile(game, tw, th);
+        if (game.path == focused_path_ || (!focus_target && focused_path_.empty())) focus_target = tile;
+        row.Children().Append(tile);
+        StackPanel words;
+        words.VerticalAlignment(VerticalAlignment::Center);
+        words.Children().Append(kit::Text(game.DisplayTitle(), 28, true));
+        std::string sub = SystemLabel(game.system);
+        if (game.play_seconds) sub += "  ·  " + FormatPlayTime(game.play_seconds);
+        else if (game.last_played) sub += "  ·  " + FormatLastPlayed(game.last_played);
+        words.Children().Append(kit::Text(sub, 18, false, kit::WithAlpha(t.colors.text_muted, 0xE0)));
+        row.Children().Append(words);
+        if (animate_entrance_) kit::Entrance(row, 0, 18, std::min(slot, 10) * 30, 280);
+        list.Children().Append(row);
+        ++slot;
+    }
+    animate_entrance_ = false;
+    scroll.Content(list);
+    Grid::SetRow(scroll, 1);
+    grid.Children().Append(scroll);
+
+    UpdateGreeting();
+    PageDots().Children().Clear();
+    if (focus_target) focus_target.Focus(FocusState::Programmatic);
+}
+
 void MainPage::BuildBarButtons() {
     const Theme& t = Svc().CurrentTheme();
     auto make = [&](const wchar_t* glyph, const std::string& label, std::function<void()> click) {
@@ -863,23 +1007,28 @@ void MainPage::HandleKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
     switch (e.Key()) {
     // LT / RT: step through the 3DS, NES and GBA lists.
     case VirtualKey::GamepadLeftTrigger:
+        if (Xmb()) { StepCategory(-1); e.Handled(true); break; }
         SwitchSystem(NeighbourSystem(Svc().HomeSystem(), -1));
         e.Handled(true);
         break;
     case VirtualKey::GamepadRightTrigger:
+        if (Xmb()) { StepCategory(+1); e.Handled(true); break; }
         SwitchSystem(NeighbourSystem(Svc().HomeSystem(), +1));
         e.Handled(true);
         break;
     case VirtualKey::GamepadRightShoulder:
+        if (Xmb()) { StepCategory(+1); e.Handled(true); break; }
         ChangePage(+1);
         e.Handled(true);
         break;
     case VirtualKey::GamepadLeftShoulder:
+        if (Xmb()) { StepCategory(-1); e.Handled(true); break; }
         ChangePage(-1);
         e.Handled(true);
         break;
     case VirtualKey::GamepadDPadRight:
     case VirtualKey::GamepadLeftThumbstickRight:
+        if (Xmb()) { StepCategory(+1); e.Handled(true); break; }
         // Wii style: walking off the right edge turns the page.
         if (game && slot % columns_ == columns_ - 1) {
             ChangePage(+1);
@@ -888,6 +1037,7 @@ void MainPage::HandleKeyDown(IInspectable const&, KeyRoutedEventArgs const& e) {
         break;
     case VirtualKey::GamepadDPadLeft:
     case VirtualKey::GamepadLeftThumbstickLeft:
+        if (Xmb()) { StepCategory(-1); e.Handled(true); break; }
         if (game && slot % columns_ == 0 && page_ > 0) {
             ChangePage(-1);
             e.Handled(true);

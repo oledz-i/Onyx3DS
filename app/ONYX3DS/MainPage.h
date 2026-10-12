@@ -17,6 +17,9 @@ private:
     void ApplyTheme();
     void Rebuild(bool keep_focus = true);
     void BuildPage();
+    void BuildXmb();
+    void StepCategory(int delta);
+    bool Xmb() const;
     Windows::UI::Xaml::Controls::Button MakeTile(const onyx::GameEntry& game, double w, double h);
     Windows::UI::Xaml::UIElement MakeEmptySlot(double w, double h);
     void ShowEmptyState();
@@ -39,6 +42,7 @@ private:
 
     std::vector<onyx::GameEntry> games_;
     int page_ = 0;
+    int xmb_special_ = 0; // XMB layout: 0 = the home system's games, 1 = recent, 2 = favourites
     int columns_ = 4;
     int rows_ = 3;
     std::string focused_path_;
