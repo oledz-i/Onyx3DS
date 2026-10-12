@@ -1,15 +1,14 @@
-From 45555adc5b6fe281735034ba229e0e2a5da2f3cb Mon Sep 17 00:00:00 2001
+From c5eebc1c01c9c680edfc0a8c1a86b8eefae69e0a Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 12 Oct 2026 18:10:56 -0400
-Subject: [PATCH] vulkan: align vertex attribute offsets on Dozen; log vertex
- upload volume
+Subject: [PATCH] fix
 
 ---
  .../renderer_vulkan/vk_rasterizer.cpp         | 127 +++++++++++++++++-
  1 file changed, 120 insertions(+), 7 deletions(-)
 
 diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-index f47c02c..58f8666 100644
+index f47c02c..8fd3626 100644
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -2,6 +2,7 @@
@@ -129,7 +128,7 @@ index f47c02c..58f8666 100644
  
      u32 buffer_offset = 0;
 -    for (const auto& loader : vertex_attributes.attribute_loaders) {
-+    for (std::size_t loader_index = 0; loader_index < vertex_attributes.attribute_loaders.size();
++    for (std::size_t loader_index = 0; loader_index < std::size(vertex_attributes.attribute_loaders);
 +         loader_index++) {
 +        const auto& loader = vertex_attributes.attribute_loaders[loader_index];
          if (loader.component_count == 0 || loader.byte_count == 0) {
