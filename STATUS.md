@@ -212,3 +212,12 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - XMB-style menu (original assets only).
 - Quick menu: smoother opening, better looking.
 - The rest of the planned extras.
+
+### Tuesday 2026-10-12 late — 4.0.0 soft-launch build (CI green, untested on device)
+- Tomodachi island confirmed fixed by the vertex alignment patch (azahar 0045); assets still appear ~3 s after the scene.
+- Azahar 0046: vertex blocks already uploaded in the same submission are reused (Zelda title re-uploaded ~1.4 MB per draw, ~2 GB/s). Log line "Vertex uploads" shows hit rates.
+- GBA: mGBA libretro core (vendor/mgba, patches/mgba make it UWP-safe, GB core on for libretro). Library tab, Roms/GBA and Patches/GBA folders, IPS/BPS/UPS patching in memory, SRAM saves, picture settings (colours, shape, upscaling look, ghosting blend, softer sound) in quick menu and Settings.
+- Quick menu: animated open and close, cover art header with clock, focus zoom on buttons, side panels slide in, loading overlay fades.
+- Crossbar (XMB-style) home layout: Settings > Interface > "Crossbar home screen". Recent, Favourites and per-system categories; D-pad/triggers/bumpers change category.
+- Smash: its glitches were most likely the refused pipelines (same cause as Tomodachi); the vertex alignment fix applies. Zelda logo spots: no cause found in the logs (format fallbacks to RGBA8 are standard conversion paths); needs a new log/photo.
+- Not started: disk shader cache, presenter drop work, extra frame copy.
