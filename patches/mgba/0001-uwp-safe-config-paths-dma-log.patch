@@ -51,3 +51,18 @@ index 106bd76..12b6b9e 100644
  		     currentDma->nextSource, currentDma->nextDest,
  		     currentDma->reg, currentDma->count & 0xFFFF);
  
+diff --git a/src/util/vfs.c b/src/util/vfs.c
+index 3a743b4..5207637 100644
+--- a/src/util/vfs.c
++++ b/src/util/vfs.c
+@@ -229,7 +229,9 @@ void separatePath(const char* path, char* dirname, char* basename, char* extensi
+ 
+ bool isAbsolute(const char* path) {
+ 	// XXX: Is this robust?
+-#ifdef _WIN32
++#if defined(_WIN32) && defined(__LIBRETRO__)
++	return path[0] == '/' || path[0] == '\\' || (path[0] && path[1] == ':');
++#elif defined(_WIN32)
+ 	WCHAR wpath[PATH_MAX];
+ 	MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, PATH_MAX);
+ 	return !PathIsRelativeW(wpath);
