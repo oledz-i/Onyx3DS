@@ -344,6 +344,24 @@ void EmulatorSession::Message(const std::string& text) {
 // ---------------------------------------------------------------------------
 // Lifecycle
 
+namespace {
+// What to do about an encrypted dump, in words for someone who has never decrypted a game.
+std::string EncryptedHelp(const std::string& system_folder) {
+    std::string t =
+        "This game is encrypted, and ONYX needs a decrypted copy.\n\n"
+        "Easiest fix: decrypt your own dump on your computer with a decryptor such as Batch 3DS Decryptor "
+        "(or on your 3DS with GodMode9), put the decrypted .cci / .cia in your games folder, then rescan.\n\n"
+        "Other way: put aes_keys.txt (and seeddb.bin for eShop games) from your own 3DS in your System folder";
+    if (!system_folder.empty()) t += " (" + system_folder + ")";
+    t += ".\n\nA decrypted game never needs keys.";
+    return t;
+}
+bool LooksEncryptedFailure(const std::string& reason) {
+    const std::string r = ToLower(reason);
+    return r.find("decrypt") != std::string::npos || r.find("encrypted") != std::string::npos;
+}
+} // namespace
+
 bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, ConsoleModel model,
                             std::string& error) {
     if (!ready_) {
@@ -360,6 +378,19 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         return false;
     }
     const bool nes = IsRetroSystem(game.system); // "nes" below = a DLL core (NES or GBA)
+    if (!nes && game.encrypted) {
+        // An encrypted dump boots only with the console's keys; without them say what to do now
+        // instead of failing deep inside the core.
+        UwpFileSystem fs;
+        const bool has_keys =
+            (!settings.folders.system_files.empty() &&
+             fs.Exists(JoinPath(settings.folders.system_files, "aes_keys.txt"))) ||
+            fs.Exists(JoinPath(JoinPath(Paths().azahar_root, "sysdata"), "aes_keys.txt"));
+        if (!has_keys) {
+            error = EncryptedHelp(settings.folders.system_files);
+            return false;
+        }
+    }
     if (nes && !CoreAvailable(game.system)) {
         error = std::string(RetroLabel(game.system)) + " support is not included in this build (" +
                 RetroDllName(game.system) + " is missing).";
@@ -447,6 +478,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         }
     }
     UpdateFolders(settings.folders);
+    folders_system_ = settings.folders.system_files;
     ff_speed_ = settings.qol.fast_forward_speed;
     fast_forward_ = false;
     stop_requested_ = false;
@@ -707,7 +739,10 @@ void EmulatorSession::EmulationThreadBody(const std::string& rom_path) {
                                       : core_reason(system_ == GameSystem::Gba
                                                         ? "The GBA core could not open this game. Is it a valid .gba file?"
                                                         : "The NES core could not open this game. Is it a valid .nes file?"))
-                 : core_reason("The emulator could not open this game. Is it a decrypted dump?"));
+                 : [&] {
+                       const std::string why = core_reason("The emulator could not open this game. Is it a decrypted dump?");
+                       return LooksEncryptedFailure(why) ? EncryptedHelp(folders_system_) : why;
+                   }());
     } else if (!software_ && !hw_render_set_) {
         fail(use_gl_ ? "The emulator did not request OpenGL rendering"
                      : "The emulator did not request Vulkan rendering");

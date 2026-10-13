@@ -139,6 +139,7 @@ public:
     // Called by FileUtil for every path Azahar opens.
     static std::string TranslatePath(const std::string& path);
     void UpdateFolders(const FolderConfig& folders);
+    std::string folders_system_; // the System folder of the running game (for messages)
     std::string AzaharUserDir() const;
 
     // libretro environment / callbacks (public for the C trampolines)

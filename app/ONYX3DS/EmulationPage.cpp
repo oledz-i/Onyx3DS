@@ -368,6 +368,8 @@ void EmulationPage::OnStopped(const std::string& reason) {
     d.Title(box_value(crashed ? L"The emulator stopped" : L"The game couldn't start"));
     d.Content(box_value(kit::H(
         crashed ? reason
+        : reason.rfind("This game is encrypted", 0) == 0
+            ? reason
         : game_.system == GameSystem::Nes
             ? reason + "\n\nCheck that the file is a working .nes or .unf game."
         : game_.system == GameSystem::Gba
