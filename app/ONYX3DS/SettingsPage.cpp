@@ -95,7 +95,7 @@ std::vector<Curated> CuratedOptions() {
         {keys::kCpuClock, "Emulated CPU clock",
          "Above 100% can smooth out games that slow down on a real 3DS.",
          {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"125", "125%"}, {"150", "150%"}, {"200", "200%"}}},
-        {keys::kNew3ds, "System model", "New 3DS gives games more memory and CPU. Some need it.",
+        {keys::kNew3ds, "System model", "Original 3DS is lighter and faster, and right for almost every game. Pick New 3DS only for games that need it (per game, from its channel page).",
          {{"New 3DS", "New 3DS"}, {"Old 3DS", "Original 3DS"}}},
         {keys::kRegion, "System region", "Auto picks the game's region.",
          {{"Auto", "Auto"}, {"Japan", "Japan"}, {"USA", "USA"}, {"Europe", "Europe"},

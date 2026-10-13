@@ -139,7 +139,7 @@ struct GbaSettings {
 };
 
 struct Settings {
-    int version = 6;
+    int version = 7;
     FolderConfig folders;
     QolSettings qol;
     ServiceSettings services;

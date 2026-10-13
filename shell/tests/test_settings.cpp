@@ -146,7 +146,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
 
     s.version = 1;
     const Settings back = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
-    CHECK(back.version == 6);
+    CHECK(back.version == 7);
     CHECK(back.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 
     // Hardware users stay on Vulkan (OpenGL is not offered in this build).
@@ -155,7 +155,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
     v2.core[keys::kGraphicsApi] = "Vulkan";
     v2.per_game["0004000000055D00"][keys::kGraphicsApi] = "Vulkan";
     const Settings moved = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
-    CHECK(moved.version == 6);
+    CHECK(moved.version == 7);
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000055D00").at(keys::kGraphicsApi) ==
           "Vulkan");
@@ -174,6 +174,17 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
               .EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
     gl.core[keys::kGraphicsApi] = "Direct3D";
     CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
+}
+
+TEST_CASE("System model: Original 3DS by default, older files moved once, per-game New 3DS kept") {
+    Settings s = Settings::Defaults(ConsoleModel::SeriesS);
+    CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kNew3ds) == "Old 3DS");
+    s.version = 6;
+    s.core[keys::kNew3ds] = "New 3DS";
+    s.per_game["0004000000055D00"][keys::kNew3ds] = "New 3DS";
+    const Settings m = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
+    CHECK(m.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kNew3ds) == "Old 3DS");
+    CHECK(m.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000055D00").at(keys::kNew3ds) == "New 3DS");
 }
 
 TEST_CASE("Direct display: on by default, older files switched on once") {

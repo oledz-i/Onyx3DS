@@ -102,7 +102,7 @@ Settings Settings::Defaults(ConsoleModel model) {
         // Software rendering never touches Dozen or the GPU driver, so it is the
         // safe default on Xbox. Hardware (Vulkan through Dozen) is opt-in.
         {keys::kGraphicsApi, "Software"},
-        {keys::kNew3ds, "New 3DS"},
+        {keys::kNew3ds, "Old 3DS"}, // lighter on CPU and memory; New 3DS is per-game for the few titles that need it
         {keys::kRegion, "Auto"},
         {keys::kLanguage, "English"},
         {keys::kTextureSampling, "GameControlled"},
@@ -423,6 +423,12 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
             if (it != opts.end() && it->second == "OpenGL") it->second = "Vulkan";
         }
         s.version = 6;
+    }
+    // v7: Original 3DS is the default (almost every game runs on it, with less CPU and
+    // memory use). Per-game choices stay.
+    if (s.version < 7) {
+        s.core[keys::kNew3ds] = "Old 3DS";
+        s.version = 7;
     }
     return s;
 }
