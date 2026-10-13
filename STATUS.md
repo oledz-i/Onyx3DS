@@ -295,3 +295,7 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - onyx_8 (build 150): no "frames dropped because the GPU was still reading the upload buffer" lines at all. Build 154 (onyx.log): 449 dropped by the end, about 1-2 per second, in menus and races. Only Vulkan-side change in between was 0057 (clear of every new image on Dozen), which used two all-commands barriers per new surface.
 - 0057 now clears with no leading barrier and one per-image, transfer-to-all barrier after the clears. Speed otherwise unchanged (retro_run 3-7 ms, vertex cache 99%+ hits, same as 150). Whether 0057 fixes the black models/static is still unverified.
 - Same log: OpenGL context now reports 4.6 (Mesa 0034 works at the driver level); the games in it still ran on Vulkan, so GL gameplay is untested.
+
+## Vertex cache checksum guard (Azahar 0058)
+Hypothesis for the MK7 flashing black characters/sky: cached vertex blocks going stale because some writers bypass page tracking. Each live block is now hashed against its source memory at most once per frame (8 MiB/frame budget); a mismatch drops and re-copies it. The 5-second "Vertex data:" log line now reports "found stale by checksum (N unchecked)". UNVERIFIED on device: if stale stays 0 in the next MK7 log, the cache is not the cause and the remaining suspects are the shadow companion (0051), hardware shaders on Dozen, and frame hand-off timing.
+Open: OpenGL bottom screen (no GL log since build 153; need a short GL log).
