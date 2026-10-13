@@ -262,3 +262,13 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Vertex blocks are content-addressed (XXH3 of the guest bytes + layout) and kept in 4 x 24 MiB arenas; a repeat draw binds the old copy instead of copying. Arenas are recycled oldest first after waiting for the GPU.
 - Switches itself off (no hashing) while under 20% of the bytes are found again, probing once per few seconds.
 - Bookkeeping is tested on Linux (stale-data, recycle-wait and bypass tests); the Vulkan side is only compile-tested by CI. The 5 s "Vertex data:" log line now shows MiB wanted / served by the cache / uploaded.
+
+## Vertex cache v2 (Azahar 0055/0056, unverified on console)
+- Replaces the 0054 hash cache, which made MK7 slower (XXH3 over ~10 GB/s was the top CPU cost) and could recycle an arena an earlier loader of the same draw pointed into (corrupted characters).
+- Keyed by loader base address + layout; one block per buffer covering every drawn range; invalidated through the rasterizer cache's page tracking (CPU writes, DMA, accelerated GPU transfers). Volatile buffers (rewritten within 2 frames of a copy, 3 times) use per-draw uploads for 10 s; heavily read buffers are untracked.
+- Vulkan: 6 x 32 MiB arenas, recycle waits on the last tick that read the arena; arenas used by the current draw are pinned. OpenGL: 6 x 32 MiB GL buffers via glBufferSubData.
+- Tested: 10 bookkeeping tests (stale data, recycle waits, pinning, volatility, tracking balance) under ASan. Both rasterizers syntax/warning-checked locally with clang; MSVC build in CI.
+
+## OpenGL crash at first make-current (Mesa 0033)
+- onyx_gl.dll+0x2de996 = d3d12_is_format_supported dereferencing the absent sw winsys for PIPE_BIND_DISPLAY_TARGET (decoded with the onyx_gl map now published to the dev release). Fixed; get_fd guarded too.
+- GlHost asks for core 3.3 and logs the real version; below 4.3 it lists the missing 4.x extensions.
