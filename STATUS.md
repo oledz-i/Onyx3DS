@@ -249,3 +249,10 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Zelda hardware-shader hunt (patch 0052, hypothesis, untested): on Dozen 3-component byte/short vertex attributes are read as 4-component and the shader forced w=0; the PICA (and drivers with native formats) give w=1, so positions/weights lost their translation. Now w=1. To verify: turn "Hardware shaders" back ON for OoT3D in build 126+; if Link looks right, remove the built-in Zelda override in shell/src/settings.cpp.
 - BUILD 127 CRASH (Zelda, hardware shaders on): log shows the D3D12 device was already removed (0x887A0020, driver internal error) when "PSO cache unavailable (0x887a0005)" was logged, i.e. at the first ID3D12Device1::CreatePipelineLibrary of the game - which had never run in-game before (the env var was invisible until 127). Most likely cause: the library creation itself, not the shader change. The cache is now OFF by default and migrated off (settings v5), labelled experimental; Mesa gives up after one failure. The hitch work needs a different approach (see below) until the library is shown safe.
 - Zelda confirmed on device (build 128, hardware shaders on): Link and logo render correctly, shadows visible. Built-in hardware-shader-off override removed. Pipeline cache crash confirmed as the library, cache stays off.
+
+## OpenGL (our own) — started, unverified
+- New Mesa patches 0029/0030: d3d12 gallium builds for UWP; `onyx_gl` target = our own window-less front end (no WGL/GDI/user32) exporting create/make-current/destroy/get-proc-address/last-error.
+- `tools/build-mesa-gl.ps1` + optional CI job `mesagl` (cannot break the package; the DLL is import-checked against WindowsApp.lib before it is allowed into the package).
+- `GlHost` now loads `onyx_gl.dll` (core 4.3 context, 1x1 stub default framebuffer, core draws into its own FBO, PBO read-back as before).
+- Settings: "Hardware (OpenGL, experimental)" is selectable again (settings v6). Falls back to Vulkan when the DLL is not in the package.
+- Nothing here has been built yet; first CI run will show the Mesa compile/link problems, if any.

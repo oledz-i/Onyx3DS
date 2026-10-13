@@ -38,6 +38,11 @@ foreach ($d in "vulkan_dzn.dll", "dxil.dll") {
     else { Write-Warning "$d not found in deps\bin; graphics will not work in this package" }
 }
 
+# Optional OpenGL (tools\build-mesa-gl.ps1): without it the app offers Vulkan only.
+$glDll = Join-Path $Root "deps\bin\onyx_gl.dll"
+if (Test-Path $glDll) { Copy-Item $glDll (Join-Path $Root "app\ONYX3DS\onyx_gl.dll") -Force }
+else { Write-Warning "onyx_gl.dll not found in deps\bin; OpenGL will not be available in this package" }
+
 # Optional NES core (tools\build-fceumm.ps1): without it the app hides NES.
 $nes = Join-Path $Root "deps\bin\fceumm_libretro.dll"
 if (Test-Path $nes) { Copy-Item $nes (Join-Path $Root "app\ONYX3DS\fceumm_libretro.dll") -Force }

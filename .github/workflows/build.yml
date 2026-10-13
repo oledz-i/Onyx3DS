@@ -94,6 +94,49 @@ jobs:
           retention-days: 3
           path: deps/bin/*.dll
 
+  # Optional OpenGL (onyx_gl.dll: Mesa's OpenGL-on-D3D12 with our own window-less
+  # front end). Allowed to fail: the package is then built without it and the
+  # OpenGL renderer stays hidden. A failure shows up as a warning annotation.
+  mesagl:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install meson ninja mako pyyaml packaging
+          choco install winflexbison3 -y --no-progress
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps/mesa
+            deps/build/mesa-gl
+          key: mesagl-${{ github.run_id }}
+          restore-keys: mesagl-
+      - name: Build OpenGL (Mesa on D3D12, UWP)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pwsh -NoProfile -ExecutionPolicy Bypass -c "./tools/fetch-deps.ps1 -Only mesa,dxil; ./tools/build-mesa-gl.ps1" 2>&1 | tee build.log
+      - if: always()
+        run: |
+          if [ -f deps/bin/onyx_gl.dll ]; then echo "OpenGL built"; else tools/ci-report.sh build.log "OpenGL (optional)" warning; fi
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            deps/mesa
+            deps/build/mesa-gl
+          key: mesagl-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesagl-bin
+          retention-days: 3
+          if-no-files-found: ignore
+          path: deps/bin/onyx_gl.dll
+
   # Optional NES core. The step is allowed to fail: the job still succeeds, no
   # artifact is uploaded, the package is built without fceumm_libretro.dll and
   # the app hides NES. A failure shows up as a warning annotation.
@@ -187,7 +230,7 @@ jobs:
             deps/lib/rcheevos.lib
 
   package:
-    needs: [azahar, dozen, app, fceumm, mgba]
+    needs: [azahar, dozen, app, fceumm, mgba, mesagl]
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -201,6 +244,7 @@ jobs:
           cp artifacts/dozen-bin/*.dll deps/bin/
           cp artifacts/fceumm-bin/*.dll deps/bin/ || echo "NES core not built; the package ships without NES"
           cp artifacts/mgba-bin/*.dll deps/bin/ || echo "GBA core not built; the package ships without GBA"
+          cp artifacts/mesagl-bin/*.dll deps/bin/ || echo "OpenGL not built; the package ships without it"
       - name: Build and sign the Xbox package
         run: |
           set -o pipefail

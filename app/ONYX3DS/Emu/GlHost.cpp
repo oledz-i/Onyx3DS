@@ -10,7 +10,7 @@ namespace onyx::app {
 
 namespace {
 
-// The few GL / WGL definitions used here (no GL headers in the app).
+// The few GL definitions used here (no GL headers in the app).
 using GLenum = unsigned int;
 using GLuint = unsigned int;
 using GLint = int;
@@ -55,40 +55,21 @@ constexpr GLbitfield GL_SYNC_FLUSH_COMMANDS_BIT = 0x00000001;
 constexpr GLenum GL_ALREADY_SIGNALED = 0x911A;
 constexpr GLenum GL_CONDITION_SATISFIED = 0x911C;
 
-// PIXELFORMATDESCRIPTOR (wingdi.h declares it for desktop apps only).
-struct PixelFormat {
-    WORD nSize;
-    WORD nVersion;
-    DWORD dwFlags;
-    BYTE iPixelType, cColorBits, cRedBits, cRedShift, cGreenBits, cGreenShift, cBlueBits,
-        cBlueShift, cAlphaBits, cAlphaShift, cAccumBits, cAccumRedBits, cAccumGreenBits,
-        cAccumBlueBits, cAccumAlphaBits, cDepthBits, cStencilBits, cAuxBuffers, iLayerType,
-        bReserved;
-    DWORD dwLayerMask, dwVisibleMask, dwDamageMask;
-};
-static_assert(sizeof(PixelFormat) == 40, "PIXELFORMATDESCRIPTOR layout");
-constexpr DWORD kPfdDoubleBuffer = 0x1, kPfdDrawToWindow = 0x4, kPfdSupportOpenGL = 0x20;
-
-// wglGetProcAddress reports failure with several sentinel values, not just NULL.
-bool ValidProc(PROC p) {
+// Entry points that are missing come back as null (older drivers also used 1, 2, 3 and -1).
+bool ValidProc(const void* p) {
     const auto v = reinterpret_cast<intptr_t>(p);
     return v != 0 && v != 1 && v != 2 && v != 3 && v != -1;
 }
 
-// Mesa keys a window-less framebuffer on the DC value alone. A fresh value per
-// context, since a DC's pixel format can only be set once.
-std::atomic<uintptr_t> g_next_dc{0x0A11CE000};
-
 } // namespace
 
 struct GlHost::Fn {
-    // WGL (exported by Mesa's opengl32.dll)
-    int(WINAPI* ChoosePixelFormat)(void*, const PixelFormat*) = nullptr;
-    BOOL(WINAPI* SetPixelFormat)(void*, int, const PixelFormat*) = nullptr;
-    void*(WINAPI* CreateContext)(void*) = nullptr;
-    BOOL(WINAPI* DeleteContext)(void*) = nullptr;
-    BOOL(WINAPI* MakeCurrent)(void*, void*) = nullptr;
-    PROC(WINAPI* GetProcAddr)(LPCSTR) = nullptr;
+    // ONYX's own OpenGL library (onyx_gl.dll)
+    void*(__cdecl* CreateContext)(int, int, int) = nullptr;
+    int(__cdecl* MakeCurrent)(void*) = nullptr;
+    void(__cdecl* DestroyContext)(void*) = nullptr;
+    void*(__cdecl* GetProcAddr)(const char*) = nullptr;
+    const char*(__cdecl* LastError)() = nullptr;
     // GL 1.1
     GLenum(APIENTRY* GetError)() = nullptr;
     const GLubyte*(APIENTRY* GetString)(GLenum) = nullptr;
@@ -129,37 +110,34 @@ GlHost::~GlHost() {
 
 bool GlHost::Load(std::string& error) {
     if (module_) return true;
-    module_ = LoadPackagedLibrary(L"opengl32.dll", 0);
+    module_ = LoadPackagedLibrary(L"onyx_gl.dll", 0);
     if (!module_) {
-        error = "opengl32.dll (Mesa) is missing from the app package (error " +
+        error = "onyx_gl.dll (ONYX's OpenGL) is not in this build (error " +
                 std::to_string(GetLastError()) + ")";
         return false;
     }
     auto& f = *fn_;
-#define WGL(name, sym) f.name = reinterpret_cast<decltype(f.name)>(::GetProcAddress(module_, sym))
-    WGL(ChoosePixelFormat, "wglChoosePixelFormat");
-    WGL(SetPixelFormat, "wglSetPixelFormat");
-    WGL(CreateContext, "wglCreateContext");
-    WGL(DeleteContext, "wglDeleteContext");
-    WGL(MakeCurrent, "wglMakeCurrent");
-    WGL(GetProcAddr, "wglGetProcAddress");
-#undef WGL
-    if (!f.ChoosePixelFormat || !f.SetPixelFormat || !f.CreateContext || !f.DeleteContext ||
-        !f.MakeCurrent || !f.GetProcAddr) {
-        error = "Mesa's opengl32.dll lacks the WGL entry points";
+#define ONYXGL(name, sym) f.name = reinterpret_cast<decltype(f.name)>(::GetProcAddress(module_, sym))
+    ONYXGL(CreateContext, "onyx_gl_create_context");
+    ONYXGL(MakeCurrent, "onyx_gl_make_current");
+    ONYXGL(DestroyContext, "onyx_gl_destroy_context");
+    ONYXGL(GetProcAddr, "onyx_gl_get_proc_address");
+    ONYXGL(LastError, "onyx_gl_last_error");
+#undef ONYXGL
+    if (!f.CreateContext || !f.MakeCurrent || !f.DestroyContext || !f.GetProcAddr || !f.LastError) {
+        error = "onyx_gl.dll lacks the expected entry points";
         FreeLibrary(module_);
         module_ = nullptr;
         return false;
     }
-    ONYX_INFO("OpenGL driver loaded (Mesa, OpenGL on D3D12)");
+    ONYX_INFO("OpenGL driver loaded (ONYX OpenGL, Mesa D3D12)");
     return true;
 }
 
 retro_proc_address_t GlHost::GetProcAddress(const char* symbol) {
     GlHost* self = s_active;
     if (!self || !self->module_ || !symbol) return nullptr;
-    PROC p = self->fn_->GetProcAddr(symbol);
-    if (!ValidProc(p)) p = ::GetProcAddress(self->module_, symbol); // GL 1.1 entry points
+    void* p = self->fn_->GetProcAddr(symbol);
     return ValidProc(p) ? reinterpret_cast<retro_proc_address_t>(p) : nullptr;
 }
 
@@ -211,34 +189,16 @@ bool GlHost::CreateContext(unsigned max_width, unsigned max_height, bool depth, 
     if (context_) DestroyContext();
     auto& f = *fn_;
 
-    // No window: Mesa gives the context a small offscreen default framebuffer,
-    // and the core draws into our framebuffer object instead.
-    dc_ = reinterpret_cast<void*>(g_next_dc.fetch_add(0x100));
-    PixelFormat pfd{};
-    pfd.nSize = sizeof(pfd);
-    pfd.nVersion = 1;
-    pfd.dwFlags = kPfdDrawToWindow | kPfdSupportOpenGL | kPfdDoubleBuffer;
-    pfd.iPixelType = 0; // PFD_TYPE_RGBA
-    pfd.cColorBits = 32;
-    pfd.cDepthBits = 24;
-    pfd.cStencilBits = 8;
-    const int format = f.ChoosePixelFormat(dc_, &pfd);
-    if (format == 0) {
-        error = "OpenGL: no usable pixel format";
-        return false;
-    }
-    if (!f.SetPixelFormat(dc_, format, &pfd)) {
-        error = "OpenGL: setting the pixel format failed";
-        return false;
-    }
-    context_ = f.CreateContext(dc_);
+    // No window: the context has a 1x1 stub default framebuffer, and the core
+    // draws into our framebuffer object instead. Core profile, 4.3 or newer.
+    context_ = f.CreateContext(4, 3, 1);
     if (!context_) {
-        error = "OpenGL: creating the context failed (error " + std::to_string(GetLastError()) + ")";
+        error = std::string("OpenGL: creating the context failed (") + f.LastError() + ")";
         return false;
     }
-    if (!f.MakeCurrent(dc_, context_)) {
+    if (!f.MakeCurrent(context_)) {
         error = "OpenGL: making the context current failed";
-        f.DeleteContext(context_);
+        f.DestroyContext(context_);
         context_ = nullptr;
         return false;
     }
@@ -348,10 +308,9 @@ void GlHost::DestroyContext() {
     if (!context_) return;
     auto& f = *fn_;
     DestroyTargets();
-    f.MakeCurrent(nullptr, nullptr);
-    f.DeleteContext(context_);
+    f.MakeCurrent(nullptr);
+    f.DestroyContext(context_);
     context_ = nullptr;
-    dc_ = nullptr;
     if (s_active == this) s_active = nullptr;
 }
 

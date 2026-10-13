@@ -134,10 +134,10 @@ CoreOptions Settings::EffectiveCoreOptions(ConsoleModel model,
     if (auto it = per_game.find(title_id_hex); it != per_game.end())
         for (const auto& [k, v] : it->second) out[k] = v;
     // Never let a saved value pick a renderer the console cannot run. The Xbox
-    // build has Vulkan (Dozen) and Software. An older saved "OpenGL" means Vulkan.
+    // build has Vulkan (Dozen), OpenGL (ONYX's own, Mesa on D3D12) and Software.
+    // When OpenGL is not in the package the session falls back to Vulkan.
     std::string api = out[keys::kGraphicsApi];
-    if (api == "OpenGL") api = "Vulkan";
-    out[keys::kGraphicsApi] = (api == "Vulkan") ? "Vulkan" : "Software";
+    out[keys::kGraphicsApi] = (api == "Vulkan" || api == "OpenGL") ? api : "Software";
     out[keys::kUseLibretroSavePath] = "LibRetro Default";
     return out;
 }
@@ -414,11 +414,15 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         s.qol.pipeline_cache = false;
         s.version = 5;
     }
-    // OpenGL is not offered in this build; anyone who had it goes to Vulkan.
-    if (s.core[keys::kGraphicsApi] == "OpenGL") s.core[keys::kGraphicsApi] = "Vulkan";
-    for (auto& [title, opts] : s.per_game) {
-        auto it = opts.find(keys::kGraphicsApi);
-        if (it != opts.end() && it->second == "OpenGL") it->second = "Vulkan";
+    // v6: ONYX has its own OpenGL now (experimental, opt-in). "OpenGL" saved by
+    // older builds meant a renderer that was never there, so it moves to Vulkan once.
+    if (s.version < 6) {
+        if (s.core[keys::kGraphicsApi] == "OpenGL") s.core[keys::kGraphicsApi] = "Vulkan";
+        for (auto& [title, opts] : s.per_game) {
+            auto it = opts.find(keys::kGraphicsApi);
+            if (it != opts.end() && it->second == "OpenGL") it->second = "Vulkan";
+        }
+        s.version = 6;
     }
     return s;
 }

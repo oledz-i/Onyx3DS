@@ -1,0 +1,45 @@
+From f17746fe8e042dd2c0cd4029cd909a5ffdb16938 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Tue, 13 Oct 2026 07:52:33 -0400
+Subject: [PATCH 29/30] d3d12: skip desktop-only lookups when built for UWP
+
+D3D12Core.dll side-loading and the PIX capturer search need GetModuleFileName,
+SHGetKnownFolderPath and friends, which Universal Windows apps do not have.
+---
+ src/gallium/drivers/d3d12/d3d12_screen.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+index 90b70e4b..1267e7bd 100644
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -1440,7 +1440,7 @@ d3d12_init_screen_base(struct d3d12_screen *screen, struct sw_winsys *winsys, LU
+    return true;
+ }
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(MESA_UWP)
+ extern "C" IMAGE_DOS_HEADER __ImageBase;
+ static const char *
+ try_find_d3d12core_next_to_self(char *path, DWORD path_arr_size)
+@@ -1478,7 +1478,7 @@ try_find_d3d12core_next_to_self(char *path, DWORD path_arr_size)
+ static ID3D12DeviceFactory *
+ try_create_device_factory(util_dl_library *d3d12_mod)
+ {
+-#if defined(_WIN32) && defined(_WIN64)
++#if defined(_WIN32) && defined(_WIN64) && !defined(MESA_UWP)
+    if (d3d12_debug & D3D12_DEBUG_PIX) {
+       if (GetModuleHandleW(L"WinPixGpuCapturer.dll") == nullptr) {
+          LPWSTR program_files_path = nullptr;
+@@ -1518,7 +1518,7 @@ try_create_device_factory(util_dl_library *d3d12_mod)
+       return nullptr;
+    }
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(MESA_UWP)
+    /* First, try to create a device factory from a DLL-parallel D3D12Core.dll */
+    ID3D12SDKConfiguration *sdk_config = nullptr;
+    if (SUCCEEDED(D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&sdk_config)))) {
+-- 
+2.43.0
+

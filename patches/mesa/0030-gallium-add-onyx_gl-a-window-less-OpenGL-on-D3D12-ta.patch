@@ -1,0 +1,353 @@
+From e170e1279f7751cc431e23e10082fa2b931f819d Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Tue, 13 Oct 2026 07:52:33 -0400
+Subject: [PATCH 30/30] gallium: add onyx_gl, a window-less OpenGL-on-D3D12
+ target for UWP
+
+The WGL front end needs a window, GDI and user32. This target skips it: one
+D3D12 screen, state-tracker contexts with a 1x1 stub default framebuffer, and
+five exported functions (create/make-current/destroy/get-proc-address/error).
+Enabled with -Donyx-gl=true.
+---
+ meson.options                           |   7 +
+ src/gallium/meson.build                 |   5 +-
+ src/gallium/targets/onyx_gl/meson.build |  21 ++
+ src/gallium/targets/onyx_gl/onyx_gl.c   | 253 ++++++++++++++++++++++++
+ src/gallium/targets/onyx_gl/onyx_gl.def |   6 +
+ 5 files changed, 291 insertions(+), 1 deletion(-)
+ create mode 100644 src/gallium/targets/onyx_gl/meson.build
+ create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.c
+ create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.def
+
+diff --git a/meson.options b/meson.options
+index f9c22504..7346705d 100644
+--- a/meson.options
++++ b/meson.options
+@@ -908,3 +908,10 @@ option(
+   value : false,
+   description : 'Build panfrost Rust components.'
+ )
++
++option(
++  'onyx-gl',
++  type : 'boolean',
++  value : false,
++  description : 'ONYX 3DS: build the window-less OpenGL-on-D3D12 library for UWP instead of the WGL driver.'
++)
+diff --git a/src/gallium/meson.build b/src/gallium/meson.build
+index 2a6117c0..bb2cbda2 100644
+--- a/src/gallium/meson.build
++++ b/src/gallium/meson.build
+@@ -235,7 +235,10 @@ endif
+ if with_platform_haiku
+   subdir('frontends/hgl')
+ endif
+-if with_platform_windows
++if with_platform_windows and get_option('onyx-gl')
++  # ONYX 3DS: window-less OpenGL for UWP; the WGL front end needs user32/GDI.
++  subdir('targets/onyx_gl')
++elif with_platform_windows
+   if with_opengl
+     subdir('frontends/wgl')
+     if with_gallium_d3d12
+diff --git a/src/gallium/targets/onyx_gl/meson.build b/src/gallium/targets/onyx_gl/meson.build
+new file mode 100644
+index 00000000..7309c8db
+--- /dev/null
++++ b/src/gallium/targets/onyx_gl/meson.build
+@@ -0,0 +1,21 @@
++# ONYX 3DS: OpenGL on D3D12 for Universal Windows apps, without WGL or a window.
++# SPDX-License-Identifier: MIT
++
++libonyx_gl = shared_library(
++  'onyx_gl',
++  ['onyx_gl.c'],
++  vs_module_defs : 'onyx_gl.def',
++  include_directories : [
++    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_gallium_drivers,
++  ],
++  link_with : [
++    libgallium, libglsl, libmesa, libglapi_bridge, libglapi, libgalliumvl_stub,
++  ],
++  dependencies : [
++    idep_nir, idep_mesautil, driver_d3d12,
++  ],
++  name_prefix : '',
++  install : false,
++)
++
++shared_glapi_lib = libonyx_gl
+diff --git a/src/gallium/targets/onyx_gl/onyx_gl.c b/src/gallium/targets/onyx_gl/onyx_gl.c
+new file mode 100644
+index 00000000..3b38efd0
+--- /dev/null
++++ b/src/gallium/targets/onyx_gl/onyx_gl.c
+@@ -0,0 +1,253 @@
++/*
++ * ONYX 3DS: window-less OpenGL on Mesa's D3D12 driver.
++ *
++ * Mesa's WGL front end (stw) needs a window, a device context, GDI and a
++ * message loop. A Universal Windows app has none of those, and the emulator
++ * never presents through OpenGL anyway: the core draws into its own framebuffer
++ * object and ONYX reads it back. So this file is a tiny replacement front end:
++ * one D3D12 gallium screen, one GL state-tracker context per game, and a
++ * 1x1 default framebuffer the core never uses.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#include <windows.h>
++
++#include "util/u_inlines.h"
++#include "util/u_memory.h"
++#include "util/u_atomic.h"
++#include "pipe/p_screen.h"
++#include "pipe/p_context.h"
++#include "pipe/p_state.h"
++#include "frontend/api.h"
++#include "state_tracker/st_context.h"
++#include "glapi/glapi/glapi.h"
++#include "d3d12/d3d12_public.h"
++
++#define ONYX_GL_API __declspec(dllexport)
++
++struct onyx_drawable {
++   struct pipe_frontend_drawable base;
++   struct st_visual visual;
++   struct pipe_resource *textures[ST_ATTACHMENT_COUNT];
++};
++
++struct onyx_context {
++   struct st_context *st;
++   struct onyx_drawable *drawable;
++};
++
++static struct pipe_frontend_screen *g_fscreen;
++static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
++static uint32_t g_drawable_id;
++static char g_last_error[256];
++
++static void
++set_error(const char *msg)
++{
++   strncpy(g_last_error, msg, sizeof(g_last_error) - 1);
++   g_last_error[sizeof(g_last_error) - 1] = 0;
++}
++
++static int
++onyx_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
++{
++   (void)fscreen;
++   return param == ST_MANAGER_BROKEN_INVALIDATE ? 1 : 0;
++}
++
++static bool
++onyx_flush_front(struct st_context *st, struct pipe_frontend_drawable *d,
++                 enum st_attachment_type statt)
++{
++   (void)st; (void)d; (void)statt;
++   return true;
++}
++
++static bool
++onyx_flush_swap(struct st_context *st, struct pipe_frontend_drawable *d)
++{
++   (void)st; (void)d;
++   return true;
++}
++
++/* The default framebuffer is a 1x1 stub: whatever the state tracker asks for
++ * is created once and handed out again. */
++static bool
++onyx_validate(struct st_context *st, struct pipe_frontend_drawable *d,
++              const enum st_attachment_type *statts, unsigned count,
++              struct pipe_resource **out, struct pipe_resource **resolve)
++{
++   struct onyx_drawable *dr = (struct onyx_drawable *)d;
++   struct pipe_screen *screen = g_fscreen->screen;
++   (void)st;
++
++   for (unsigned i = 0; i < count; i++) {
++      const enum st_attachment_type a = statts[i];
++      out[i] = NULL;
++      if (resolve)
++         resolve[i] = NULL;
++      if (a >= ST_ATTACHMENT_COUNT)
++         continue;
++      if (!(dr->visual.buffer_mask & (1u << a)))
++         continue;
++
++      if (!dr->textures[a]) {
++         struct pipe_resource templ;
++         memset(&templ, 0, sizeof(templ));
++         templ.target = PIPE_TEXTURE_2D;
++         templ.width0 = 1;
++         templ.height0 = 1;
++         templ.depth0 = 1;
++         templ.array_size = 1;
++         templ.nr_samples = templ.nr_storage_samples = 1;
++         if (a == ST_ATTACHMENT_DEPTH_STENCIL) {
++            templ.format = dr->visual.depth_stencil_format;
++            templ.bind = PIPE_BIND_DEPTH_STENCIL;
++         } else {
++            templ.format = dr->visual.color_format;
++            templ.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
++         }
++         dr->textures[a] = screen->resource_create(screen, &templ);
++      }
++      pipe_resource_reference(&out[i], dr->textures[a]);
++   }
++   return true;
++}
++
++static BOOL CALLBACK
++init_screen_once(PINIT_ONCE once, PVOID param, PVOID *ctx)
++{
++   (void)once; (void)param; (void)ctx;
++
++   struct pipe_screen *screen = d3d12_create_dxgi_screen(NULL, NULL);
++   if (!screen) {
++      set_error("the D3D12 graphics device could not be created");
++      return TRUE;
++   }
++   struct pipe_frontend_screen *fs = CALLOC_STRUCT(pipe_frontend_screen);
++   if (!fs) {
++      screen->destroy(screen);
++      set_error("out of memory");
++      return TRUE;
++   }
++   fs->screen = screen;
++   fs->get_param = onyx_get_param;
++   g_fscreen = fs;
++   return TRUE;
++}
++
++static bool
++ensure_screen(void)
++{
++   InitOnceExecuteOnce(&g_once, init_screen_once, NULL, NULL);
++   return g_fscreen != NULL;
++}
++
++static struct onyx_drawable *
++drawable_create(void)
++{
++   struct onyx_drawable *dr = CALLOC_STRUCT(onyx_drawable);
++   if (!dr)
++      return NULL;
++   dr->visual.buffer_mask = ST_ATTACHMENT_FRONT_LEFT_MASK | ST_ATTACHMENT_BACK_LEFT_MASK |
++                            ST_ATTACHMENT_DEPTH_STENCIL_MASK;
++   dr->visual.color_format = PIPE_FORMAT_B8G8R8A8_UNORM;
++   dr->visual.depth_stencil_format = PIPE_FORMAT_Z24_UNORM_S8_UINT;
++   dr->visual.accum_format = PIPE_FORMAT_NONE;
++   dr->visual.samples = 0;
++   dr->base.stamp = 1;
++   dr->base.ID = p_atomic_inc_return(&g_drawable_id);
++   dr->base.fscreen = g_fscreen;
++   dr->base.visual = &dr->visual;
++   dr->base.flush_front = onyx_flush_front;
++   dr->base.validate = onyx_validate;
++   dr->base.flush_swapbuffers = onyx_flush_swap;
++   return dr;
++}
++
++static void
++drawable_destroy(struct onyx_drawable *dr)
++{
++   st_api_destroy_drawable(&dr->base);
++   for (unsigned i = 0; i < ST_ATTACHMENT_COUNT; i++)
++      pipe_resource_reference(&dr->textures[i], NULL);
++   FREE(dr);
++}
++
++/* A core-profile context of at least major.minor (core != 0), or a
++ * compatibility context. Returns NULL on failure; onyx_gl_last_error() says why. */
++ONYX_GL_API void *
++onyx_gl_create_context(int major, int minor, int core)
++{
++   if (!ensure_screen())
++      return NULL;
++
++   struct onyx_context *ctx = CALLOC_STRUCT(onyx_context);
++   if (!ctx) {
++      set_error("out of memory");
++      return NULL;
++   }
++   ctx->drawable = drawable_create();
++   if (!ctx->drawable) {
++      FREE(ctx);
++      set_error("out of memory");
++      return NULL;
++   }
++
++   struct st_context_attribs attribs;
++   memset(&attribs, 0, sizeof(attribs));
++   attribs.visual = ctx->drawable->visual;
++   attribs.major = major;
++   attribs.minor = minor;
++   attribs.profile = core ? API_OPENGL_CORE : API_OPENGL_COMPAT;
++   /* Every driver option stays at zero: no workarounds, nothing capped. */
++
++   enum st_context_error err = ST_CONTEXT_SUCCESS;
++   ctx->st = st_api_create_context(g_fscreen, &attribs, &err, NULL);
++   if (!ctx->st) {
++      set_error(err == ST_CONTEXT_ERROR_BAD_VERSION
++                   ? "this graphics device does not support the OpenGL version requested"
++                   : "the OpenGL context could not be created");
++      drawable_destroy(ctx->drawable);
++      FREE(ctx);
++      return NULL;
++   }
++   return ctx;
++}
++
++ONYX_GL_API int
++onyx_gl_make_current(void *handle)
++{
++   struct onyx_context *ctx = (struct onyx_context *)handle;
++   if (!ctx)
++      return st_api_make_current(NULL, NULL, NULL) ? 1 : 0;
++   return st_api_make_current(ctx->st, &ctx->drawable->base, &ctx->drawable->base) ? 1 : 0;
++}
++
++ONYX_GL_API void
++onyx_gl_destroy_context(void *handle)
++{
++   struct onyx_context *ctx = (struct onyx_context *)handle;
++   if (!ctx)
++      return;
++   if (st_api_get_current() == ctx->st)
++      st_api_make_current(NULL, NULL, NULL);
++   st_destroy_context(ctx->st);
++   drawable_destroy(ctx->drawable);
++   FREE(ctx);
++}
++
++ONYX_GL_API void *
++onyx_gl_get_proc_address(const char *name)
++{
++   if (!name || name[0] != 'g' || name[1] != 'l')
++      return NULL;
++   return (void *)_mesa_glapi_get_proc_address(name);
++}
++
++ONYX_GL_API const char *
++onyx_gl_last_error(void)
++{
++   return g_last_error;
++}
+diff --git a/src/gallium/targets/onyx_gl/onyx_gl.def b/src/gallium/targets/onyx_gl/onyx_gl.def
+new file mode 100644
+index 00000000..7d9451da
+--- /dev/null
++++ b/src/gallium/targets/onyx_gl/onyx_gl.def
+@@ -0,0 +1,6 @@
++EXPORTS
++onyx_gl_create_context
++onyx_gl_make_current
++onyx_gl_destroy_context
++onyx_gl_get_proc_address
++onyx_gl_last_error
+-- 
+2.43.0
+

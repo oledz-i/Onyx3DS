@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The OpenGL half of the libretro hardware-render contract, backed by Mesa's
-// OpenGL-on-D3D12 driver (vendor/mesa-gl: opengl32.dll + libgallium_wgl.dll).
+// The OpenGL half of the libretro hardware-render contract, backed by ONYX's
+// own OpenGL (onyx_gl.dll: Mesa's OpenGL-on-D3D12 driver built from public
+// Mesa sources with our patches, and a window-less front end of ours).
 //
-//   * Load() loads the driver from the app package once.
-//   * CreateContext() runs on the emulation thread: a WGL context with no
-//     window behind it (Mesa then gives it a 1x1 offscreen framebuffer), made
-//     current there for the whole game, plus the framebuffer object the core
-//     draws its output into.
+//   * Load() loads the library from the app package once.
+//   * CreateContext() runs on the emulation thread: a core-profile 4.3 context
+//     with no window behind it (a 1x1 stub default framebuffer), made current
+//     there for the whole game, plus the framebuffer object the core draws
+//     its output into.
 //   * OnFrame() reads that output back with pixel-buffer objects, one frame
 //     behind so the CPU never waits for the GPU, and hands it to the presenter.
 //
@@ -55,8 +56,7 @@ private:
     D3D12Presenter& presenter_;
     HMODULE module_ = nullptr;
     std::unique_ptr<Fn> fn_;
-    void* dc_ = nullptr;      // HDC: a token Mesa uses only as a key
-    void* context_ = nullptr; // HGLRC
+    void* context_ = nullptr; // onyx_gl context
     std::string description_;
 
     // Output framebuffer the core renders into.

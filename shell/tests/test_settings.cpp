@@ -146,7 +146,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
 
     s.version = 1;
     const Settings back = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
-    CHECK(back.version == 5);
+    CHECK(back.version == 6);
     CHECK(back.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 
     // Hardware users stay on Vulkan (OpenGL is not offered in this build).
@@ -155,7 +155,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
     v2.core[keys::kGraphicsApi] = "Vulkan";
     v2.per_game["0004000000055D00"][keys::kGraphicsApi] = "Vulkan";
     const Settings moved = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
-    CHECK(moved.version == 5);
+    CHECK(moved.version == 6);
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000055D00").at(keys::kGraphicsApi) ==
           "Vulkan");
@@ -166,8 +166,12 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
     CHECK(kept.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
 
     Settings gl = Settings::Defaults(ConsoleModel::SeriesS);
-    gl.core[keys::kGraphicsApi] = "OpenGL"; // not offered: means Vulkan
-    CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
+    gl.core[keys::kGraphicsApi] = "OpenGL"; // ONYX's own OpenGL: stays
+    CHECK(Settings::FromJson(gl.ToJson(), ConsoleModel::SeriesS)
+              .EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "OpenGL");
+    gl.version = 5; // saved by an older build, which had no OpenGL: moves to Vulkan once
+    CHECK(Settings::FromJson(gl.ToJson(), ConsoleModel::SeriesS)
+              .EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
     gl.core[keys::kGraphicsApi] = "Direct3D";
     CHECK(gl.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 }
