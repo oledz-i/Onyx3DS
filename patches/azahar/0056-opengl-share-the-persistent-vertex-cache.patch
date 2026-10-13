@@ -1,0 +1,391 @@
+From d5e02f0293f966f1c2d6618d4178809a2365fd75 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 12:40:17 -0400
+Subject: [PATCH] opengl: share the persistent vertex cache with the OpenGL
+ renderer
+
+The cache bookkeeping moves to video_core/vertex_region_cache.h. OpenGL keeps game vertex buffers
+in six 32 MiB GL buffers (glBufferSubData orders the updates against earlier draws, so recycling
+needs no fence) and points the attributes into them; uncached loaders keep the per-draw copy,
+now bounded to the memory region like the Vulkan path.
+---
+ src/tests/video_core/vertex_cache.cpp         |   4 +-
+ src/video_core/CMakeLists.txt                 |   1 +
+ .../renderer_opengl/gl_rasterizer.cpp         | 167 ++++++++++++++++--
+ .../renderer_opengl/gl_rasterizer.h           |   5 +
+ .../renderer_vulkan/vk_rasterizer.cpp         |   2 +-
+ .../renderer_vulkan/vk_rasterizer.h           |   4 +-
+ ...k_vertex_cache.h => vertex_region_cache.h} |   8 +-
+ 7 files changed, 169 insertions(+), 22 deletions(-)
+ rename src/video_core/{renderer_vulkan/vk_vertex_cache.h => vertex_region_cache.h} (98%)
+
+diff --git a/src/tests/video_core/vertex_cache.cpp b/src/tests/video_core/vertex_cache.cpp
+index efe79f4..505cfd2 100644
+--- a/src/tests/video_core/vertex_cache.cpp
++++ b/src/tests/video_core/vertex_cache.cpp
+@@ -8,9 +8,9 @@
+ #include <map>
+ #include <random>
+ #include <vector>
+-#include "video_core/renderer_vulkan/vk_vertex_cache.h"
++#include "video_core/vertex_region_cache.h"
+ 
+-using Vulkan::VertexRegionCache;
++using VideoCore::VertexRegionCache;
+ 
+ namespace {
+ 
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index 006ca1f..0831ae3 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -17,6 +17,7 @@ add_library(video_core STATIC EXCLUDE_FROM_ALL
+     precompiled_headers.h
+     rasterizer_accelerated.cpp
+     rasterizer_accelerated.h
++    vertex_region_cache.h
+     rasterizer_interface.h
+     renderer_base.cpp
+     renderer_base.h
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.cpp b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+index 9a25d6b..bcee2e8 100644
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -2,6 +2,8 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <chrono>
++#include <memory>
+ #include "common/alignment.h"
+ #include "common/assert.h"
+ #include "common/literals.h"
+@@ -111,6 +113,24 @@ RasterizerOpenGL::RasterizerOpenGL(Memory::MemorySystem& memory, Pica::PicaCore&
+     // Set vertex attributes for software shader path
+     state.draw.vertex_array = sw_vao.handle;
+     state.draw.vertex_buffer = vertex_buffer.GetHandle();
++
++    // ONYX: persistent vertex cache, 6 buffers of 32 MiB.
++    {
++        constexpr u32 arena_size = 32 * 1024 * 1024;
++        GLint previous = 0;
++        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previous);
++        for (auto& buffer : vertex_cache_buffers) {
++            buffer.Create();
++            glBindBuffer(GL_ARRAY_BUFFER, buffer.handle);
++            glBufferData(GL_ARRAY_BUFFER, arena_size, nullptr, GL_DYNAMIC_DRAW);
++        }
++        glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(previous));
++        vertex_cache = std::make_unique<VideoCore::VertexRegionCache>(
++            static_cast<u32>(vertex_cache_buffers.size()), arena_size,
++            [this](u32 addr, u32 size, int delta) {
++                res_cache.TrackExternalRegion(addr, size, delta);
++            });
++    }
+     state.Apply();
+ 
+     glVertexAttribPointer(ATTRIBUTE_POSITION, 4, GL_FLOAT, GL_FALSE, sizeof(HardwareVertex),
+@@ -170,6 +190,7 @@ RasterizerOpenGL::~RasterizerOpenGL() = default;
+ 
+ void RasterizerOpenGL::TickFrame() {
+     res_cache.TickFrame();
++    vertex_cache->SetFrame(vertex_cache->Frame() + 1);
+ }
+ 
+ void RasterizerOpenGL::LoadDefaultDiskResources(
+@@ -376,11 +397,94 @@ void RasterizerOpenGL::SetupVertexArray(u8* array_ptr, GLintptr buffer_offset,
+ 
+     std::array<bool, 16> enable_attributes{};
+ 
++    // ONYX: persistent vertex cache. A game vertex buffer is copied once into one of the cache
++    // buffers (as a block covering every range drawn from it) and kept until the game writes to
++    // it; draws point their attributes into the block. Buffers the game keeps rewriting, and
++    // ranges too big for a block, are copied into the stream buffer per draw as before.
++    // OpenGL orders buffer updates against earlier draws itself, so a recycled cache buffer
++    // needs no fence here.
++    u32 pinned_arenas = 0;
++    static u64 st_bytes = 0, st_hit = 0, st_copied = 0, st_streamed = 0, st_draws = 0;
++    static auto st_start = std::chrono::steady_clock::now();
++    ++st_draws;
++
+     for (const auto& loader : vertex_attributes.attribute_loaders) {
+         if (loader.component_count == 0 || loader.byte_count == 0) {
+             continue;
+         }
+ 
++        const PAddr loader_base = base_address + loader.data_offset;
++        const u32 vertex_num = vs_input_index_max - vs_input_index_min + 1;
++        const u32 data_size = loader.byte_count * vertex_num;
++        st_bytes += data_size;
++
++        GLuint attrib_buffer = vertex_buffer.GetHandle();
++        GLintptr attrib_base = buffer_offset;
++        bool placed = false;
++        const u64 key = (static_cast<u64>(loader_base) << 8) ^ loader.byte_count;
++        if (vertex_cache && !vertex_cache->IsVolatile(key)) {
++            u32 arena = 0, cache_offset = 0;
++            if (vertex_cache->Lookup(key, vs_input_index_min, vs_input_index_max, arena,
++                                     cache_offset)) {
++                placed = true;
++                st_hit += data_size;
++            } else {
++                const u32 max_vertices = vertex_cache->MaxBlock() / loader.byte_count;
++                if (vertex_num <= max_vertices) {
++                    const auto range = vertex_cache->PlanRange(key, vs_input_index_min,
++                                                               vs_input_index_max, max_vertices);
++                    const u32 count = range.last - range.first + 1;
++                    const u32 bytes = loader.byte_count * count;
++                    const auto slot = vertex_cache->Reserve(Common::AlignUp(bytes, 4), 16,
++                                                            pinned_arenas);
++                    if (slot.ok()) {
++                        const PAddr src_addr = loader_base + range.first * loader.byte_count;
++                        res_cache.FlushRegion(src_addr, bytes);
++                        const MemoryRef ref = memory.GetPhysicalRef(src_addr);
++                        const u8* src = ref.GetPtr();
++                        const u32 copy =
++                            src ? static_cast<u32>(std::min<std::size_t>(ref.GetSize(), bytes)) : 0;
++                        if (copy) {
++                            state.draw.vertex_buffer = vertex_cache_buffers[slot.arena].handle;
++                            state.Apply();
++                            glBufferSubData(GL_ARRAY_BUFFER, slot.offset, copy, src);
++                        }
++                        vertex_cache->Insert(key, range.first, range.last, loader.byte_count,
++                                             src_addr, copy, slot);
++                        arena = slot.arena;
++                        cache_offset =
++                            slot.offset + (vs_input_index_min - range.first) * loader.byte_count;
++                        placed = true;
++                        st_copied += bytes;
++                    }
++                }
++            }
++            if (placed) {
++                pinned_arenas |= 1u << arena;
++                attrib_buffer = vertex_cache_buffers[arena].handle;
++                attrib_base = cache_offset;
++            }
++        }
++        if (!placed) {
++            const PAddr data_addr = loader_base + vs_input_index_min * loader.byte_count;
++            res_cache.FlushRegion(data_addr, data_size);
++            const MemoryRef ref = memory.GetPhysicalRef(data_addr);
++            const u8* src = ref.GetPtr();
++            const u32 copy =
++                src ? static_cast<u32>(std::min<std::size_t>(ref.GetSize(), data_size)) : 0;
++            if (copy) {
++                std::memcpy(array_ptr, src, copy);
++            }
++            if (copy < data_size) {
++                std::memset(array_ptr + copy, 0, data_size - copy);
++            }
++            st_streamed += data_size;
++        }
++
++        // glVertexAttribPointer reads the buffer bound to GL_ARRAY_BUFFER.
++        state.draw.vertex_buffer = attrib_buffer;
++        state.Apply();
++
+         u32 offset = 0;
+         for (u32 comp = 0; comp < loader.component_count && comp < 12; ++comp) {
+             u32 attribute_index = loader.GetComponent(comp);
+@@ -394,7 +498,7 @@ void RasterizerOpenGL::SetupVertexArray(u8* array_ptr, GLintptr buffer_offset,
+                     GLenum type = MakeAttributeType(vertex_attributes.GetFormat(attribute_index));
+                     GLsizei stride = loader.byte_count;
+                     glVertexAttribPointer(input_reg, size, type, GL_FALSE, stride,
+-                                          reinterpret_cast<GLvoid*>(buffer_offset + offset));
++                                          reinterpret_cast<GLvoid*>(attrib_base + offset));
+                     enable_attributes[input_reg] = true;
+ 
+                     offset += vertex_attributes.GetStride(attribute_index);
+@@ -407,19 +511,29 @@ void RasterizerOpenGL::SetupVertexArray(u8* array_ptr, GLintptr buffer_offset,
+             }
+         }
+ 
+-        const PAddr data_addr =
+-            base_address + loader.data_offset + (vs_input_index_min * loader.byte_count);
+-
+-        const u32 vertex_num = vs_input_index_max - vs_input_index_min + 1;
+-        const u32 data_size = loader.byte_count * vertex_num;
+-
+-        res_cache.FlushRegion(data_addr, data_size);
+-        std::memcpy(array_ptr, memory.GetPhysicalPointer(data_addr), data_size);
+-
++        // The stream space for this loader is used only when it was not cached; it stays
++        // reserved either way (the caller mapped the whole input size).
+         array_ptr += data_size;
+         buffer_offset += data_size;
+     }
+ 
++    // The caller unmaps the stream buffer through GL_ARRAY_BUFFER: bind it again.
++    state.draw.vertex_buffer = vertex_buffer.GetHandle();
++    state.Apply();
++
++    if (const auto now = std::chrono::steady_clock::now(); now - st_start >= std::chrono::seconds(5)) {
++        const auto& cs = vertex_cache->GetStats();
++        LOG_INFO(Render_OpenGL,
++                 "Vertex data: {} MiB drawn in {} draws: {} MiB from the cache, {} MiB copied "
++                 "into it, {} MiB per-draw uploads. Cache: {} blocks, {} MiB watched, {} dropped "
++                 "by game writes, {} buffer turns, {} volatile buffers",
++                 st_bytes >> 20, st_draws, st_hit >> 20, st_copied >> 20, st_streamed >> 20,
++                 cs.entries, cs.tracked_bytes >> 20, cs.invalidations, cs.recycles,
++                 vertex_cache->VolatileKeys());
++        st_bytes = st_hit = st_copied = st_streamed = st_draws = 0;
++        st_start = now;
++    }
++
+     for (std::size_t i = 0; i < enable_attributes.size(); ++i) {
+         if (enable_attributes[i] != hw_vao_enabled_attributes[i]) {
+             if (enable_attributes[i]) {
+@@ -830,31 +944,58 @@ void RasterizerOpenGL::FlushAll() {
+ 
+ void RasterizerOpenGL::FlushRegion(PAddr addr, u32 size) {
+     res_cache.FlushRegion(addr, size);
++    vertex_cache->OnRead(addr, size);
+ }
+ 
+ void RasterizerOpenGL::InvalidateRegion(PAddr addr, u32 size) {
+     res_cache.InvalidateRegion(addr, size);
++    vertex_cache->Invalidate(addr, size);
+ }
+ 
+ void RasterizerOpenGL::FlushAndInvalidateRegion(PAddr addr, u32 size) {
+     res_cache.FlushRegion(addr, size);
+     res_cache.InvalidateRegion(addr, size);
++    vertex_cache->Invalidate(addr, size);
+ }
+ 
+ void RasterizerOpenGL::ClearAll(bool flush) {
++    // The vertex cache releases its page marks through the texture cache's counters first.
++    vertex_cache->Clear();
+     res_cache.ClearAll(flush);
+ }
+ 
++// GPU transfers write guest memory out of sight of the page tracking: drop the vertex blocks
++// copied from their destination.
+ bool RasterizerOpenGL::AccelerateDisplayTransfer(const Pica::DisplayTransferConfig& config) {
+-    return res_cache.AccelerateDisplayTransfer(config);
++    const bool done = res_cache.AccelerateDisplayTransfer(config);
++    if (done) {
++        vertex_cache->Invalidate(config.GetPhysicalOutputAddress(),
++                                 config.output_width * config.output_height * 4);
++    }
++    return done;
+ }
+ 
+ bool RasterizerOpenGL::AccelerateTextureCopy(const Pica::DisplayTransferConfig& config) {
+-    return res_cache.AccelerateTextureCopy(config);
++    const bool done = res_cache.AccelerateTextureCopy(config);
++    if (done) {
++        const u32 copy = config.texture_copy.size & ~15u;
++        const u32 width = config.texture_copy.output_width * 16;
++        const u32 gap = config.texture_copy.output_gap * 16;
++        const u32 span = width ? copy + (copy / width + 1) * gap : copy;
++        vertex_cache->Invalidate(config.GetPhysicalOutputAddress(), span);
++    }
++    return done;
+ }
+ 
+ bool RasterizerOpenGL::AccelerateFill(const Pica::MemoryFillConfig& config) {
+-    return res_cache.AccelerateFill(config);
++    const bool done = res_cache.AccelerateFill(config);
++    if (done) {
++        const u32 start = config.GetStartAddress(), end = config.GetEndAddress();
++        if (end > start) {
++            vertex_cache->Invalidate(start, end - start);
++        }
++    }
++    return done;
+ }
+ 
+ bool RasterizerOpenGL::AccelerateDisplay(const Pica::FramebufferConfig& config,
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.h b/src/video_core/renderer_opengl/gl_rasterizer.h
+index 76a7acb..897918f 100644
+--- a/src/video_core/renderer_opengl/gl_rasterizer.h
++++ b/src/video_core/renderer_opengl/gl_rasterizer.h
+@@ -10,6 +10,7 @@
+ #include "video_core/renderer_opengl/gl_state.h"
+ #include "video_core/renderer_opengl/gl_stream_buffer.h"
+ #include "video_core/renderer_opengl/gl_texture_runtime.h"
++#include "video_core/vertex_region_cache.h"
+ 
+ namespace VideoCore {
+ class RendererBase;
+@@ -116,6 +117,10 @@ private:
+     std::array<bool, 16> hw_vao_enabled_attributes{};
+ 
+     OGLStreamBuffer vertex_buffer;
++    /// ONYX: persistent vertex cache (see vertex_region_cache.h): game vertex buffers kept in
++    /// these GL buffers until the game writes to them.
++    std::array<OGLBuffer, 6> vertex_cache_buffers;
++    std::unique_ptr<VideoCore::VertexRegionCache> vertex_cache;
+     OGLStreamBuffer uniform_buffer;
+     OGLStreamBuffer index_buffer;
+     OGLStreamBuffer texture_buffer;
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 2bb76ae..ce2c57e 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -91,7 +91,7 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
+                 instance, scheduler, BUFFER_USAGE, VERTEX_CACHE_ARENA_SIZE));
+             arena_size = std::min(arena_size, vertex_cache_arenas.back()->Size());
+         }
+-        vertex_cache = std::make_unique<VertexRegionCache>(
++        vertex_cache = std::make_unique<VideoCore::VertexRegionCache>(
+             VERTEX_CACHE_ARENAS, static_cast<u32>(arena_size),
+             [this](u32 addr, u32 size, int delta) {
+                 res_cache.TrackExternalRegion(addr, size, delta);
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index a579640..0c7abd3 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -11,7 +11,7 @@
+ #include <memory>
+ #include <vector>
+ #include "video_core/renderer_vulkan/vk_stream_buffer.h"
+-#include "video_core/renderer_vulkan/vk_vertex_cache.h"
++#include "video_core/vertex_region_cache.h"
+ #include "video_core/renderer_vulkan/vk_texture_runtime.h"
+ 
+ namespace Frontend {
+@@ -130,7 +130,7 @@ private:
+ 
+     /// ONYX: persistent vertex cache (see vk_vertex_cache.h).
+     std::vector<std::unique_ptr<StreamBuffer>> vertex_cache_arenas;
+-    std::unique_ptr<VertexRegionCache> vertex_cache;
++    std::unique_ptr<VideoCore::VertexRegionCache> vertex_cache;
+     std::array<bool, 16> enable_attributes{};
+     std::array<vk::Buffer, 16> vertex_buffers;
+     VertexArrayInfo vertex_info;
+diff --git a/src/video_core/renderer_vulkan/vk_vertex_cache.h b/src/video_core/vertex_region_cache.h
+similarity index 98%
+rename from src/video_core/renderer_vulkan/vk_vertex_cache.h
+rename to src/video_core/vertex_region_cache.h
+index ac9551d..89c1181 100644
+--- a/src/video_core/renderer_vulkan/vk_vertex_cache.h
++++ b/src/video_core/vertex_region_cache.h
+@@ -1,5 +1,5 @@
+-// ONYX: persistent vertex cache with write tracking (bookkeeping only, no Vulkan in here so it
+-// can be tested on its own).
++// ONYX: persistent vertex cache with write tracking (bookkeeping only, no graphics API in here, so
++// the Vulkan and OpenGL renderers share it and it can be tested on its own).
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
+@@ -13,7 +13,7 @@
+ #include <unordered_map>
+ #include <vector>
+ 
+-namespace Vulkan {
++namespace VideoCore {
+ 
+ /**
+  * Keeps converted copies of the game's vertex buffers on the GPU until the game writes to them.
+@@ -415,4 +415,4 @@ private:
+     Stats stats;
+ };
+ 
+-} // namespace Vulkan
++} // namespace VideoCore
+-- 
+2.43.0
+
