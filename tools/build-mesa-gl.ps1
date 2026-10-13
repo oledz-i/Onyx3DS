@@ -38,7 +38,7 @@ Invoke-Checked meson @mesonArgs @reconfigure
 Write-Step "Building onyx_gl.dll"
 $out = Join-Path $build "src\gallium\targets\onyx_gl\onyx_gl.dll"
 Remove-Item $out -ErrorAction SilentlyContinue
-Invoke-Checked ninja -k 0 -C $build
+Invoke-Checked ninja -k 0 -C $build src/gallium/targets/onyx_gl/onyx_gl.dll
 if (!(Test-Path $out)) { throw "onyx_gl.dll was not produced" }
 
 # The console refuses to start an app whose DLLs import anything outside the

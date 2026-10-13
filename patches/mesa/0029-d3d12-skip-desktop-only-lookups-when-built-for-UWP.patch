@@ -1,4 +1,4 @@
-From f17746fe8e042dd2c0cd4029cd909a5ffdb16938 Mon Sep 17 00:00:00 2001
+From ba02947d9b7b0a4251a9102c03352ab25c0eee3f Mon Sep 17 00:00:00 2001
 From: Jayden Holley <jaydenlholley@gmail.com>
 Date: Tue, 13 Oct 2026 07:52:33 -0400
 Subject: [PATCH 29/30] d3d12: skip desktop-only lookups when built for UWP
@@ -6,13 +6,22 @@ Subject: [PATCH 29/30] d3d12: skip desktop-only lookups when built for UWP
 D3D12Core.dll side-loading and the PIX capturer search need GetModuleFileName,
 SHGetKnownFolderPath and friends, which Universal Windows apps do not have.
 ---
- src/gallium/drivers/d3d12/d3d12_screen.cpp | 6 +++---
- 1 file changed, 3 insertions(+), 3 deletions(-)
+ src/gallium/drivers/d3d12/d3d12_screen.cpp | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
 
 diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3d12/d3d12_screen.cpp
-index 90b70e4b..1267e7bd 100644
+index 90b70e4b..3340454d 100644
 --- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
 +++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -746,7 +746,7 @@ d3d12_flush_frontbuffer(struct pipe_screen * pscreen,
+       winsys->displaytarget_unmap(winsys, res->dt);
+    }
+ 
+-#if defined(_WIN32) && !defined(_GAMING_XBOX) && defined(HAVE_GALLIUM_D3D12_GRAPHICS)
++#if defined(_WIN32) && !defined(_GAMING_XBOX) && !defined(MESA_UWP) && defined(HAVE_GALLIUM_D3D12_GRAPHICS)
+    // WindowFromDC is Windows-only, and this method requires an HWND, so only use it on Windows
+    ID3D12SharingContract *sharing_contract;
+    if (SUCCEEDED(screen->cmdqueue->QueryInterface(IID_PPV_ARGS(&sharing_contract)))) {
 @@ -1440,7 +1440,7 @@ d3d12_init_screen_base(struct d3d12_screen *screen, struct sw_winsys *winsys, LU
     return true;
  }

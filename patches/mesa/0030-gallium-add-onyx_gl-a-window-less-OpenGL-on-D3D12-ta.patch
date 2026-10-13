@@ -1,8 +1,8 @@
-From a1082607eebd98a54c5a2fef2051380a5c3ea6ef Mon Sep 17 00:00:00 2001
+From 57c96ddae318ee57cb654f98d5531674135f5d02 Mon Sep 17 00:00:00 2001
 From: Jayden Holley <jaydenlholley@gmail.com>
 Date: Tue, 13 Oct 2026 07:52:33 -0400
-Subject: [PATCH] gallium: add onyx_gl, a window-less OpenGL-on-D3D12 target
- for UWP
+Subject: [PATCH 30/30] gallium: add onyx_gl, a window-less OpenGL-on-D3D12
+ target for UWP
 
 The WGL front end needs a window, GDI and user32. This target skips it: one
 D3D12 screen, state-tracker contexts with a 1x1 stub default framebuffer, and
