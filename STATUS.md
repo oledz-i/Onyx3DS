@@ -283,3 +283,10 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - onyx_10 log: the "OpenGL" run was really Vulkan ("OpenGL renderer requested but unavailable; using Vulkan"): the context is 4.1 because Mesa hides ARB_shader_image_load_store (Xbox lacks typed UAV loads for some extra formats), ARB_compute_shader (needs images) and ARB_texture_view (needs relaxed format casting).
 - 0034 (MESA_UWP builds only): shader images on, still refused per format without typed UAV load/store; texture views on (Azahar only makes same-format views). Expected: "OpenGL context ... 4.3" and the game really running on OpenGL. Risk: a cast view or an image format the driver can't do fails at use time instead of being hidden.
 - Same log: Smash in-game was clean on Vulkan this time while onyx_9 (same renderer, same build) showed static. Consistent with the leftover-memory cause behind 0057.
+
+## Roadmap (tester, Tue 2026-10-13)
+- Publish v3.1.0 when the tester says go (draft notes in docs/releases/v3.1.0.md; keep ALPHA).
+- v3.1.1 (small, simple): (1) "mark glitch" hotkey that writes a timestamped marker plus render stats into the log; (2) "export log" action that copies the log into the games folder the app already has access to (no Device Portal needed); (3) a built-in known-good settings table per game (renderer, resolution, Complete graphics, hardware shaders), applied below the player's own per-game choices. Dropped for now: first-launch "preparing graphics" notice.
+- After that: rename to OnyxEMU (ONYX). Change visible names, branding, docs and repo; keep the internal package identity (ONYX3DS_fk1pg3tf3839a) so saves and settings carry over; any identity change waits for a major version with a one-time import.
+- Then a DS spike: melonDS preferred over DeSmuME (accuracy, x64 JIT, GPU renderer through OpenGL 4.3 once that works on console; software renderer first). Build as another libretro core in CI like mGBA/FCEUmm; no BIOS bundled. Unverified: UWP build, JIT, firmware needs.
+- Netplay stays its own major update.
