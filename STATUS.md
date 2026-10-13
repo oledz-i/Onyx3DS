@@ -233,3 +233,4 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Focus: Vulkan on Old 3DS mode (60 and 30 fps options), then stabilise Vulkan for New 3DS mode. No new features.
 - Tester note: "Complete graphics" did not fix the Zelda logo spots, but models looked better. Logo is low priority.
 - Waiting on the test of the pipeline cache and SteamGridDB (logs wanted: "PSO cache" lines, "Artwork:" lines).
+- Added to the next build (tester, Mon 2026-10-12 night): crossbar stays an optional setting (already is, off by default). New optional "Cartridge" tile style: 3DS, GBA and NES games drawn as generic cartridge shapes (original vector art, no Nintendo logos) with the game's cover as the label.
