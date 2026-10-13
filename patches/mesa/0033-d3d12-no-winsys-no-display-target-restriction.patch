@@ -1,0 +1,40 @@
+From 88ed1278d0422cab53d97d5e439fee4c31fdb3f9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 12:36:10 -0400
+Subject: [PATCH] d3d12: no winsys means no display-target restriction
+ (window-less front ends)
+
+d3d12_is_format_supported dereferenced screen->winsys for PIPE_BIND_DISPLAY_TARGET; a screen
+created without one (ONYX's window-less OpenGL) crashed in st_framebuffer_create when the first
+context was made current. Same for get_fd.
+---
+ src/gallium/drivers/d3d12/d3d12_screen.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+index 3340454d..df1f81ab 100644
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -519,7 +519,9 @@ d3d12_is_format_supported(struct pipe_screen *pscreen,
+       UNREACHABLE("Unknown target");
+    }
+ 
+-   if (bind & PIPE_BIND_DISPLAY_TARGET) {
++   /* Without a winsys (a front end that never presents, e.g. ONYX's window-less
++    * one) there are no display targets to restrict: the D3D12 check below decides. */
++   if ((bind & PIPE_BIND_DISPLAY_TARGET) && screen->winsys) {
+       enum pipe_format dt_format = format == PIPE_FORMAT_R16G16B16A16_FLOAT ? PIPE_FORMAT_R8G8B8A8_UNORM : format;
+       if (!screen->winsys->is_displaytarget_format_supported(screen->winsys, bind, dt_format))
+          return false;
+@@ -1205,7 +1207,7 @@ d3d12_screen_get_fd(struct pipe_screen *pscreen)
+    struct d3d12_screen *screen = d3d12_screen(pscreen);
+    struct sw_winsys *winsys = screen->winsys;
+ 
+-   if (winsys->get_fd)
++   if (winsys && winsys->get_fd)
+       return winsys->get_fd(winsys);
+    else
+       return -1;
+-- 
+2.43.0
+

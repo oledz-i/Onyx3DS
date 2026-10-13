@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
+#include <algorithm>
+#include <vector>
 #include <atomic>
 #include <chrono>
 #include "Emu/GlHost.h"
@@ -29,6 +31,8 @@ constexpr GLenum GL_RENDERER = 0x1F01;
 constexpr GLenum GL_VERSION = 0x1F02;
 constexpr GLenum GL_MAJOR_VERSION = 0x821B;
 constexpr GLenum GL_MINOR_VERSION = 0x821C;
+constexpr GLenum GL_EXTENSIONS = 0x1F03;
+constexpr GLenum GL_NUM_EXTENSIONS = 0x821D;
 constexpr GLenum GL_RGBA = 0x1908;
 constexpr GLenum GL_RGBA8 = 0x8058;
 constexpr GLenum GL_UNSIGNED_BYTE = 0x1401;
@@ -73,6 +77,7 @@ struct GlHost::Fn {
     // GL 1.1
     GLenum(APIENTRY* GetError)() = nullptr;
     const GLubyte*(APIENTRY* GetString)(GLenum) = nullptr;
+    const GLubyte*(APIENTRY* GetStringi)(GLenum, GLuint) = nullptr;
     void(APIENTRY* GetIntegerv)(GLenum, GLint*) = nullptr;
     void(APIENTRY* PixelStorei)(GLenum, GLint) = nullptr;
     void(APIENTRY* ReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*) = nullptr;
@@ -160,6 +165,7 @@ bool GlHost::LoadFunctions(std::string& error) {
     };
     load(f.GetError, "glGetError");
     load(f.GetString, "glGetString");
+    load(f.GetStringi, "glGetStringi");
     load(f.GetIntegerv, "glGetIntegerv");
     load(f.PixelStorei, "glPixelStorei");
     load(f.ReadPixels, "glReadPixels");
@@ -222,6 +228,43 @@ bool GlHost::CreateContext(unsigned max_width, unsigned max_height, bool depth, 
     ONYX_INFO("OpenGL context: %s / %s (version %d.%d)", str(GL_VENDOR).c_str(),
               description_.c_str(), major, minor);
     if (major < 4 || (major == 4 && minor < 3)) {
+        // Say which of the pieces OpenGL 4.0-4.3 is made of this driver lacks, so the log
+        // shows what holds the version back.
+        static const char* const kNeeded[] = {
+            "GL_ARB_gpu_shader5", "GL_ARB_gpu_shader_fp64", "GL_ARB_tessellation_shader",
+            "GL_ARB_texture_cube_map_array", "GL_ARB_texture_gather", "GL_ARB_draw_indirect",
+            "GL_ARB_sample_shading", "GL_ARB_shader_subroutine", "GL_ARB_transform_feedback2",
+            "GL_ARB_transform_feedback3", "GL_ARB_texture_buffer_object_rgb32",
+            "GL_ARB_shader_image_load_store", "GL_ARB_shader_atomic_counters",
+            "GL_ARB_texture_storage", "GL_ARB_base_instance", "GL_ARB_conservative_depth",
+            "GL_ARB_shading_language_420pack", "GL_ARB_internalformat_query",
+            "GL_ARB_map_buffer_alignment", "GL_ARB_texture_compression_bptc",
+            "GL_ARB_compute_shader", "GL_ARB_shader_storage_buffer_object",
+            "GL_ARB_texture_view", "GL_ARB_vertex_attrib_binding", "GL_KHR_debug",
+            "GL_ARB_ES3_compatibility", "GL_ARB_multi_draw_indirect", "GL_ARB_arrays_of_arrays",
+            "GL_ARB_fragment_layer_viewport", "GL_ARB_program_interface_query",
+            "GL_ARB_robust_buffer_access_behavior", "GL_ARB_stencil_texturing",
+            "GL_ARB_texture_buffer_range", "GL_ARB_texture_query_levels",
+            "GL_ARB_texture_storage_multisample", "GL_ARB_copy_image",
+            "GL_ARB_explicit_uniform_location", "GL_ARB_framebuffer_no_attachments",
+            "GL_ARB_internalformat_query2", "GL_ARB_invalidate_subdata",
+            "GL_ARB_clear_buffer_object", "GL_ARB_viewport_array"};
+        std::string missing;
+        GLint count = 0;
+        f.GetIntegerv(GL_NUM_EXTENSIONS, &count);
+        std::vector<std::string> have;
+        for (GLint i = 0; i < count; ++i) {
+            const auto* e = reinterpret_cast<const char*>(f.GetStringi(GL_EXTENSIONS, i));
+            if (e) have.emplace_back(e);
+        }
+        for (const char* n : kNeeded) {
+            if (std::find(have.begin(), have.end(), n) == have.end()) {
+                missing += missing.empty() ? "" : ", ";
+                missing += n;
+            }
+        }
+        ONYX_INFO("OpenGL: %d extensions; missing for 4.3: %s", count,
+                  missing.empty() ? "none (a limit holds the version back)" : missing.c_str());
         error = "OpenGL " + std::to_string(major) + "." + std::to_string(minor) +
                 " is below the 4.3 the emulator needs";
         DestroyContext();
