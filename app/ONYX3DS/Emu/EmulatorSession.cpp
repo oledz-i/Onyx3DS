@@ -405,6 +405,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     g_core_tag = game.system == GameSystem::Gba ? "mgba" : nes ? "fceumm" : "azahar";
     core_fps_ = kCoreFps;
     pixel_format_ = RETRO_PIXEL_FORMAT_XRGB8888;
+    std::string renderer_note;
     {
         std::lock_guard lock(options_mutex_);
         // NES: the user's palette / overscan choices; every other FCEUmm option keeps the
@@ -426,8 +427,11 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
             std::string api = "Software";
             if (want == "OpenGL") api = gl_ok_ ? "OpenGL" : vulkan_ok_ ? "Vulkan" : "Software";
             else if (want == "Vulkan") api = vulkan_ok_ ? "Vulkan" : gl_ok_ ? "OpenGL" : "Software";
-            if (api != want && want != "Software")
+            if (api != want && want != "Software") {
                 ONYX_WARN("%s renderer requested but unavailable; using %s", want.c_str(), api.c_str());
+                // Say it on screen too: the setting showed OpenGL while the game ran on Vulkan.
+                renderer_note = want + " isn't available on this console; running on " + api;
+            }
             options_[keys::kGraphicsApi] = api;
             use_gl_ = api == "OpenGL";
             software_ = api == "Software";
@@ -463,6 +467,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
                       options_[keys::kCpuJit] == "disabled" ? "interpreter" : "JIT", frame_lock_.load());
         }
     }
+    if (!renderer_note.empty()) Message(renderer_note);
     _putenv_s("ONYX_COMPLETE_SHADERS", settings.qol.complete_shaders ? "1" : "0");
     {
         // Compiled GPU pipelines are kept per game, so a scene seen before loads without the 1-3 s compiles.
