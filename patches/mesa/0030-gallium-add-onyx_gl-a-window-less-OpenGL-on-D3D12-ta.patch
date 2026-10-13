@@ -1,8 +1,8 @@
-From 57c96ddae318ee57cb654f98d5531674135f5d02 Mon Sep 17 00:00:00 2001
+From 0df1665d7c0c80ff753862b1de5a39ad8e935ee8 Mon Sep 17 00:00:00 2001
 From: Jayden Holley <jaydenlholley@gmail.com>
 Date: Tue, 13 Oct 2026 07:52:33 -0400
-Subject: [PATCH 30/30] gallium: add onyx_gl, a window-less OpenGL-on-D3D12
- target for UWP
+Subject: [PATCH] gallium: add onyx_gl, a window-less OpenGL-on-D3D12 target
+ for UWP
 
 The WGL front end needs a window, GDI and user32. This target skips it: one
 D3D12 screen, state-tracker contexts with a 1x1 stub default framebuffer, and
@@ -12,9 +12,9 @@ Enabled with -Donyx-gl=true.
  meson.options                           |   7 +
  src/gallium/meson.build                 |   5 +-
  src/gallium/targets/onyx_gl/meson.build |  35 ++++
- src/gallium/targets/onyx_gl/onyx_gl.c   | 253 ++++++++++++++++++++++++
+ src/gallium/targets/onyx_gl/onyx_gl.c   | 255 ++++++++++++++++++++++++
  src/gallium/targets/onyx_gl/onyx_gl.def |   6 +
- 5 files changed, 305 insertions(+), 1 deletion(-)
+ 5 files changed, 307 insertions(+), 1 deletion(-)
  create mode 100644 src/gallium/targets/onyx_gl/meson.build
  create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.c
  create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.def
@@ -93,10 +93,10 @@ index 00000000..81c94607
 +shared_glapi_lib = libonyx_gl
 diff --git a/src/gallium/targets/onyx_gl/onyx_gl.c b/src/gallium/targets/onyx_gl/onyx_gl.c
 new file mode 100644
-index 00000000..3b38efd0
+index 00000000..b8a1d0a3
 --- /dev/null
 +++ b/src/gallium/targets/onyx_gl/onyx_gl.c
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,255 @@
 +/*
 + * ONYX 3DS: window-less OpenGL on Mesa's D3D12 driver.
 + *
@@ -110,17 +110,19 @@ index 00000000..3b38efd0
 + * SPDX-License-Identifier: MIT
 + */
 +
-+#include <windows.h>
-+
++/* Mesa's GL headers refuse to be included after <windows.h>: they go first. */
++#include "state_tracker/st_context.h"
++#include "frontend/api.h"
++#include "glapi/glapi/glapi.h"
 +#include "util/u_inlines.h"
 +#include "util/u_memory.h"
 +#include "util/u_atomic.h"
 +#include "pipe/p_screen.h"
 +#include "pipe/p_context.h"
 +#include "pipe/p_state.h"
-+#include "frontend/api.h"
-+#include "state_tracker/st_context.h"
-+#include "glapi/glapi/glapi.h"
++
++#include <windows.h>
++
 +#include "d3d12/d3d12_public.h"
 +
 +#define ONYX_GL_API __declspec(dllexport)
