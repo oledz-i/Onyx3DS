@@ -75,4 +75,8 @@ if ($bad) {
 $desktop = (& dumpbin /dependents $out) -match '^\s+VCRUNTIME140(_1)?\.dll\s*$'
 if ($desktop) { throw "onyx_gl.dll still links the desktop C++ runtime" }
 Copy-Item $out (Join-Path $DepsBin "onyx_gl.dll") -Force
+# Linker map, for decoding crash offsets in onyx_gl.dll from a player's log.
+$map = [IO.Path]::ChangeExtension($out, ".map")
+if (!(Test-Path $map)) { $map = Join-Path $build "onyx_gl.map" }
+if (Test-Path $map) { Copy-Item $map (Join-Path $DepsBin "onyx_gl.map") -Force }
 Write-Host "Wrote $DepsBin\onyx_gl.dll" -ForegroundColor Green

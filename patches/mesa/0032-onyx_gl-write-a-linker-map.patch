@@ -1,0 +1,26 @@
+From ab8d52e91c6060faf38b2687941f6cc6c382ef9d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 12:25:38 -0400
+Subject: [PATCH] onyx_gl: write a linker map (decoding crash offsets from
+ player logs)
+
+---
+ src/gallium/targets/onyx_gl/meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/gallium/targets/onyx_gl/meson.build b/src/gallium/targets/onyx_gl/meson.build
+index 81c94607..87873128 100644
+--- a/src/gallium/targets/onyx_gl/meson.build
++++ b/src/gallium/targets/onyx_gl/meson.build
+@@ -5,7 +5,7 @@
+ # Meson's configure-time test programs still link and run on the build machine.
+ # ONYX_STORE_LIBS: the app-flavoured C/C++ runtime libraries; /LIBPATH is searched
+ # before the LIB environment variable.
+-_onyx_gl_link = ['/APPCONTAINER', 'WindowsApp.lib', 'd3d12.lib', 'dxgi.lib']
++_onyx_gl_link = ['/APPCONTAINER', 'WindowsApp.lib', 'd3d12.lib', 'dxgi.lib', '/MAP']
+ _onyx_store = run_command(
+   prog_python, '-c', 'import os; print(os.environ.get("ONYX_STORE_LIBS", ""))',
+   check : true,
+-- 
+2.43.0
+

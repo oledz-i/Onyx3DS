@@ -135,7 +135,9 @@ jobs:
           name: mesagl-bin
           retention-days: 3
           if-no-files-found: ignore
-          path: deps/bin/onyx_gl.dll
+          path: |
+            deps/bin/onyx_gl.dll
+            deps/bin/onyx_gl.map
 
   # Optional NES core. The step is allowed to fail: the job still succeeds, no
   # artifact is uploaded, the package is built without fceumm_libretro.dll and
@@ -361,6 +363,11 @@ jobs:
         with:
           name: DEV-BUILD-UNTESTED-ONYX3DS
           path: pkg
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: mesagl-bin
+          path: gl
       - name: Upload the map
         env:
           GH_TOKEN: ${{ github.token }}
@@ -375,6 +382,11 @@ jobs:
             --title "Developer debug files (not an install)" --notes "$notes"
           gh release edit dev --prerelease --title "Developer debug files (not an install)" --notes "$notes" 
           gh release upload dev "ONYX3DS-$stamp.map" --clobber
+          if [ -f gl/onyx_gl.map ]; then
+            glstamp=$(grep -m1 -oP 'Timestamp is \K[0-9a-f]+' gl/onyx_gl.map || echo x)
+            cp gl/onyx_gl.map "onyx_gl-$glstamp.map"
+            gh release upload dev "onyx_gl-$glstamp.map" --clobber
+          fi
           # keep the newest 6
           gh release view dev --json assets --jq '.assets|sort_by(.createdAt)|reverse|.[6:]|.[].name' |
             while read -r n; do gh release delete-asset dev "$n" -y; done
