@@ -9,6 +9,12 @@ Use-VsDevShell
 $src = Join-Path $Deps "mesa"
 $build = Join-Path $DepsBuild "mesa-gl"
 $uwp = "-DMESA_UWP=1 -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00 /wd4189"
+# The app C runtime exports a few C11 thread functions under the same names as
+# Mesa's own (call_once, mtx_*, thrd_*). Mesa's get other names, so the DLL does
+# not import VCRUNTIME140_THREADS_APP.dll, which the console may not have.
+$uwp += " -Dcall_once=onyx_call_once -Dmtx_init=onyx_mtx_init -Dmtx_destroy=onyx_mtx_destroy"
+$uwp += " -Dmtx_lock=onyx_mtx_lock -Dmtx_unlock=onyx_mtx_unlock"
+$uwp += " -Dthrd_current=onyx_thrd_current -Dthrd_equal=onyx_thrd_equal"
 $store = Join-Path $env:VCToolsInstallDir "lib\x64\store"
 if (!(Test-Path (Join-Path $store "msvcrt.lib"))) { throw "Store CRT libs not found in $store" }
 
@@ -27,7 +33,7 @@ $mesonArgs = @(
     "-Dgbm=disabled", "-Dllvm=disabled", "-Dshader-cache=disabled", "-Dbuild-tests=false",
     "-Dmicrosoft-clc=disabled", "-Dspirv-to-dxil=false", "-Dvideo-codecs=",
     "-Dgallium-d3d12-video=disabled", "-Dgallium-va=disabled", "-Dgallium-mediafoundation=disabled",
-    "-Dzstd=disabled", "-Dxmlconfig=disabled", "-Dvalgrind=disabled", "-Dlibunwind=disabled",
+    "-Dzstd=disabled", "-Dzlib=disabled", "-Dxmlconfig=disabled", "-Dvalgrind=disabled", "-Dlibunwind=disabled",
     "-Dmesa-clc=auto", "-Dprecomp-compiler=auto",
     "-Dc_args=$uwp", "-Dcpp_args=$uwp", "-Dc_link_args=", "-Dcpp_link_args="
 )
