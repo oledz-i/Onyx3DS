@@ -257,3 +257,8 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Settings: "Hardware (OpenGL, experimental)" is selectable again (settings v6). Falls back to Vulkan when the DLL is not in the package.
 - Nothing here has been built yet; first CI run will show the Mesa compile/link problems, if any.
 - CI result: onyx_gl.dll builds, links, passes the Xbox import check and is in the package (build with "OpenGL: driver messages go to the app log"). NOT yet run on a console. Fixes it took: no WindowFromDC/GetModuleFileName on UWP, GL headers before windows.h, Mesa's C11 thread functions renamed (the app runtime exports the same names), zlib off, configure with desktop libs and keep the UWP link line on the target only.
+
+## Persistent vertex cache (Azahar patch 0054, unverified on console)
+- Vertex blocks are content-addressed (XXH3 of the guest bytes + layout) and kept in 4 x 24 MiB arenas; a repeat draw binds the old copy instead of copying. Arenas are recycled oldest first after waiting for the GPU.
+- Switches itself off (no hashing) while under 20% of the bytes are found again, probing once per few seconds.
+- Bookkeeping is tested on Linux (stale-data, recycle-wait and bypass tests); the Vulkan side is only compile-tested by CI. The 5 s "Vertex data:" log line now shows MiB wanted / served by the cache / uploaded.
