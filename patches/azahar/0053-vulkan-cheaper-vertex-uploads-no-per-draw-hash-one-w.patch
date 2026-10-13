@@ -1,0 +1,138 @@
+From d1ca88751cbf3896da67848bd18ca90e3870f8d9 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Tue, 13 Oct 2026 10:02:15 -0400
+Subject: [PATCH] vulkan: cheaper vertex uploads (no per-draw hash, one write
+ per repacked vertex)
+
+The block cache hashed every byte of every draw's vertices to reuse 6% of them,
+and the realign path zero-filled each block and then copied 12 attributes per
+vertex with tiny memcpys into write-combined memory. In a Mario Kart 7 race that
+was the largest cost on the emulation thread.
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         | 91 +++++++++++--------
+ 1 file changed, 55 insertions(+), 36 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 543abac..e9996d3 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -420,52 +420,73 @@ void RasterizerVulkan::SetupVertexArray() {
+         const u32 loader_stride = repack.repack ? repack.stride : static_cast<u32>(loader.byte_count);
+         const u32 aligned_stride = Common::AlignUp(loader_stride, stride_alignment);
+         const u32 block_size = Common::AlignUp(aligned_stride * vertex_num, 4);
+-        u64 key = Common::ComputeHash64(src_ptr, copy_size);
+-        key ^= (static_cast<u64>(data_addr) << 32) ^ (static_cast<u64>(vertex_num) << 7) ^
+-               (static_cast<u64>(aligned_stride) << 1) ^ (repack.repack ? 0x9E3779B97F4A7C15ull : 0);
+-        if (repack.repack) {
+-            key = Common::ComputeHash64(&repack, sizeof(repack)) ^ (key * 0x100000001B3ull);
+-        }
++        // ONYX: no content hash and no block cache. It hashed every byte of every draw's
++        // vertices to save 6% of the copies, which cost more than it saved.
+         u32 loader_offset = 0;
+-        bool cached = false;
+-        for (auto& e : vertex_cache) {
+-            if (e.size == block_size && e.key == key) {
+-                loader_offset = e.offset;
+-                cached = true;
+-                break;
+-            }
+-        }
++        const bool cached = false;
+         st_bytes += block_size;
+         st_max = std::max<u64>(st_max, block_size);
+         u8* dst_ptr = nullptr;
+-        if (cached) {
+-            st_hits++;
+-            st_saved += block_size;
+-        } else {
++        {
+             auto [map_ptr, map_offset, wrapped] = stream_buffer.Map(block_size, 16);
+             dst_ptr = map_ptr;
+             loader_offset = map_offset;
+-            if (wrapped) {
+-                // The buffer restarted: anything cached earlier may now be overwritten.
+-                vertex_cache_wrap = stream_buffer.WrapCount();
+-                for (auto& e : vertex_cache) {
+-                    e.size = 0;
+-                }
+-            }
++            (void)wrapped;
+         }
+         if (cached) {
+             // Nothing to copy.
+         } else if (repack.repack) {
+-            // Copy each attribute to its aligned place, vertex by vertex.
+-            std::memset(dst_ptr, 0, static_cast<std::size_t>(aligned_stride) * vertex_num);
++            // Copy each attribute to its aligned place. The copy list is built once (runs that
++            // are already side by side in both layouts are merged), each vertex is assembled in
++            // a small zeroed buffer and written to the upload memory once, front to back: that
++            // memory is write-combined, and the old zero-fill of the whole block followed by
++            // 12 tiny copies per vertex was the biggest cost in a Mario Kart 7 race.
++            struct CopyOp {
++                u32 src, dst, len;
++            };
++            std::array<CopyOp, 12> ops;
++            std::size_t op_count = 0;
++            for (u32 comp = 0; comp < 12; comp++) {
++                if (!repack.size[comp]) {
++                    continue;
++                }
++                if (op_count && ops[op_count - 1].src + ops[op_count - 1].len == repack.src_offset[comp] &&
++                    ops[op_count - 1].dst + ops[op_count - 1].len == repack.dst_offset[comp]) {
++                    ops[op_count - 1].len += repack.size[comp];
++                } else {
++                    ops[op_count++] = {repack.src_offset[comp], repack.dst_offset[comp],
++                                       repack.size[comp]};
++                }
++            }
+             const std::size_t whole = loader.byte_count ? copy_size / loader.byte_count : 0;
+-            for (std::size_t vertex = 0; vertex < whole && vertex < vertex_num; vertex++) {
+-                const u8* from = src_ptr + vertex * loader.byte_count;
+-                u8* to = dst_ptr + vertex * aligned_stride;
+-                for (u32 comp = 0; comp < 12; comp++) {
+-                    if (repack.size[comp]) {
+-                        std::memcpy(to + repack.dst_offset[comp], from + repack.src_offset[comp],
+-                                    repack.size[comp]);
++            if (aligned_stride <= 512) {
++                alignas(16) u8 tmp[512];
++                const std::size_t count = std::min<std::size_t>(whole, vertex_num);
++                for (std::size_t vertex = 0; vertex < count; vertex++) {
++                    const u8* from = src_ptr + vertex * loader.byte_count;
++                    std::memset(tmp, 0, aligned_stride);
++                    for (std::size_t o = 0; o < op_count; o++) {
++                        switch (ops[o].len) {
++                        case 4: std::memcpy(tmp + ops[o].dst, from + ops[o].src, 4); break;
++                        case 8: std::memcpy(tmp + ops[o].dst, from + ops[o].src, 8); break;
++                        case 12: std::memcpy(tmp + ops[o].dst, from + ops[o].src, 12); break;
++                        case 16: std::memcpy(tmp + ops[o].dst, from + ops[o].src, 16); break;
++                        default: std::memcpy(tmp + ops[o].dst, from + ops[o].src, ops[o].len); break;
++                        }
++                    }
++                    std::memcpy(dst_ptr + vertex * aligned_stride, tmp, aligned_stride);
++                }
++                if (count < vertex_num) {
++                    std::memset(dst_ptr + count * aligned_stride, 0,
++                                (vertex_num - count) * static_cast<std::size_t>(aligned_stride));
++                }
++            } else {
++                std::memset(dst_ptr, 0, static_cast<std::size_t>(aligned_stride) * vertex_num);
++                for (std::size_t vertex = 0; vertex < whole && vertex < vertex_num; vertex++) {
++                    const u8* from = src_ptr + vertex * loader.byte_count;
++                    u8* to = dst_ptr + vertex * aligned_stride;
++                    for (std::size_t o = 0; o < op_count; o++) {
++                        std::memcpy(to + ops[o].dst, from + ops[o].src, ops[o].len);
+                     }
+                 }
+             }
+@@ -495,8 +516,6 @@ void RasterizerVulkan::SetupVertexArray() {
+         binding_offsets[layout.binding_count++] = loader_offset;
+         if (!cached) {
+             stream_buffer.Commit(block_size);
+-            auto& slot = vertex_cache[vertex_cache_next++ % vertex_cache.size()];
+-            slot = {key, loader_offset, block_size};
+         }
+     }
+ 
+-- 
+2.43.0
+
