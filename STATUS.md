@@ -290,3 +290,8 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - After that: rename to OnyxEMU (ONYX). Change visible names, branding, docs and repo; keep the internal package identity (ONYX3DS_fk1pg3tf3839a) so saves and settings carry over; any identity change waits for a major version with a one-time import.
 - Then a DS spike: melonDS preferred over DeSmuME (accuracy, x64 JIT, GPU renderer through OpenGL 4.3 once that works on console; software renderer first). Build as another libretro core in CI like mGBA/FCEUmm; no BIOS bundled. Unverified: UWP build, JIT, firmware needs.
 - Netplay stays its own major update.
+
+## Dropped frames after 0057 (build 154 log, MK7)
+- onyx_8 (build 150): no "frames dropped because the GPU was still reading the upload buffer" lines at all. Build 154 (onyx.log): 449 dropped by the end, about 1-2 per second, in menus and races. Only Vulkan-side change in between was 0057 (clear of every new image on Dozen), which used two all-commands barriers per new surface.
+- 0057 now clears with no leading barrier and one per-image, transfer-to-all barrier after the clears. Speed otherwise unchanged (retro_run 3-7 ms, vertex cache 99%+ hits, same as 150). Whether 0057 fixes the black models/static is still unverified.
+- Same log: OpenGL context now reports 4.6 (Mesa 0034 works at the driver level); the games in it still ran on Vulkan, so GL gameplay is untested.

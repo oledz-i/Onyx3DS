@@ -1,4 +1,4 @@
-From 2d90c05771335df44016b0ec04b206664dc59aa0 Mon Sep 17 00:00:00 2001
+From 7cdd6f6963482f10732a9fb6e421701203cab8c5 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 13 Oct 2026 13:51:40 -0400
 Subject: [PATCH] vulkan: clear new images on Dozen (placed memory held other
@@ -9,14 +9,14 @@ when it is created. Azahar treats the parts of a new surface nothing has drawn t
 they showed leftover pictures. Every new non-compressed surface image is cleared once after its
 first layout change, on Dozen only.
 ---
- .../renderer_vulkan/vk_texture_runtime.cpp    | 49 ++++++++++++++++++-
- 1 file changed, 48 insertions(+), 1 deletion(-)
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 60 ++++++++++++++++++-
+ 1 file changed, 59 insertions(+), 1 deletion(-)
 
 diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
-index fc387a5..342debe 100644
+index fc387a5..f09bbeb 100644
 --- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
 +++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
-@@ -130,6 +130,46 @@ u32 UnpackDepthStencil(const VideoCore::StagingData& data, vk::Format dest) {
+@@ -130,6 +130,57 @@ u32 UnpackDepthStencil(const VideoCore::StagingData& data, vk::Format dest) {
      return depth_offset;
  }
  
@@ -27,10 +27,9 @@ index fc387a5..342debe 100644
 +// Clear every new image once, right after its first layout change.
 +void RecordZeroClear(vk::CommandBuffer cmdbuf, vk::ImageAspectFlags aspect,
 +                     std::span<const vk::Image> images) {
-+    const vk::MemoryBarrier barrier = {
-+        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
-+        .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
-+    };
++    // Nothing has touched a new image, so no barrier is needed before the clear. Only the
++    // clear's own writes are made visible afterwards, per image: a global all-commands
++    // barrier here made the GPU drain on every new surface and cost the presenter frames.
 +    const vk::ImageSubresourceRange range = {
 +        .aspectMask = aspect,
 +        .baseMipLevel = 0,
@@ -38,10 +37,12 @@ index fc387a5..342debe 100644
 +        .baseArrayLayer = 0,
 +        .layerCount = VK_REMAINING_ARRAY_LAYERS,
 +    };
-+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-+                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, barrier,
-+                           {}, {});
++    std::array<vk::ImageMemoryBarrier, 3> barriers;
++    u32 count = 0;
 +    for (const vk::Image image : images) {
++        if (count == barriers.size()) {
++            break;
++        }
 +        if (aspect & vk::ImageAspectFlagBits::eColor) {
 +            const vk::ClearColorValue zero{std::array<float, 4>{0.f, 0.f, 0.f, 0.f}};
 +            cmdbuf.clearColorImage(image, vk::ImageLayout::eGeneral, zero, range);
@@ -49,10 +50,20 @@ index fc387a5..342debe 100644
 +            const vk::ClearDepthStencilValue zero{0.f, 0};
 +            cmdbuf.clearDepthStencilImage(image, vk::ImageLayout::eGeneral, zero, range);
 +        }
++        barriers[count++] = vk::ImageMemoryBarrier{
++            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
++            .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
++            .oldLayout = vk::ImageLayout::eGeneral,
++            .newLayout = vk::ImageLayout::eGeneral,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .image = image,
++            .subresourceRange = range,
++        };
 +    }
-+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-+                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, barrier,
-+                           {}, {});
++    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
++                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, 0,
++                           nullptr, 0, nullptr, count, barriers.data());
 +}
 +
 +bool IsCompressedFormat(vk::Format format) {
@@ -63,7 +74,7 @@ index fc387a5..342debe 100644
  void MakeInitBarriers(vk::ImageAspectFlags aspect, u32 num_images,
                        std::span<const vk::Image> images,
                        std::span<vk::ImageMemoryBarrier> out_barriers) {
-@@ -897,12 +937,19 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
+@@ -897,12 +948,19 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
      current = res_scale != 1 ? Type::Scaled : Type::Base;
  
      runtime.renderpass_cache.EndRendering();
