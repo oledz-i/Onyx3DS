@@ -1,23 +1,22 @@
-From ae5d1c12d5335702ed60c8fa3cbddba4227e785e Mon Sep 17 00:00:00 2001
+From 20e10d6f482cf7119b9ae2a5a63cb602afc1fd23 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Tue, 13 Oct 2026 10:26:11 -0400
+Date: Tue, 13 Oct 2026 10:31:37 -0400
 Subject: [PATCH] vulkan: persistent vertex cache (content-addressed blocks in
  recycled arenas, adaptive bypass)
 
 Vertex blocks whose bytes and layout were uploaded before are used in place instead of copied
 again. Four 24 MiB arenas are filled in order and recycled oldest first after waiting for the
 GPU; a hit costs one 64-bit hash. The cache switches itself off while fewer than 20% of the bytes
-are found again, so it cannot cost more than it saves for long. Bookkeeping is Vulkan-free and
-covered by tests.
+are found again. Bookkeeping is Vulkan-free and covered by tests.
 ---
  src/tests/CMakeLists.txt                      |   1 +
  src/tests/video_core/vertex_cache.cpp         | 139 +++++++++++++
- .../renderer_vulkan/vk_rasterizer.cpp         | 126 ++++++++----
+ .../renderer_vulkan/vk_rasterizer.cpp         | 128 ++++++++----
  .../renderer_vulkan/vk_rasterizer.h           |  16 +-
  .../renderer_vulkan/vk_stream_buffer.cpp      |  15 ++
  .../renderer_vulkan/vk_stream_buffer.h        |  10 +
  .../renderer_vulkan/vk_vertex_cache.h         | 187 ++++++++++++++++++
- 7 files changed, 451 insertions(+), 43 deletions(-)
+ 7 files changed, 452 insertions(+), 44 deletions(-)
  create mode 100644 src/tests/video_core/vertex_cache.cpp
  create mode 100644 src/video_core/renderer_vulkan/vk_vertex_cache.h
 
@@ -179,7 +178,7 @@ index 0000000..5ef5384
 +    REQUIRE(c.BypassedWindows() == 0);
 +}
 diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-index e9996d3..5abce53 100644
+index e9996d3..6ba55e6 100644
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -35,6 +35,9 @@ using namespace Common::Literals;
@@ -366,7 +365,7 @@ index e9996d3..5abce53 100644
              st_start = now;
          }
      }
-@@ -679,6 +738,7 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+@@ -679,14 +738,15 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
          .vertex_offset = -static_cast<s32>(vertex_info.vs_input_index_min),
          .binding_count = pipeline_info.state.vertex_layout.binding_count,
          .bindings = binding_offsets,
@@ -374,7 +373,8 @@ index e9996d3..5abce53 100644
          .is_indexed = is_indexed,
      };
  
-@@ -686,7 +746,7 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+-    scheduler.Record([this, params](vk::CommandBuffer cmdbuf) {
++    scheduler.Record([params](vk::CommandBuffer cmdbuf) {
          std::array<vk::DeviceSize, 16> offsets;
          std::transform(params.bindings.begin(), params.bindings.end(), offsets.begin(),
                         [](u32 offset) { return static_cast<vk::DeviceSize>(offset); });
