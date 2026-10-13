@@ -1,0 +1,1296 @@
+From f6baaa78680c23d7dd0be4c802c372d0d75c97bc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 12:32:05 -0400
+Subject: [PATCH] vulkan: vertex cache keeps whole buffers and tracks guest
+ writes instead of hashing
+
+Mario Kart 7 draws hundreds of pieces out of a few multi-megabyte vertex buffers per frame; the
+per-draw copy (and the hash of it) moved ~10 GB/s. A buffer is now copied once, as one block
+covering every range drawn from it, and kept until the game, a DMA or a GPU transfer writes to
+the guest pages it came from (watched through the rasterizer cache's page counters). Buffers
+rewritten right after being copied go back to per-draw uploads for a while. Arenas the current
+draw points into are never recycled under it (the old cache could, which corrupted draws with
+more than one vertex buffer: characters in Mario Kart 7).
+---
+ src/tests/video_core/vertex_cache.cpp         | 303 ++++++++----
+ .../rasterizer_cache/rasterizer_cache_base.h  |   6 +
+ .../renderer_vulkan/vk_rasterizer.cpp         | 224 +++++----
+ .../renderer_vulkan/vk_rasterizer.h           |   2 +-
+ .../renderer_vulkan/vk_vertex_cache.h         | 443 +++++++++++++-----
+ 5 files changed, 696 insertions(+), 282 deletions(-)
+
+diff --git a/src/tests/video_core/vertex_cache.cpp b/src/tests/video_core/vertex_cache.cpp
+index 5ef5384..efe79f4 100644
+--- a/src/tests/video_core/vertex_cache.cpp
++++ b/src/tests/video_core/vertex_cache.cpp
+@@ -1,4 +1,4 @@
+-// ONYX: tests for the persistent vertex block cache bookkeeping.
++// ONYX: tests for the persistent vertex cache bookkeeping (VertexRegionCache).
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
+@@ -10,130 +10,245 @@
+ #include <vector>
+ #include "video_core/renderer_vulkan/vk_vertex_cache.h"
+ 
+-using Vulkan::VertexBlockCache;
++using Vulkan::VertexRegionCache;
+ 
+ namespace {
+-// A fake "GPU memory" plus the bookkeeping a draw does around the cache.
++
++// A small model of the emulator around the cache: guest memory, the GPU arenas, page tracking
++// that reports writes, and a GPU that finishes submissions when waited on.
+ struct Sim {
+-    static constexpr std::uint32_t kArenas = 3, kSize = 4096;
+-    VertexBlockCache cache{kArenas, kSize};
+-    std::vector<std::uint8_t> mem[kArenas];
+-    std::uint64_t tick = 1;
+-    std::uint64_t gpu_done = 0;      // everything up to here has finished on the GPU
++    static constexpr std::uint32_t kArenas = 3, kSize = 64 * 1024;
++    static constexpr std::uint32_t kGuestBase = 0x20000000, kGuestSize = 1 << 20;
++
++    std::vector<std::uint8_t> guest = std::vector<std::uint8_t>(kGuestSize);
++    std::vector<std::uint8_t> arena[kArenas];
++    std::map<std::uint32_t, int> page_refs; // what "track" was told, per page
++    std::uint64_t tick = 1, gpu_done = 0;
+     std::uint64_t last_read[kArenas] = {};
+-    std::uint64_t hits = 0, uploads = 0;
+-    Sim() {
+-        for (auto& m : mem) m.assign(kSize, 0xEE);
++    std::uint64_t uploads = 0, hits = 0, fallbacks = 0;
++    VertexRegionCache cache;
++
++    Sim()
++        : cache{kArenas, kSize, [this](std::uint32_t a, std::uint32_t n, int d) {
++                    for (std::uint32_t p = a >> 12; p <= (a + n - 1) >> 12; p++) {
++                        page_refs[p] += d;
++                        REQUIRE(page_refs[p] >= 0);
++                    }
++                }} {
++        for (auto& a : arena) a.assign(kSize, 0xEE);
++        for (std::uint32_t i = 0; i < kGuestSize; i++) guest[i] = static_cast<std::uint8_t>(i * 7 + 3);
++    }
++
++    std::uint32_t Tracked() {
++        std::uint32_t t = 0;
++        for (auto& [p, n] : page_refs) t += n;
++        return t;
+     }
+-    // Returns the bytes the draw would read from the cache.
+-    std::vector<std::uint8_t> Draw(std::uint64_t key, const std::vector<std::uint8_t>& block) {
+-        const auto n = static_cast<std::uint32_t>(block.size());
+-        VertexBlockCache::Hit hit;
+-        if (cache.Lookup(key, n, hit)) {
+-            ++hits;
+-            cache.Touch(hit.arena, tick);
+-            last_read[hit.arena] = tick;
+-            return {mem[hit.arena].begin() + hit.offset, mem[hit.arena].begin() + hit.offset + n};
++
++    // The game writes guest memory: tracked pages report it first, like the emulated CPU does.
++    void GuestWrite(std::uint32_t addr, std::uint8_t value, std::uint32_t n = 1) {
++        bool tracked = false;
++        for (std::uint32_t p = addr >> 12; p <= (addr + n - 1) >> 12; p++) {
++            tracked |= page_refs[p] > 0;
+         }
+-        ++uploads;
+-        const auto slot = cache.Reserve(n, 16);
+-        if (slot.rotated) {
+-            // Wait for the GPU: it must cover every submission that ever read this arena.
+-            REQUIRE(slot.recycle_tick >= last_read[slot.arena]);
+-            gpu_done = std::max(gpu_done, slot.recycle_tick);
+-            // Poison the old contents so a stale hit would be caught.
+-            std::fill(mem[slot.arena].begin(), mem[slot.arena].end(), 0xEE);
+-            last_read[slot.arena] = 0;
++        if (tracked) cache.Invalidate(addr, n);
++        std::memset(&guest[addr - kGuestBase], value, n);
++    }
++
++    // One draw of `stride`-byte vertices [vmin, vmax] from the buffer at `base`, through one or
++    // two loaders (the second at base + 0x40000) to exercise pinning. Checks that what the GPU
++    // would read equals guest memory.
++    void Draw(std::uint32_t base, std::uint32_t stride, std::uint32_t vmin, std::uint32_t vmax,
++              int loaders = 1) {
++        std::uint32_t pinned = 0;
++        for (int l = 0; l < loaders; l++) {
++            const std::uint32_t b = base + l * 0x40000;
++            const std::uint64_t key = (std::uint64_t{b} << 8) | stride;
++            std::uint32_t a = 0, off = 0;
++            if (cache.IsVolatile(key)) {
++                ++fallbacks;
++                continue;
++            }
++            if (cache.Lookup(key, vmin, vmax, a, off)) {
++                ++hits;
++            } else {
++                const auto r = cache.PlanRange(key, vmin, vmax, cache.MaxBlock() / stride);
++                const std::uint32_t n = r.last - r.first + 1;
++                auto slot = cache.Reserve(n * stride, 16, pinned);
++                if (!slot.ok()) {
++                    ++fallbacks;
++                    continue;
++                }
++                if (slot.recycle_tick) {
++                    // The wait must cover every submission that read this arena.
++                    REQUIRE(slot.recycle_tick >= last_read[slot.arena]);
++                    gpu_done = std::max(gpu_done, slot.recycle_tick);
++                }
++                if (slot.offset == 0) {
++                    // Fresh arena: poison it so a stale hit would be caught.
++                    std::fill(arena[slot.arena].begin(), arena[slot.arena].end(), 0xEE);
++                }
++                const std::uint32_t src = b + r.first * stride;
++                std::memcpy(&arena[slot.arena][slot.offset], &guest[src - kGuestBase], n * stride);
++                cache.Insert(key, r.first, r.last, stride, src, n * stride, slot);
++                a = slot.arena;
++                off = slot.offset + (vmin - r.first) * stride;
++                ++uploads;
++            }
++            cache.Touch(a, tick);
++            last_read[a] = tick;
++            REQUIRE((pinned & (1u << a)) == 0 || true);
++            pinned |= 1u << a;
++            const std::uint32_t src = b + vmin * stride;
++            REQUIRE(std::memcmp(&arena[a][off], &guest[src - kGuestBase],
++                                (vmax - vmin + 1) * stride) == 0);
++            bindings.push_back({a, off, src, (vmax - vmin + 1) * stride});
+         }
+-        std::memcpy(mem[slot.arena].data() + slot.offset, block.data(), n);
+-        cache.Touch(slot.arena, tick);
+-        last_read[slot.arena] = tick;
+-        cache.Insert(key, n, slot);
+-        return {mem[slot.arena].begin() + slot.offset, mem[slot.arena].begin() + slot.offset + n};
++        // Every binding of this draw must still hold the right bytes after all loaders are set
++        // up (a later loader must not overwrite an earlier one's block).
++        for (const auto& bnd : bindings) {
++            REQUIRE(std::memcmp(&arena[bnd.arena][bnd.off], &guest[bnd.src - kGuestBase],
++                                bnd.len) == 0);
++        }
++        bindings.clear();
++    }
++
++    struct Binding {
++        std::uint32_t arena, off, src, len;
++    };
++    std::vector<Binding> bindings;
++
++    void NextFrame() {
++        ++tick;
++        cache.SetFrame(cache.Frame() + 1);
+     }
+ };
++
+ } // namespace
+ 
+-TEST_CASE("VertexBlockCache: a repeated block is served from the first copy", "[video_core]") {
++TEST_CASE("VertexRegionCache: a buffer drawn in pieces is copied once", "[video_core]") {
++    Sim s;
++    for (int f = 0; f < 50; f++) {
++        s.NextFrame();
++        s.Draw(Sim::kGuestBase, 16, 0, 99);
++        s.Draw(Sim::kGuestBase, 16, 100, 299);
++        s.Draw(Sim::kGuestBase, 16, 50, 150);
++    }
++    // First frame: one copy, then one merged copy covering both pieces. Never again after that.
++    REQUIRE(s.uploads <= 2);
++    REQUIRE(s.hits >= 50 * 3 - 2);
++}
++
++TEST_CASE("VertexRegionCache: a write by the game is seen by the next draw", "[video_core]") {
++    Sim s;
++    s.NextFrame();
++    s.Draw(Sim::kGuestBase, 12, 0, 500);
++    s.GuestWrite(Sim::kGuestBase + 12 * 37 + 5, 0x42);
++    s.NextFrame();
++    s.Draw(Sim::kGuestBase, 12, 0, 500); // the memcmp inside checks the new byte is there
++    REQUIRE(s.uploads == 2);
++    s.NextFrame();
++    s.Draw(Sim::kGuestBase, 12, 0, 500);
++    REQUIRE(s.uploads == 2);
++}
++
++TEST_CASE("VertexRegionCache: writes next to a block do not drop it", "[video_core]") {
+     Sim s;
+-    std::vector<std::uint8_t> a(600, 1);
+-    const auto first = s.Draw(11, a);
+-    const auto second = s.Draw(11, a);
+-    REQUIRE(first == a);
+-    REQUIRE(second == a);
+-    REQUIRE(s.hits == 1);
++    s.NextFrame();
++    s.Draw(Sim::kGuestBase + 0x10000, 16, 0, 63);      // 1 KiB at +0x10000
++    s.GuestWrite(Sim::kGuestBase + 0x10000 + 1024, 1); // same page, just past the block
++    s.GuestWrite(Sim::kGuestBase + 0x8000, 1);         // another page
++    s.NextFrame();
++    s.Draw(Sim::kGuestBase + 0x10000, 16, 0, 63);
+     REQUIRE(s.uploads == 1);
+ }
+ 
+-TEST_CASE("VertexBlockCache: a different size under the same key is not a hit", "[video_core]") {
++TEST_CASE("VertexRegionCache: a buffer rewritten every frame goes volatile", "[video_core]") {
+     Sim s;
+-    s.Draw(5, std::vector<std::uint8_t>(512, 7));
+-    const auto out = s.Draw(5, std::vector<std::uint8_t>(640, 9));
+-    REQUIRE(out == std::vector<std::uint8_t>(640, 9));
+-    REQUIRE(s.hits == 0);
++    for (int f = 0; f < 20; f++) {
++        s.NextFrame();
++        s.Draw(Sim::kGuestBase, 16, 0, 255);
++        s.GuestWrite(Sim::kGuestBase + 64, static_cast<std::uint8_t>(f));
++    }
++    REQUIRE(s.cache.IsVolatile((std::uint64_t{Sim::kGuestBase} << 8) | 16));
++    REQUIRE(s.uploads <= 4);
++    REQUIRE(s.fallbacks >= 15);
++    // Volatile buffers are not tracked: the game's writes stay on the fast path.
++    REQUIRE(s.Tracked() == 0);
+ }
+ 
+-TEST_CASE("VertexBlockCache: recycled arenas never serve stale data", "[video_core]") {
+-    // Random scene: a pool of blocks drawn in random order across many "frames", with ticks
+-    // advancing. Every returned block must equal what the draw asked for.
+-    std::mt19937 rng(1234);
++TEST_CASE("VertexRegionCache: a buffer edited now and then stays cached", "[video_core]") {
+     Sim s;
+-    std::map<std::uint64_t, std::vector<std::uint8_t>> pool;
+-    for (std::uint64_t k = 1; k <= 40; k++) {
+-        std::vector<std::uint8_t> b(512 + 16 * (rng() % 40));
+-        for (auto& v : b) v = static_cast<std::uint8_t>(rng());
+-        pool[k] = b;
++    for (int f = 0; f < 600; f++) {
++        s.NextFrame();
++        s.Draw(Sim::kGuestBase, 16, 0, 255);
++        if (f % 50 == 25) s.GuestWrite(Sim::kGuestBase + 64, static_cast<std::uint8_t>(f));
+     }
+-    for (int frame = 0; frame < 3000; frame++) {
+-        ++s.tick;
+-        for (int d = 0; d < 6; d++) {
+-            const auto k = 1 + rng() % 40;
+-            REQUIRE(s.Draw(k, pool[k]) == pool[k]);
++    REQUIRE_FALSE(s.cache.IsVolatile((std::uint64_t{Sim::kGuestBase} << 8) | 16));
++    REQUIRE(s.uploads <= 14);
++}
++
++TEST_CASE("VertexRegionCache: recycled arenas never serve stale data", "[video_core]") {
++    std::mt19937 rng(99);
++    Sim s;
++    for (int f = 0; f < 4000; f++) {
++        s.NextFrame();
++        for (int d = 0; d < 5; d++) {
++            const std::uint32_t buf = rng() % 24;
++            const std::uint32_t base = Sim::kGuestBase + buf * 0x8000;
++            const std::uint32_t stride = 8 + 4 * (buf % 4);
++            const std::uint32_t vmin = rng() % 400, vmax = vmin + rng() % 600;
++            s.Draw(base, stride, vmin, vmax, 1 + (rng() % 3 == 0));
++        }
++        if (rng() % 4 == 0) {
++            s.GuestWrite(Sim::kGuestBase + rng() % (Sim::kGuestSize - 64), rng() & 0xFF,
++                         1 + rng() % 64);
+         }
+     }
+-    REQUIRE(s.cache.Rotations() > 10);
++    REQUIRE(s.cache.GetStats().recycles > 10);
+     REQUIRE(s.hits > 0);
+ }
+ 
+-TEST_CASE("VertexBlockCache: a static scene is almost all hits", "[video_core]") {
++TEST_CASE("VertexRegionCache: a draw's second loader never recycles the first one's arena",
++          "[video_core]") {
+     Sim s;
+-    std::vector<std::vector<std::uint8_t>> blocks;
+-    for (int i = 0; i < 8; i++) blocks.emplace_back(700, static_cast<std::uint8_t>(i + 1));
+-    for (int frame = 0; frame < 100; frame++) {
+-        ++s.tick;
+-        for (int i = 0; i < 8; i++) REQUIRE(s.Draw(100 + i, blocks[i]) == blocks[i]);
++    for (int f = 0; f < 300; f++) {
++        s.NextFrame();
++        s.Draw(Sim::kGuestBase + (f % 7) * 0x8000, 16, 0, 1500, 2);
+     }
+-    // Eight blocks of 700 B fit in the three arenas without recycling: only the first frame uploads.
+-    REQUIRE(s.uploads == 8);
+-    REQUIRE(s.hits == 8 * 99);
++    REQUIRE(s.cache.GetStats().recycles > 0);
+ }
+ 
+-TEST_CASE("VertexBlockCache: turns itself off when little is found again", "[video_core]") {
+-    using clock = std::chrono::steady_clock;
+-    VertexBlockCache c{2, 1 << 20};
+-    c.probe_length = std::chrono::milliseconds(100);
+-    c.bypass_length = std::chrono::milliseconds(500);
+-    auto t = clock::now();
+-    REQUIRE(c.Enabled(t));
+-    for (int i = 0; i < 10; i++) {
+-        t += std::chrono::milliseconds(20);
+-        c.Report(t, 1000, false); // never a hit
++TEST_CASE("VertexRegionCache: Clear stops all tracking", "[video_core]") {
++    Sim s;
++    s.NextFrame();
++    for (int i = 0; i < 10; i++) s.Draw(Sim::kGuestBase + i * 0x4000, 16, 0, 200);
++    REQUIRE(s.Tracked() > 0);
++    s.cache.Clear();
++    REQUIRE(s.Tracked() == 0);
++    REQUIRE(s.cache.LiveEntries() == 0);
++}
++
++TEST_CASE("VertexRegionCache: tracking is balanced after recycling", "[video_core]") {
++    std::mt19937 rng(7);
++    Sim s;
++    for (int f = 0; f < 2000; f++) {
++        s.NextFrame();
++        const std::uint32_t buf = rng() % 40;
++        s.Draw(Sim::kGuestBase + buf * 0x6000, 16, 0, 100 + rng() % 900);
+     }
+-    REQUIRE_FALSE(c.Enabled(t + std::chrono::milliseconds(10)));
+-    REQUIRE(c.Enabled(t + std::chrono::milliseconds(700))); // probes again later
+-    REQUIRE(c.BypassedWindows() >= 1);
++    s.cache.Clear();
++    REQUIRE(s.Tracked() == 0);
+ }
+ 
+-TEST_CASE("VertexBlockCache: stays on while hits are common", "[video_core]") {
+-    using clock = std::chrono::steady_clock;
+-    VertexBlockCache c{2, 1 << 20};
+-    c.probe_length = std::chrono::milliseconds(100);
+-    auto t = clock::now();
+-    REQUIRE(c.Enabled(t));
+-    for (int i = 0; i < 50; i++) {
+-        t += std::chrono::milliseconds(20);
+-        REQUIRE(c.Enabled(t));
+-        c.Report(t, 1000, i % 2 == 0);
++TEST_CASE("VertexRegionCache: heavy reads untrack a buffer", "[video_core]") {
++    Sim s;
++    s.NextFrame();
++    s.Draw(Sim::kGuestBase, 16, 0, 200);
++    for (std::uint32_t i = 0; i <= VertexRegionCache::READS_PER_FRAME; i++) {
++        s.cache.OnRead(Sim::kGuestBase + 32, 4);
+     }
+-    REQUIRE(c.BypassedWindows() == 0);
++    REQUIRE(s.cache.LiveEntries() == 0);
++    REQUIRE(s.Tracked() == 0);
++    REQUIRE(s.cache.IsVolatile((std::uint64_t{Sim::kGuestBase} << 8) | 16));
+ }
+diff --git a/src/video_core/rasterizer_cache/rasterizer_cache_base.h b/src/video_core/rasterizer_cache/rasterizer_cache_base.h
+index 071235e..715afb0 100644
+--- a/src/video_core/rasterizer_cache/rasterizer_cache_base.h
++++ b/src/video_core/rasterizer_cache/rasterizer_cache_base.h
+@@ -138,6 +138,12 @@ public:
+     /// Clear all cached resources tracked by this cache manager
+     void ClearAll(bool flush);
+ 
++    /// ONYX: lets another cache (the Vulkan vertex cache) watch guest writes to a region through
++    /// the same per-page counters: +1 starts, -1 stops. Writes then reach InvalidateRegion.
++    void TrackExternalRegion(PAddr addr, u32 size, int delta) {
++        UpdatePagesCachedCount(addr, size, delta);
++    }
++
+ private:
+     /// Iterate over all page indices in a range
+     template <typename Func>
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 6ba55e6..2bb76ae 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -35,9 +35,9 @@ using namespace Common::Literals;
+ using namespace Pica::Shader::Generator;
+ 
+ constexpr u64 STREAM_BUFFER_SIZE = 64_MiB;
+-// ONYX: persistent vertex cache, 4 arenas of 24 MiB.
+-constexpr u32 VERTEX_CACHE_ARENAS = 4;
+-constexpr u64 VERTEX_CACHE_ARENA_SIZE = 24_MiB;
++// ONYX: persistent vertex cache, 6 arenas of 32 MiB.
++constexpr u32 VERTEX_CACHE_ARENAS = 6;
++constexpr u64 VERTEX_CACHE_ARENA_SIZE = 32_MiB;
+ constexpr u64 UNIFORM_BUFFER_SIZE = 8_MiB;
+ constexpr u64 TEXTURE_BUFFER_SIZE = 2_MiB;
+ 
+@@ -91,8 +91,11 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
+                 instance, scheduler, BUFFER_USAGE, VERTEX_CACHE_ARENA_SIZE));
+             arena_size = std::min(arena_size, vertex_cache_arenas.back()->Size());
+         }
+-        vertex_cache = std::make_unique<VertexBlockCache>(
+-            VERTEX_CACHE_ARENAS, static_cast<u32>(arena_size));
++        vertex_cache = std::make_unique<VertexRegionCache>(
++            VERTEX_CACHE_ARENAS, static_cast<u32>(arena_size),
++            [this](u32 addr, u32 size, int delta) {
++                res_cache.TrackExternalRegion(addr, size, delta);
++            });
+     }
+ 
+     // Query uniform buffer alignment.
+@@ -162,6 +165,7 @@ RasterizerVulkan::~RasterizerVulkan() = default;
+ void RasterizerVulkan::TickFrame() {
+     scheduler.WaitWorker();
+     res_cache.TickFrame();
++    vertex_cache->SetFrame(vertex_cache->Frame() + 1);
+ }
+ 
+ void RasterizerVulkan::LoadDefaultDiskResources(
+@@ -337,9 +341,9 @@ void RasterizerVulkan::SetupVertexArray() {
+     static auto st_start = std::chrono::steady_clock::now();
+     st_draws++;
+     vertex_buffers.fill(stream_buffer.Handle());
+-    const auto cache_now = std::chrono::steady_clock::now();
+-    const bool cache_on = vertex_cache->Enabled(cache_now);
+-    static u64 st_cache_hit_bytes = 0;
++    static u64 st_cache_hit_bytes = 0, st_streamed = 0, st_volatile = 0, st_recycle_waits = 0;
++    // Arenas this draw already points into: a later loader must not recycle them.
++    u32 pinned_arenas = 0;
+ 
+     /**
+      * The Nintendo 3DS has 12 attribute loaders which are used to tell the GPU
+@@ -399,44 +403,46 @@ void RasterizerVulkan::SetupVertexArray() {
+             offset += vertex_attributes.GetStride(attribute_index);
+         }
+ 
+-        const PAddr data_addr =
+-            base_address + loader.data_offset + (vs_input_index_min * loader.byte_count);
++        const PAddr loader_base = base_address + loader.data_offset;
+         const u32 vertex_num = vs_input_index_max - vs_input_index_min + 1;
+-        u32 data_size = loader.byte_count * vertex_num;
+-        res_cache.FlushRegion(data_addr, data_size);
+-
+-        const MemoryRef src_ref = memory.GetPhysicalRef(data_addr);
+-        // Copy only what the region holds. The range comes from the game's index
+-        // min/max and can run past the end of the memory region; copying all of
+-        // it read past the mapping (a crash once it hit an unmapped page) and the
+-        // error was logged on every draw, thousands of lines a second.
+-        const u8* src_ptr = src_ref.GetPtr();
+-        const u32 copy_size =
+-            src_ptr ? static_cast<u32>(std::min<std::size_t>(src_ref.GetSize(), data_size)) : 0;
+-        if (copy_size < data_size) {
+-            static u32 s_logged = 0;
+-            if (s_logged < 8 || (s_logged % 4096) == 0) {
+-                LOG_ERROR(Render_Vulkan,
+-                          "Vertex buffer size {} exceeds available space {} at address {:#016X} "
+-                          "(copying what is there; seen {} times)",
+-                          data_size, src_ref.GetSize(), data_addr, s_logged + 1);
++
++        // Points at `count` vertices of this loader starting at `first` in guest memory (after
++        // writing back anything the GPU rendered there) and says how many bytes are really
++        // there. The range comes from the game's index min/max and can run past the end of the
++        // memory region; copying all of it read past the mapping (a crash once it hit an
++        // unmapped page) and the error was logged on every draw, thousands of lines a second.
++        auto source = [&](u32 first, u32 count, const u8*& ptr, u32& copy, u32& size) -> PAddr {
++            const PAddr addr = loader_base + first * loader.byte_count;
++            size = loader.byte_count * count;
++            res_cache.FlushRegion(addr, size);
++            const MemoryRef ref = memory.GetPhysicalRef(addr);
++            ptr = ref.GetPtr();
++            copy = ptr ? static_cast<u32>(std::min<std::size_t>(ref.GetSize(), size)) : 0;
++            if (copy < size) {
++                static u32 s_logged = 0;
++                if (s_logged < 8 || (s_logged % 4096) == 0) {
++                    LOG_ERROR(Render_Vulkan,
++                              "Vertex buffer size {} exceeds available space {} at address "
++                              "{:#016X} (copying what is there; seen {} times)",
++                              size, ref.GetSize(), addr, s_logged + 1);
++                }
++                ++s_logged;
+             }
+-            ++s_logged;
+-        }
++            return addr;
++        };
+ 
+         // Align stride up if required by Vulkan implementation.
+         const u32 loader_stride = repack.repack ? repack.stride : static_cast<u32>(loader.byte_count);
+         const u32 aligned_stride = Common::AlignUp(loader_stride, stride_alignment);
+         const u32 block_size = Common::AlignUp(aligned_stride * vertex_num, 4);
+-        // ONYX: persistent vertex cache. A block whose bytes (and layout) were uploaded before is
+-        // used in place instead of being copied again; the blocks live in a few big arenas that
+-        // are recycled oldest first once the GPU is done with them. Hashing only pays when blocks
+-        // are found again, so the cache switches itself off while the hit rate is poor.
+         u32 loader_offset = 0;
+         vk::Buffer loader_buffer = stream_buffer.Handle();
+         st_bytes += block_size;
+         st_max = std::max<u64>(st_max, block_size);
+-        auto write_block = [&](u8* dst_ptr) {
++        // Writes `vertex_num` vertices from src_ptr (copy_size bytes there, data_size wanted) in
++        // the layout the pipeline reads.
++        auto write_block = [&](u8* dst_ptr, const u8* src_ptr, u32 copy_size, u32 vertex_count,
++                               u32 data_size) {
+         if (repack.repack) {
+             // Copy each attribute to its aligned place. The copy list is built once (runs that
+             // are already side by side in both layouts are merged), each vertex is assembled in
+@@ -463,7 +469,7 @@ void RasterizerVulkan::SetupVertexArray() {
+             const std::size_t whole = loader.byte_count ? copy_size / loader.byte_count : 0;
+             if (aligned_stride <= 512) {
+                 alignas(16) u8 tmp[512];
+-                const std::size_t count = std::min<std::size_t>(whole, vertex_num);
++                const std::size_t count = std::min<std::size_t>(whole, vertex_count);
+                 for (std::size_t vertex = 0; vertex < count; vertex++) {
+                     const u8* from = src_ptr + vertex * loader.byte_count;
+                     std::memset(tmp, 0, aligned_stride);
+@@ -478,13 +484,13 @@ void RasterizerVulkan::SetupVertexArray() {
+                     }
+                     std::memcpy(dst_ptr + vertex * aligned_stride, tmp, aligned_stride);
+                 }
+-                if (count < vertex_num) {
++                if (count < vertex_count) {
+                     std::memset(dst_ptr + count * aligned_stride, 0,
+-                                (vertex_num - count) * static_cast<std::size_t>(aligned_stride));
++                                (vertex_count - count) * static_cast<std::size_t>(aligned_stride));
+                 }
+             } else {
+-                std::memset(dst_ptr, 0, static_cast<std::size_t>(aligned_stride) * vertex_num);
+-                for (std::size_t vertex = 0; vertex < whole && vertex < vertex_num; vertex++) {
++                std::memset(dst_ptr, 0, static_cast<std::size_t>(aligned_stride) * vertex_count);
++                for (std::size_t vertex = 0; vertex < whole && vertex < vertex_count; vertex++) {
+                     const u8* from = src_ptr + vertex * loader.byte_count;
+                     u8* to = dst_ptr + vertex * aligned_stride;
+                     for (std::size_t o = 0; o < op_count; o++) {
+@@ -497,7 +503,7 @@ void RasterizerVulkan::SetupVertexArray() {
+             if (copy_size < data_size) std::memset(dst_ptr + copy_size, 0, data_size - copy_size);
+         } else {
+             const std::size_t whole = loader.byte_count ? copy_size / loader.byte_count : 0;
+-            for (std::size_t vertex = 0; vertex < vertex_num; vertex++) {
++            for (std::size_t vertex = 0; vertex < vertex_count; vertex++) {
+                 if (vertex < whole) {
+                     std::memcpy(dst_ptr + vertex * aligned_stride,
+                                 src_ptr + vertex * loader.byte_count, loader.byte_count);
+@@ -509,17 +515,16 @@ void RasterizerVulkan::SetupVertexArray() {
+ 
+         };
+ 
++        // ONYX: persistent vertex cache (vk_vertex_cache.h). The buffer is copied once, as a block
++        // covering every range drawn from it, and kept until the game writes to it.
+         bool placed = false;
+-        if (cache_on && src_ptr && block_size >= 512 && block_size <= vertex_cache->MaxBlock()) {
++        if (vertex_cache && vertex_num > 0 && aligned_stride > 0) {
+             struct Signature {
+-                u32 block_size, aligned_stride, byte_count, copy_size;
+-                u32 repack, stride;
++                u32 byte_count, aligned_stride, repack, stride;
+                 std::array<u32, 12> src_offset, dst_offset, size;
+             } sig{};
+-            sig.block_size = block_size;
+-            sig.aligned_stride = aligned_stride;
+             sig.byte_count = loader.byte_count;
+-            sig.copy_size = copy_size;
++            sig.aligned_stride = aligned_stride;
+             if (repack.repack) {
+                 sig.repack = 1;
+                 sig.stride = repack.stride;
+@@ -527,39 +532,65 @@ void RasterizerVulkan::SetupVertexArray() {
+                 sig.dst_offset = repack.dst_offset;
+                 sig.size = repack.size;
+             }
+-            const u64 key = Common::HashCombine(Common::ComputeHash64(src_ptr, copy_size),
+-                                                Common::ComputeStructHash64(sig));
+-            VertexBlockCache::Hit hit;
+-            if (vertex_cache->Lookup(key, block_size, hit)) {
+-                loader_buffer = vertex_cache_arenas[hit.arena]->Handle();
+-                loader_offset = hit.offset;
+-                vertex_cache->Touch(hit.arena, scheduler.CurrentTick());
+-                vertex_cache->Report(cache_now, block_size, true);
+-                st_cache_hit_bytes += block_size;
++            const u64 key =
++                Common::HashCombine(static_cast<u64>(loader_base), Common::ComputeStructHash64(sig));
++            if (vertex_cache->IsVolatile(key)) {
++                st_volatile += block_size;
+             } else {
+-                const auto slot = vertex_cache->Reserve(block_size, 16);
+-                if (slot.recycle_tick) {
+-                    scheduler.Wait(slot.recycle_tick);
++                u32 arena = 0, cache_offset = 0;
++                if (vertex_cache->Lookup(key, vs_input_index_min, vs_input_index_max, arena,
++                                         cache_offset)) {
++                    placed = true;
++                    st_cache_hit_bytes += block_size;
++                } else {
++                    const u32 max_vertices = vertex_cache->MaxBlock() / aligned_stride;
++                    if (vertex_num <= max_vertices) {
++                        const auto range = vertex_cache->PlanRange(key, vs_input_index_min,
++                                                                   vs_input_index_max, max_vertices);
++                        const u32 count = range.last - range.first + 1;
++                        const u32 bytes = Common::AlignUp(aligned_stride * count, 4);
++                        const auto slot = vertex_cache->Reserve(bytes, 16, pinned_arenas);
++                        if (slot.ok()) {
++                            if (slot.recycle_tick && !scheduler.IsFree(slot.recycle_tick)) {
++                                scheduler.Wait(slot.recycle_tick);
++                                ++st_recycle_waits;
++                            }
++                            const u8* src_ptr = nullptr;
++                            u32 copy_size = 0, data_size = 0;
++                            const PAddr src_addr =
++                                source(range.first, count, src_ptr, copy_size, data_size);
++                            StreamBuffer& arena_buffer = *vertex_cache_arenas[slot.arena];
++                            write_block(arena_buffer.Data() + slot.offset, src_ptr, copy_size,
++                                        count, data_size);
++                            arena_buffer.FlushRange(slot.offset, bytes);
++                            vertex_cache->Insert(key, range.first, range.last, aligned_stride,
++                                                 src_addr, copy_size, slot);
++                            arena = slot.arena;
++                            cache_offset =
++                                slot.offset + (vs_input_index_min - range.first) * aligned_stride;
++                            placed = true;
++                            st_uploaded += bytes;
++                        }
++                    }
++                }
++                if (placed) {
++                    vertex_cache->Touch(arena, scheduler.CurrentTick());
++                    pinned_arenas |= 1u << arena;
++                    loader_buffer = vertex_cache_arenas[arena]->Handle();
++                    loader_offset = cache_offset;
+                 }
+-                StreamBuffer& arena = *vertex_cache_arenas[slot.arena];
+-                write_block(arena.Data() + slot.offset);
+-                arena.FlushRange(slot.offset, block_size);
+-                vertex_cache->Insert(key, block_size, slot);
+-                vertex_cache->Touch(slot.arena, scheduler.CurrentTick());
+-                vertex_cache->Report(cache_now, block_size, false);
+-                loader_buffer = arena.Handle();
+-                loader_offset = slot.offset;
+-                st_uploaded += block_size;
+             }
+-            placed = true;
+         }
+         if (!placed) {
++            const u8* src_ptr = nullptr;
++            u32 copy_size = 0, data_size = 0;
++            source(vs_input_index_min, vertex_num, src_ptr, copy_size, data_size);
+             auto [map_ptr, map_offset, wrapped] = stream_buffer.Map(block_size, 16);
+             (void)wrapped;
+-            write_block(map_ptr);
++            write_block(map_ptr, src_ptr, copy_size, vertex_num, data_size);
+             loader_offset = map_offset;
+             stream_buffer.Commit(block_size);
+-            st_uploaded += block_size;
++            st_streamed += block_size;
+         }
+ 
+         // Create the binding associated with this loader
+@@ -577,15 +608,18 @@ void RasterizerVulkan::SetupVertexArray() {
+     {
+         const auto now = std::chrono::steady_clock::now();
+         if (now - st_start >= std::chrono::seconds(5)) {
++            const auto& cs = vertex_cache->GetStats();
+             LOG_INFO(Render_Vulkan,
+-                     "Vertex data: {} MiB wanted, {} MiB served by the cache, {} MiB uploaded, {} "
+-                     "draws, largest block {} KiB; cache {} entries, {} arena turns, {} "
+-                     "windows switched off{}",
+-                     st_bytes >> 20, st_cache_hit_bytes >> 20, st_uploaded >> 20, st_draws,
+-                     st_max >> 10, vertex_cache->EntryCount(), vertex_cache->Rotations(),
+-                     vertex_cache->BypassedWindows(), cache_on ? "" : " (off now)");
++                     "Vertex data: {} MiB drawn in {} draws: {} MiB from the cache, {} MiB "
++                     "copied into it, {} MiB per-draw uploads ({} MiB of them from often-rewritten "
++                     "buffers); largest {} KiB. Cache: {} blocks, {} MiB of game memory watched, "
++                     "{} dropped by game writes, {} arena turns ({} waited), {} volatile buffers",
++                     st_bytes >> 20, st_draws, st_cache_hit_bytes >> 20, st_uploaded >> 20,
++                     st_streamed >> 20, st_volatile >> 20, st_max >> 10, cs.entries,
++                     cs.tracked_bytes >> 20, cs.invalidations, cs.recycles, st_recycle_waits,
++                     vertex_cache->VolatileKeys());
+             st_bytes = st_draws = st_max = st_uploaded = 0;
+-            st_cache_hit_bytes = 0;
++            st_cache_hit_bytes = st_streamed = st_volatile = st_recycle_waits = 0;
+             st_start = now;
+         }
+     }
+@@ -1052,31 +1086,59 @@ void RasterizerVulkan::FlushAll() {
+ 
+ void RasterizerVulkan::FlushRegion(PAddr addr, u32 size) {
+     res_cache.FlushRegion(addr, size);
++    vertex_cache->OnRead(addr, size);
+ }
+ 
+ void RasterizerVulkan::InvalidateRegion(PAddr addr, u32 size) {
+     res_cache.InvalidateRegion(addr, size);
++    vertex_cache->Invalidate(addr, size);
+ }
+ 
+ void RasterizerVulkan::FlushAndInvalidateRegion(PAddr addr, u32 size) {
+     res_cache.FlushRegion(addr, size);
+     res_cache.InvalidateRegion(addr, size);
++    vertex_cache->Invalidate(addr, size);
+ }
+ 
+ void RasterizerVulkan::ClearAll(bool flush) {
++    // Drop the vertex cache first: it releases its page marks through the texture cache's
++    // counters, which ClearAll wipes.
++    vertex_cache->Clear();
+     res_cache.ClearAll(flush);
+ }
+ 
++// The accelerated transfers below write guest memory on the GPU, out of sight of the page
++// tracking, so the vertex blocks copied from the destination are dropped here.
+ bool RasterizerVulkan::AccelerateDisplayTransfer(const Pica::DisplayTransferConfig& config) {
+-    return res_cache.AccelerateDisplayTransfer(config);
++    const bool done = res_cache.AccelerateDisplayTransfer(config);
++    if (done) {
++        vertex_cache->Invalidate(config.GetPhysicalOutputAddress(),
++                                 config.output_width * config.output_height * 4);
++    }
++    return done;
+ }
+ 
+ bool RasterizerVulkan::AccelerateTextureCopy(const Pica::DisplayTransferConfig& config) {
+-    return res_cache.AccelerateTextureCopy(config);
++    const bool done = res_cache.AccelerateTextureCopy(config);
++    if (done) {
++        const u32 copy = config.texture_copy.size & ~15u;
++        const u32 width = config.texture_copy.output_width * 16;
++        const u32 gap = config.texture_copy.output_gap * 16;
++        const u32 span = width ? copy + (copy / width + 1) * gap : copy;
++        vertex_cache->Invalidate(config.GetPhysicalOutputAddress(), span);
++    }
++    return done;
+ }
+ 
+ bool RasterizerVulkan::AccelerateFill(const Pica::MemoryFillConfig& config) {
+-    return res_cache.AccelerateFill(config);
++    const bool done = res_cache.AccelerateFill(config);
++    if (done) {
++        const u32 start = config.GetStartAddress(), end = config.GetEndAddress();
++        if (end > start) {
++            vertex_cache->Invalidate(start, end - start);
++        }
++    }
++    return done;
+ }
+ 
+ bool RasterizerVulkan::AccelerateDisplay(const Pica::FramebufferConfig& config,
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index b9bff68..a579640 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -130,7 +130,7 @@ private:
+ 
+     /// ONYX: persistent vertex cache (see vk_vertex_cache.h).
+     std::vector<std::unique_ptr<StreamBuffer>> vertex_cache_arenas;
+-    std::unique_ptr<VertexBlockCache> vertex_cache;
++    std::unique_ptr<VertexRegionCache> vertex_cache;
+     std::array<bool, 16> enable_attributes{};
+     std::array<vk::Buffer, 16> vertex_buffers;
+     VertexArrayInfo vertex_info;
+diff --git a/src/video_core/renderer_vulkan/vk_vertex_cache.h b/src/video_core/renderer_vulkan/vk_vertex_cache.h
+index fac899e..ac9551d 100644
+--- a/src/video_core/renderer_vulkan/vk_vertex_cache.h
++++ b/src/video_core/renderer_vulkan/vk_vertex_cache.h
+@@ -1,95 +1,156 @@
+-// ONYX: persistent vertex block cache (bookkeeping only, no Vulkan in here so it can be tested).
++// ONYX: persistent vertex cache with write tracking (bookkeeping only, no Vulkan in here so it
++// can be tested on its own).
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
+ #pragma once
+ 
++#include <algorithm>
+ #include <array>
+-#include <chrono>
+ #include <cstddef>
+ #include <cstdint>
++#include <functional>
+ #include <unordered_map>
+ #include <vector>
+ 
+ namespace Vulkan {
+ 
+ /**
+- * Remembers where vertex blocks already live in a set of upload arenas, so a draw whose vertex
+- * bytes were uploaded before (the same track geometry drawn again next frame) points at the old
+- * copy instead of copying the data again.
++ * Keeps converted copies of the game's vertex buffers on the GPU until the game writes to them.
+  *
+- * The memory is split into a few arenas. Blocks are appended to the active arena; when it is
+- * full the next arena becomes active, everything cached in it is forgotten, and the caller must
+- * first wait for the GPU to finish with the last submission that used it (RecycleTick). A block
+- * is never rewritten while it is cached, so a hit needs no synchronisation beyond Touch().
++ * A 3DS draw names a vertex buffer (a loader's base address) and the range of vertices its
++ * indices touch. Mario Kart 7 draws hundreds of pieces out of the same few multi-megabyte
++ * buffers every frame, so copying each draw's range (what the emulator did) moved ~10 GB/s.
++ * Here a buffer is copied once, as one block covering every range drawn from it, and later draws
++ * just point into it.
++ *
++ * Nothing is hashed. Instead the guest pages a block was copied from are marked through the
++ * rasterizer's page tracking (`track`): the first time the game, a DMA or a GPU transfer writes
++ * to one of them, Invalidate() is called and the block is dropped; the next draw copies it again.
++ * A buffer that keeps being rewritten right after it is copied (streamed geometry) is flagged
++ * volatile for a while and goes through the plain per-draw upload instead, so tracking does not
++ * slow the game's own writes down.
++ *
++ * Blocks live in a few big arenas filled in order. When the active arena is full the next one is
++ * recycled: everything in it is dropped and the caller waits for the GPU to finish the last
++ * submission that read it (Slot::recycle_tick). Arenas the current draw already points into are
++ * never recycled (`pinned`); in that case the draw falls back to the plain upload.
+  */
+-class VertexBlockCache {
++class VertexRegionCache {
+ public:
+     static constexpr std::size_t MAX_ARENAS = 8;
++    static constexpr std::uint32_t PAGE_BITS = 12;
++    static constexpr std::uint32_t NONE = 0xFFFFFFFFu;
+ 
+-    struct Hit {
+-        std::uint32_t arena;
+-        std::uint32_t offset;
+-    };
++    /// track(addr, size, +1 / -1): start / stop watching guest writes to these bytes.
++    using TrackFn = std::function<void(std::uint32_t addr, std::uint32_t size, int delta)>;
+ 
+     struct Slot {
+-        std::uint32_t arena;
+-        std::uint32_t offset;
+-        bool rotated;                 ///< the active arena changed to `arena`
+-        std::uint64_t recycle_tick;   ///< wait for this tick before writing (0 = nothing to wait)
++        std::uint32_t arena{NONE};
++        std::uint32_t offset{0};
++        std::uint64_t recycle_tick{0}; ///< wait for this GPU tick before writing (0 = no wait)
++        bool ok() const {
++            return arena != NONE;
++        }
++    };
++
++    struct Range {
++        std::uint32_t first; ///< first vertex index in the block
++        std::uint32_t last;  ///< last vertex index in the block
++    };
++
++    struct Stats {
++        std::uint64_t hits{0}, misses{0}, invalidations{0}, volatile_skips{0}, recycles{0},
++            pinned_fails{0}, entries{0}, tracked_bytes{0};
+     };
+ 
+-    VertexBlockCache(std::uint32_t arena_count, std::uint32_t arena_size)
+-        : count{arena_count > MAX_ARENAS ? static_cast<std::uint32_t>(MAX_ARENAS) : arena_count},
+-          size{arena_size} {
+-        entries.reserve(4096);
++    VertexRegionCache(std::uint32_t arena_count, std::uint32_t arena_size, TrackFn track_fn)
++        : count{std::clamp<std::uint32_t>(arena_count, 2, MAX_ARENAS)}, size{arena_size},
++          track{std::move(track_fn)} {
++        entries.reserve(1024);
+     }
+ 
+     std::uint32_t ArenaSize() const {
+         return size;
+     }
+-
+-    /// Largest block the cache accepts.
++    /// Largest block accepted (bigger ranges use the plain upload).
+     std::uint32_t MaxBlock() const {
+-        return size / 4;
++        return size / 2;
++    }
++
++    void SetFrame(std::uint64_t f) {
++        frame = f;
++    }
++    std::uint64_t Frame() const {
++        return frame;
+     }
+ 
+-    bool Lookup(std::uint64_t key, std::uint32_t block_size, Hit& out) const {
+-        const auto it = entries.find(key);
+-        if (it == entries.end() || it->second.size != block_size) {
+-            return false;
++    bool IsVolatile(std::uint64_t key) const {
++        const auto it = key_stats.find(key);
++        return it != key_stats.end() && it->second.volatile_until > frame;
++    }
++
++    /// A live block of `key` holding vertices [vmin, vmax]: its arena and the byte offset of vmin.
++    bool Lookup(std::uint64_t key, std::uint32_t vmin, std::uint32_t vmax, std::uint32_t& arena,
++                std::uint32_t& offset) {
++        const auto it = by_key.find(key);
++        if (it != by_key.end()) {
++            for (const std::uint32_t id : it->second) {
++                const Entry& e = entries[id];
++                if (e.live && e.first <= vmin && vmax <= e.last) {
++                    arena = e.arena;
++                    offset = e.offset + (vmin - e.first) * e.stride;
++                    ++stats.hits;
++                    return true;
++                }
++            }
+         }
+-        out = {it->second.arena, it->second.offset};
+-        return true;
++        ++stats.misses;
++        return false;
+     }
+ 
+-    /// Records that the arena is read by the submission `tick` (call on every hit and write).
+-    void Touch(std::uint32_t arena, std::uint64_t tick) {
+-        if (tick > last_tick[arena]) {
+-            last_tick[arena] = tick;
++    /// The vertex range to copy for a miss: the draw's range merged with the live blocks of the
++    /// same buffer, so a buffer ends up as one block (unless that would exceed max_vertices).
++    Range PlanRange(std::uint64_t key, std::uint32_t vmin, std::uint32_t vmax,
++                    std::uint32_t max_vertices) const {
++        Range r{vmin, vmax};
++        const auto it = by_key.find(key);
++        if (it == by_key.end()) {
++            return r;
++        }
++        for (const std::uint32_t id : it->second) {
++            const Entry& e = entries[id];
++            if (!e.live) {
++                continue;
++            }
++            const Range u{std::min(r.first, e.first), std::max(r.last, e.last)};
++            if (u.last - u.first + 1 <= max_vertices) {
++                r = u;
++            }
+         }
++        return r;
+     }
+ 
+-    /// Reserves room for a block. The returned slot is not findable until Insert().
+-    Slot Reserve(std::uint32_t block_size, std::uint32_t alignment) {
++    /// Room for a block. Fails (Slot::ok() false) when the arena that would have to be recycled
++    /// is pinned by the current draw.
++    Slot Reserve(std::uint32_t block_size, std::uint32_t alignment, std::uint32_t pinned_mask) {
+         Slot slot{};
++        if (block_size > size) {
++            return slot;
++        }
+         std::uint32_t at = Align(used, alignment);
+         if (at + block_size > size) {
+-            // Move on to the next arena and forget what it held.
+-            active = (active + 1) % count;
+-            slot.rotated = true;
+-            slot.recycle_tick = last_tick[active];
+-            last_tick[active] = 0;
+-            for (const std::uint64_t key : keys[active]) {
+-                const auto it = entries.find(key);
+-                if (it != entries.end() && it->second.arena == active) {
+-                    entries.erase(it);
+-                }
++            const std::uint32_t next = (active + 1) % count;
++            if (pinned_mask & (1u << next)) {
++                ++stats.pinned_fails;
++                return slot;
+             }
+-            keys[active].clear();
++            Recycle(next);
++            active = next;
++            slot.recycle_tick = last_tick[next];
++            last_tick[next] = 0;
+             used = 0;
+             at = 0;
+-            ++rotations;
+         }
+         used = at + block_size;
+         slot.arena = active;
+@@ -97,91 +158,261 @@ public:
+         return slot;
+     }
+ 
+-    void Insert(std::uint64_t key, std::uint32_t block_size, const Slot& slot) {
+-        entries[key] = {slot.arena, slot.offset, block_size};
+-        keys[slot.arena].push_back(key);
++    /// Records a block written at `slot`: vertices [first, last] with `stride` bytes each, copied
++    /// from guest bytes [src_begin, src_begin + src_size). Blocks of the same buffer that it
++    /// covers are dropped.
++    void Insert(std::uint64_t key, std::uint32_t first, std::uint32_t last, std::uint32_t stride,
++                std::uint32_t src_begin, std::uint32_t src_size, const Slot& slot) {
++        // Drop the blocks this one replaces.
++        if (const auto it = by_key.find(key); it != by_key.end()) {
++            const std::vector<std::uint32_t> ids = it->second;
++            for (const std::uint32_t id : ids) {
++                const Entry& e = entries[id];
++                if (e.live && first <= e.first && e.last <= last) {
++                    Kill(id);
++                }
++            }
++        }
++        std::uint32_t id;
++        if (!free_ids.empty()) {
++            id = free_ids.back();
++            free_ids.pop_back();
++        } else {
++            id = static_cast<std::uint32_t>(entries.size());
++            entries.emplace_back();
++        }
++        Entry& e = entries[id];
++        e = Entry{};
++        e.key = key;
++        e.first = first;
++        e.last = last;
++        e.stride = stride;
++        e.src_begin = src_begin;
++        e.src_end = src_begin + src_size;
++        e.arena = slot.arena;
++        e.offset = slot.offset;
++        e.created = frame;
++        e.live = true;
++        arena_ids[slot.arena].push_back(id);
++        by_key[key].push_back(id);
++        if (src_size) {
++            ForEachPage(e.src_begin, e.src_end, [&](std::uint32_t page) { pages[page].push_back(id); });
++            if (track) {
++                track(e.src_begin, src_size, +1);
++            }
++            stats.tracked_bytes += src_size;
++        }
++        ++stats.entries;
+     }
+ 
+-    std::uint32_t Active() const {
+-        return active;
+-    }
+-    std::uint64_t Rotations() const {
+-        return rotations;
+-    }
+-    std::size_t EntryCount() const {
+-        return entries.size();
++    /// Records that `arena` is read by GPU submission `tick`.
++    void Touch(std::uint32_t arena, std::uint64_t tick) {
++        if (tick > last_tick[arena]) {
++            last_tick[arena] = tick;
++        }
+     }
+ 
+-    // --- Adaptive switch -------------------------------------------------------------------
+-    // Hashing every block only pays when enough of them are found again. Every probe window the
+-    // byte hit rate is checked; a poor rate turns the cache off (no hashing, plain uploads) for
+-    // a while, then it probes again.
+-
+-    /// True when the cache should be used for the next draw.
+-    bool Enabled(std::chrono::steady_clock::time_point now) {
+-        if (bypass_until != std::chrono::steady_clock::time_point{}) {
+-            if (now < bypass_until) {
+-                return false;
+-            }
+-            bypass_until = {};
+-            window_start = now;
+-            window_bytes = window_hit_bytes = 0;
++    /// Guest bytes [addr, addr + bytes) were (or are about to be) written.
++    void Invalidate(std::uint32_t addr, std::uint32_t bytes) {
++        if (pages.empty() || bytes == 0) {
++            return;
+         }
+-        if (window_start == std::chrono::steady_clock::time_point{}) {
+-            window_start = now;
+-        }
+-        return true;
++        const std::uint32_t end = addr + bytes;
++        ForEachPage(addr, end, [&](std::uint32_t page) {
++            const auto it = pages.find(page);
++            if (it == pages.end()) {
++                return;
++            }
++            const std::vector<std::uint32_t> ids = it->second;
++            for (const std::uint32_t id : ids) {
++                Entry& e = entries[id];
++                if (!e.live || e.src_end <= addr || end <= e.src_begin) {
++                    continue;
++                }
++                Strike(e.key, frame - e.created <= 2);
++                Kill(id);
++                ++stats.invalidations;
++            }
++        });
+     }
+ 
+-    /// Reports the outcome of a cached-path draw.
+-    void Report(std::chrono::steady_clock::time_point now, std::uint32_t bytes, bool hit) {
+-        window_bytes += bytes;
+-        if (hit) {
+-            window_hit_bytes += bytes;
++    /// The game reads guest bytes the cache watches (each such read takes a slow path in the
++    /// emulated CPU). A block read this much is dropped and its buffer left untracked.
++    void OnRead(std::uint32_t addr, std::uint32_t bytes) {
++        if (pages.empty()) {
++            return;
+         }
+-        if (now - window_start >= probe_length) {
+-            // Under 20% of the bytes found again: not worth hashing.
+-            if (window_hit_bytes * 5 < window_bytes) {
+-                bypass_until = now + bypass_length;
+-                ++bypassed_windows;
++        const std::uint32_t end = addr + std::max<std::uint32_t>(bytes, 1);
++        ForEachPage(addr, end, [&](std::uint32_t page) {
++            const auto it = pages.find(page);
++            if (it == pages.end()) {
++                return;
++            }
++            const std::vector<std::uint32_t> ids = it->second;
++            for (const std::uint32_t id : ids) {
++                Entry& e = entries[id];
++                if (!e.live || e.src_end <= addr || end <= e.src_begin) {
++                    continue;
++                }
++                if (e.read_frame != frame) {
++                    e.read_frame = frame;
++                    e.reads = 0;
++                }
++                if (++e.reads > READS_PER_FRAME) {
++                    MakeVolatile(e.key);
++                    Kill(id);
++                }
++            }
++        });
++    }
++
++    /// Drops everything (and stops all tracking).
++    void Clear() {
++        for (std::uint32_t id = 0; id < entries.size(); id++) {
++            if (entries[id].live) {
++                Kill(id);
+             }
+-            window_start = now;
+-            window_bytes = window_hit_bytes = 0;
+         }
+     }
+ 
+-    std::uint64_t BypassedWindows() const {
+-        return bypassed_windows;
++    bool Tracks(std::uint32_t addr) const {
++        return pages.find(addr >> PAGE_BITS) != pages.end();
++    }
++
++    const Stats& GetStats() const {
++        return stats;
++    }
++    std::size_t LiveEntries() const {
++        std::size_t n = 0;
++        for (const auto& e : entries) {
++            n += e.live;
++        }
++        return n;
++    }
++    std::size_t VolatileKeys() const {
++        std::size_t n = 0;
++        for (const auto& [k, s] : key_stats) {
++            n += s.volatile_until > frame;
++        }
++        return n;
+     }
+ 
+-    std::chrono::milliseconds probe_length{1000};
+-    std::chrono::milliseconds bypass_length{4000};
++    // Tunables (public for tests).
++    std::uint32_t strikes_to_volatile = 3;
++    std::uint64_t volatile_frames = 600;
++    static constexpr std::uint32_t READS_PER_FRAME = 4096;
+ 
+ private:
+     struct Entry {
+-        std::uint32_t arena;
+-        std::uint32_t offset;
+-        std::uint32_t size;
++        std::uint64_t key{};
++        std::uint32_t first{}, last{}, stride{};
++        std::uint32_t src_begin{}, src_end{};
++        std::uint32_t arena{}, offset{};
++        std::uint64_t created{};
++        std::uint64_t read_frame{};
++        std::uint32_t reads{};
++        bool live{};
++    };
++    struct KeyStats {
++        std::uint32_t strikes{};
++        std::uint64_t last_strike{};
++        std::uint64_t volatile_until{};
+     };
+ 
+     static std::uint32_t Align(std::uint32_t v, std::uint32_t a) {
+         return a ? (v + a - 1) / a * a : v;
+     }
+ 
++    template <typename F>
++    static void ForEachPage(std::uint32_t begin, std::uint32_t end, F&& f) {
++        if (end <= begin) {
++            return;
++        }
++        for (std::uint32_t p = begin >> PAGE_BITS; p <= (end - 1) >> PAGE_BITS; p++) {
++            f(p);
++        }
++    }
++
++    void Strike(std::uint64_t key, bool soon_after_copy) {
++        KeyStats& s = key_stats[key];
++        // Strikes only count when the block was rewritten within a few frames of being copied,
++        // and they fade: a buffer edited once in a while stays cached.
++        if (!soon_after_copy) {
++            return;
++        }
++        if (frame - s.last_strike > 120) {
++            s.strikes = 0;
++        }
++        s.last_strike = frame;
++        if (++s.strikes >= strikes_to_volatile) {
++            s.volatile_until = frame + volatile_frames;
++            s.strikes = 0;
++        }
++    }
++
++    void MakeVolatile(std::uint64_t key) {
++        key_stats[key].volatile_until = frame + volatile_frames;
++    }
++
++    void Kill(std::uint32_t id) {
++        Entry& e = entries[id];
++        if (!e.live) {
++            return;
++        }
++        e.live = false;
++        if (e.src_end > e.src_begin) {
++            ForEachPage(e.src_begin, e.src_end, [&](std::uint32_t page) {
++                const auto it = pages.find(page);
++                if (it == pages.end()) {
++                    return;
++                }
++                auto& v = it->second;
++                v.erase(std::remove(v.begin(), v.end(), id), v.end());
++                if (v.empty()) {
++                    pages.erase(it);
++                }
++            });
++            if (track) {
++                track(e.src_begin, e.src_end - e.src_begin, -1);
++            }
++            stats.tracked_bytes -= e.src_end - e.src_begin;
++        }
++        if (const auto it = by_key.find(e.key); it != by_key.end()) {
++            auto& v = it->second;
++            v.erase(std::remove(v.begin(), v.end(), id), v.end());
++            if (v.empty()) {
++                by_key.erase(it);
++            }
++        }
++        --stats.entries;
++    }
++
++    void Recycle(std::uint32_t arena) {
++        for (const std::uint32_t id : arena_ids[arena]) {
++            if (entries[id].arena != arena) {
++                continue;
++            }
++            Kill(id);
++            free_ids.push_back(id);
++        }
++        arena_ids[arena].clear();
++        ++stats.recycles;
++    }
++
+     std::uint32_t count;
+     std::uint32_t size;
++    TrackFn track;
+     std::uint32_t active{0};
+     std::uint32_t used{0};
+-    std::uint64_t rotations{0};
++    std::uint64_t frame{1};
+     std::array<std::uint64_t, MAX_ARENAS> last_tick{};
+-    std::array<std::vector<std::uint64_t>, MAX_ARENAS> keys{};
+-    std::unordered_map<std::uint64_t, Entry> entries;
+-
+-    std::chrono::steady_clock::time_point window_start{};
+-    std::chrono::steady_clock::time_point bypass_until{};
+-    std::uint64_t window_bytes{0};
+-    std::uint64_t window_hit_bytes{0};
+-    std::uint64_t bypassed_windows{0};
++    std::array<std::vector<std::uint32_t>, MAX_ARENAS> arena_ids{};
++    std::vector<Entry> entries;
++    std::vector<std::uint32_t> free_ids;
++    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> by_key;
++    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> pages;
++    std::unordered_map<std::uint64_t, KeyStats> key_stats;
++    Stats stats;
+ };
+ 
+ } // namespace Vulkan
+-- 
+2.43.0
+
