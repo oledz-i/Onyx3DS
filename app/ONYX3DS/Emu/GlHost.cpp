@@ -192,8 +192,10 @@ bool GlHost::CreateContext(unsigned max_width, unsigned max_height, bool depth, 
     auto& f = *fn_;
 
     // No window: the context has a 1x1 stub default framebuffer, and the core
-    // draws into our framebuffer object instead. Core profile, 4.3 or newer.
-    context_ = f.CreateContext(4, 3, 1);
+    // draws into our framebuffer object instead. Core profile. Ask for the oldest core
+    // version: Mesa then returns the newest the GPU offers, and the version check
+    // below says what that was (4.3 is what the emulator needs).
+    context_ = f.CreateContext(3, 3, 1);
     if (!context_) {
         error = std::string("OpenGL: creating the context failed (") + f.LastError() + ")";
         return false;
