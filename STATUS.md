@@ -299,3 +299,6 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 ## Vertex cache checksum guard (Azahar 0058)
 Hypothesis for the MK7 flashing black characters/sky: cached vertex blocks going stale because some writers bypass page tracking. Each live block is now hashed against its source memory at most once per frame (8 MiB/frame budget); a mismatch drops and re-copies it. The 5-second "Vertex data:" log line now reports "found stale by checksum (N unchecked)". UNVERIFIED on device: if stale stays 0 in the next MK7 log, the cache is not the cause and the remaining suspects are the shadow companion (0051), hardware shaders on Dozen, and frame hand-off timing.
 Open: OpenGL bottom screen (no GL log since build 153; need a short GL log).
+
+## OpenGL bottom screen black (Azahar 0059, diagnostics only)
+Log from build 154 (real OpenGL 4.6): top screen lit, no GL errors, layout large_screen with bottom at 502x375 in the corner; user reports the bottom screen is black. Top and bottom share the same draw code, so the difference must be in how the bottom texture is produced. 0059 logs per screen every ~5 s: size, format, address, CPU-copy vs cache texture, texcoords. No fix yet. Known issue for 3.1.0.

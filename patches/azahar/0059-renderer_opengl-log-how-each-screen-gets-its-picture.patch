@@ -1,0 +1,46 @@
+From e683de5777d1b0b63930cfdfe815e698091a7271 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 15:23:51 -0400
+Subject: [PATCH] renderer_opengl: log how each screen gets its picture every 5
+ seconds
+
+---
+ .../renderer_opengl/renderer_opengl.cpp       | 22 +++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/src/video_core/renderer_opengl/renderer_opengl.cpp b/src/video_core/renderer_opengl/renderer_opengl.cpp
+index 09aad77..454bdd5 100644
+--- a/src/video_core/renderer_opengl/renderer_opengl.cpp
++++ b/src/video_core/renderer_opengl/renderer_opengl.cpp
+@@ -207,6 +207,28 @@ void RendererOpenGL::PrepareRendertarget() {
+             ConfigureFramebufferTexture(texture, framebuffer, color_fill);
+         }
+         LoadFBToScreenInfo(framebuffer, screen_infos[i], i == 1, color_fill);
++
++        // Once every few seconds, say how each screen got its picture: the bottom screen
++        // reported black on some consoles and this is what the next log needs to show.
++        static u32 diag_frame = 0;
++        if (i == 0) {
++            ++diag_frame;
++        }
++        if (diag_frame % 300 == 1) {
++            const auto& si = screen_infos[i];
++            LOG_INFO(Render_OpenGL,
++                     "Screen {}: {}x{} fmt {} addr {:#x} {} color fill {}; texture {} "
++                     "coords l{:.3f} t{:.3f} r{:.3f} b{:.3f}",
++                     i, framebuffer.width.Value(), framebuffer.height.Value(),
++                     static_cast<int>(framebuffer.color_format.Value()),
++                     framebuffer.active_fb == 0 ? framebuffer.address_left1
++                                                : framebuffer.address_left2,
++                     si.display_texture == si.texture.resource.handle ? "from CPU copy"
++                                                                        : "from the cache",
++                     color_fill.is_enabled ? "on" : "off", si.display_texture,
++                     si.display_texcoords.left, si.display_texcoords.top,
++                     si.display_texcoords.right, si.display_texcoords.bottom);
++        }
+     }
+ }
+ 
+-- 
+2.43.0
+
