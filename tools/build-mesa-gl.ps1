@@ -9,13 +9,13 @@ Use-VsDevShell
 $src = Join-Path $Deps "mesa"
 $build = Join-Path $DepsBuild "mesa-gl"
 $uwp = "-DMESA_UWP=1 -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00 /wd4189"
-$link = "/APPCONTAINER WindowsApp.lib d3d12.lib dxgi.lib"
 $store = Join-Path $env:VCToolsInstallDir "lib\x64\store"
 if (!(Test-Path (Join-Path $store "msvcrt.lib"))) { throw "Store CRT libs not found in $store" }
 
-# Meson's compiler sanity check builds and runs a test program, which cannot run
-# with the app CRT or /APPCONTAINER. So configure with desktop libraries and no
-# link flags, then switch to the store libraries for the real build.
+# The UWP link line (app CRT, /APPCONTAINER) lives on the onyx_gl target only, so
+# Meson's configure-time test programs still link with the desktop libraries and
+# run on this machine. ONYX_STORE_LIBS tells the target where the app CRT is.
+$env:ONYX_STORE_LIBS = $store
 Write-Step "Configuring Mesa (OpenGL on D3D12, UWP)"
 $env:CC = "cl"
 $env:CXX = "cl"
@@ -29,13 +29,11 @@ $mesonArgs = @(
     "-Dgallium-d3d12-video=disabled", "-Dgallium-va=disabled", "-Dgallium-mediafoundation=disabled",
     "-Dzstd=disabled", "-Dxmlconfig=disabled", "-Dvalgrind=disabled", "-Dlibunwind=disabled",
     "-Dmesa-clc=auto", "-Dprecomp-compiler=auto",
-    "-Dc_args=$uwp", "-Dcpp_args=$uwp"
+    "-Dc_args=$uwp", "-Dcpp_args=$uwp", "-Dc_link_args=", "-Dcpp_link_args="
 )
-if (!(Test-Path (Join-Path $build "build.ninja"))) {
-    Invoke-Checked meson @mesonArgs
-}
-Invoke-Checked meson configure $build "-Dc_link_args=$link" "-Dcpp_link_args=$link"
-$env:LIB = "$store;$env:LIB"
+$reconfigure = @()
+if (Test-Path (Join-Path $build "build.ninja")) { $reconfigure = @("--reconfigure") }
+Invoke-Checked meson @mesonArgs @reconfigure
 
 Write-Step "Building onyx_gl.dll"
 $out = Join-Path $build "src\gallium\targets\onyx_gl\onyx_gl.dll"

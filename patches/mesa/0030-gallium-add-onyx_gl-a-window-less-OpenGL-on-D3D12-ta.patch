@@ -1,8 +1,8 @@
-From e170e1279f7751cc431e23e10082fa2b931f819d Mon Sep 17 00:00:00 2001
+From a1082607eebd98a54c5a2fef2051380a5c3ea6ef Mon Sep 17 00:00:00 2001
 From: Jayden Holley <jaydenlholley@gmail.com>
 Date: Tue, 13 Oct 2026 07:52:33 -0400
-Subject: [PATCH 30/30] gallium: add onyx_gl, a window-less OpenGL-on-D3D12
- target for UWP
+Subject: [PATCH] gallium: add onyx_gl, a window-less OpenGL-on-D3D12 target
+ for UWP
 
 The WGL front end needs a window, GDI and user32. This target skips it: one
 D3D12 screen, state-tracker contexts with a 1x1 stub default framebuffer, and
@@ -11,10 +11,10 @@ Enabled with -Donyx-gl=true.
 ---
  meson.options                           |   7 +
  src/gallium/meson.build                 |   5 +-
- src/gallium/targets/onyx_gl/meson.build |  21 ++
+ src/gallium/targets/onyx_gl/meson.build |  35 ++++
  src/gallium/targets/onyx_gl/onyx_gl.c   | 253 ++++++++++++++++++++++++
  src/gallium/targets/onyx_gl/onyx_gl.def |   6 +
- 5 files changed, 291 insertions(+), 1 deletion(-)
+ 5 files changed, 305 insertions(+), 1 deletion(-)
  create mode 100644 src/gallium/targets/onyx_gl/meson.build
  create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.c
  create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.def
@@ -52,12 +52,25 @@ index 2a6117c0..bb2cbda2 100644
      if with_gallium_d3d12
 diff --git a/src/gallium/targets/onyx_gl/meson.build b/src/gallium/targets/onyx_gl/meson.build
 new file mode 100644
-index 00000000..7309c8db
+index 00000000..81c94607
 --- /dev/null
 +++ b/src/gallium/targets/onyx_gl/meson.build
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,35 @@
 +# ONYX 3DS: OpenGL on D3D12 for Universal Windows apps, without WGL or a window.
 +# SPDX-License-Identifier: MIT
++
++# UWP link line. Kept on this target only (not in the global link args) so that
++# Meson's configure-time test programs still link and run on the build machine.
++# ONYX_STORE_LIBS: the app-flavoured C/C++ runtime libraries; /LIBPATH is searched
++# before the LIB environment variable.
++_onyx_gl_link = ['/APPCONTAINER', 'WindowsApp.lib', 'd3d12.lib', 'dxgi.lib']
++_onyx_store = run_command(
++  prog_python, '-c', 'import os; print(os.environ.get("ONYX_STORE_LIBS", ""))',
++  check : true,
++).stdout().strip()
++if _onyx_store != ''
++  _onyx_gl_link += ['/LIBPATH:' + _onyx_store]
++endif
 +
 +libonyx_gl = shared_library(
 +  'onyx_gl',
@@ -72,6 +85,7 @@ index 00000000..7309c8db
 +  dependencies : [
 +    idep_nir, idep_mesautil, driver_d3d12,
 +  ],
++  link_args : _onyx_gl_link,
 +  name_prefix : '',
 +  install : false,
 +)
