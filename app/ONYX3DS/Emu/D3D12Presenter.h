@@ -140,7 +140,7 @@ private:
     // Large frames (3DS hardware read backs) cycle through 3 buffers, small ones (NES, the
     // 3DS software renderer) through all 6, so a GPU that runs a few frames behind does not
     // force dropped frames.
-    static constexpr int kUploads = 6;
+    static constexpr int kUploads = 8;
     uint64_t upload_busy_since_ = 0;
     uint64_t upload_dropped_ = 0;
     winrt::com_ptr<ID3D12Resource> upload_buffer_[kUploads];

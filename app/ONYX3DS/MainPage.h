@@ -48,6 +48,7 @@ private:
     Windows::UI::Xaml::Controls::Grid xmb_panel_{nullptr};
     Windows::UI::Xaml::Controls::StackPanel xmb_info_{nullptr};
     Windows::UI::Xaml::DispatcherTimer info_timer_{nullptr};
+    Windows::UI::Xaml::DispatcherTimer xmb_show_timer_{nullptr};
     std::string xmb_shown_;
     onyx::GameEntry xmb_pending_;
     int xmb_special_ = 0; // XMB layout: 0 = the home system's games, 1 = recent, 2 = favourites

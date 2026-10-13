@@ -679,6 +679,7 @@ void MainPage::StepCategory(int delta) {
 void MainPage::UpdateXmbPanel(const GameEntry& game) {
     if (!xmb_panel_ || xmb_shown_ == game.path) return;
     xmb_shown_ = game.path;
+    if (xmb_show_timer_) xmb_show_timer_.Stop();
     const Theme& t = Svc().CurrentTheme();
     xmb_panel_.Children().Clear();
 
@@ -798,21 +799,60 @@ void MainPage::FillXmbInfo(const GameEntry&, const GameInfo& info) {
         xmb_info_.Children().Append(text);
     }
     if (!info.shots.empty()) {
-        StackPanel shots;
-        shots.Orientation(Orientation::Horizontal);
-        shots.Spacing(14);
-        for (const auto& path : info.shots) {
+        // A slow screenshot slideshow: two stacked frames cross-fade while the one in view creeps
+        // outwards (a composition scale, so it costs the UI thread nothing per frame).
+        Grid stage;
+        stage.Width(640);
+        stage.Height(360);
+        stage.HorizontalAlignment(HorizontalAlignment::Left);
+        Border clip;
+        clip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{14, 14, 14, 14});
+        Grid layers;
+        std::vector<Border> frames;
+        for (int i = 0; i < 2; ++i) {
             Border frame;
-            frame.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{10, 10, 10, 10});
-            frame.Width(320);
-            frame.Height(192);
-            ImageBrush brush;
-            brush.ImageSource(ImageFromFile(path, 400));
-            brush.Stretch(Stretch::UniformToFill);
-            frame.Background(brush);
-            shots.Children().Append(frame);
+            frame.Opacity(i == 0 ? 1 : 0);
+            frame.OpacityTransition(ScalarTransition());
+            frame.CenterPoint(float3{320.f, 180.f, 0.f});
+            Vector3Transition zoom;
+            zoom.Duration(std::chrono::seconds(7));
+            frame.ScaleTransition(zoom);
+            layers.Children().Append(frame);
+            frames.push_back(frame);
         }
-        xmb_info_.Children().Append(shots);
+        clip.Child(layers);
+        stage.Children().Append(clip);
+        xmb_info_.Children().Append(stage);
+
+        auto shots = std::make_shared<std::vector<std::string>>(info.shots);
+        auto index = std::make_shared<int>(0);
+        auto front = std::make_shared<int>(0);
+        auto show = [frames, shots, index, front]() {
+            const int next = 1 - *front;
+            Border in = frames[next];
+            Border out = frames[*front];
+            ImageBrush brush;
+            brush.ImageSource(ImageFromFile((*shots)[*index % shots->size()], 800));
+            brush.Stretch(Stretch::UniformToFill);
+            in.Background(brush);
+            in.ScaleTransition(nullptr);  // snap back to full size unseen, then creep outwards slowly
+            in.Scale(float3{1.0f, 1.0f, 1.0f});
+            Vector3Transition zoom;
+            zoom.Duration(std::chrono::seconds(7));
+            in.ScaleTransition(zoom);
+            in.Opacity(1);
+            in.Scale(float3{1.08f, 1.08f, 1.0f});
+            out.Opacity(0);
+            *front = next;
+            ++*index;
+        };
+        show();
+        if (shots->size() > 1) {
+            xmb_show_timer_ = DispatcherTimer();
+            xmb_show_timer_.Interval(std::chrono::seconds(6));
+            xmb_show_timer_.Tick([show](auto&&, auto&&) { show(); });
+            xmb_show_timer_.Start();
+        }
     }
     if (!info.source.empty())
         xmb_info_.Children().Append(kit::Text("Details from Wikipedia, screenshots from the libretro thumbnail project", 14, false,

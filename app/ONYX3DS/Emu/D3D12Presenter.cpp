@@ -462,7 +462,7 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
         }
 
         // This upload buffer and allocator were last used two frames ago.
-        const int uploads = static_cast<uint64_t>(width) * height <= 512u * 512u ? kUploads : 3;
+        const int uploads = static_cast<uint64_t>(width) * height <= 1024u * 1024u ? kUploads : 4;
         const int u = upload_index_ % uploads;
         if (upload_fence_->GetCompletedValue() < upload_value_[u]) {
             // The GPU has not finished reading this buffer yet (the presenter's queue

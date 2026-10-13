@@ -1,0 +1,33 @@
+From 4f32dbc463f831c6501e25aea1b7e29f6360af78 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 22:53:05 -0400
+Subject: [PATCH] dzn: read the PSO cache path from the Win32 environment block
+
+---
+ src/microsoft/vulkan/dzn_pipeline.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index f62b6652..da028ef5 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2464,9 +2464,14 @@ onyx_pso_library(struct dzn_device *device)
+       return onyx_pso.lib;
+    mtx_init(&onyx_pso.lock, mtx_plain);
+    onyx_pso.inited = true;
+-   const char *path = getenv("ONYX_PSO_CACHE");
+-   if (!path || !path[0] || strlen(path) >= sizeof(onyx_pso.path))
++   /* The Win32 environment block is shared across DLLs; the CRT copy is not. */
++   char envbuf[512];
++   DWORD envlen = GetEnvironmentVariableA("ONYX_PSO_CACHE", envbuf, sizeof(envbuf));
++   if (envlen == 0 || envlen >= sizeof(envbuf) || envlen >= sizeof(onyx_pso.path)) {
++      mesa_logw("dzn: PSO cache off (ONYX_PSO_CACHE %s)", envlen ? "too long" : "not set");
+       return NULL;
++   }
++   const char *path = envbuf;
+    strcpy(onyx_pso.path, path);
+ 
+    void *blob = NULL;
+-- 
+2.43.0
+

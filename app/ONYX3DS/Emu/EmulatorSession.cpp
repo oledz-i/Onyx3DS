@@ -437,9 +437,14 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         // Compiled GPU pipelines are kept per game, so a scene seen before loads without the 1-3 s compiles.
         const std::string dir = JoinPath(Paths().cache, "pso");
         UwpFileSystem().CreateDirs(dir);
-        _putenv_s("ONYX_PSO_CACHE", settings.qol.pipeline_cache && !software_ && !use_gl_
-                                        ? JoinPath(dir, game.SaveKey() + ".bin").c_str()
-                                        : "");
+        const std::string pso = settings.qol.pipeline_cache && !software_ && !use_gl_
+                                    ? JoinPath(dir, game.SaveKey() + ".bin") : std::string();
+        _putenv_s("ONYX_PSO_CACHE", pso.c_str());
+        // The Dozen DLL has its own C runtime; only the Win32 environment block is shared with it.
+        {
+            std::wstring w(pso.begin(), pso.end());  // paths are ASCII (cache dir + hex save key)
+            SetEnvironmentVariableW(L"ONYX_PSO_CACHE", w.empty() ? nullptr : w.c_str());
+        }
     }
     UpdateFolders(settings.folders);
     ff_speed_ = settings.qol.fast_forward_speed;
