@@ -1,0 +1,50 @@
+From bd9c7aa66372b611b126443d3f45b5f94960eb0b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 07:21:59 -0400
+Subject: [PATCH] dzn: give up on the PSO library for a device after one
+ failure
+
+---
+ src/microsoft/vulkan/dzn_pipeline.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 625c30f3..617f4edb 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2417,6 +2417,7 @@ static struct {
+    ID3D12PipelineLibrary1 *lib;
+    char path[512];
+    bool dirty;
++   bool failed; /* creating the library failed once: do not try again on this device */
+    int64_t last_save_ns;
+    unsigned hits, misses, stores;
+ } onyx_pso = { 0 };
+@@ -2478,6 +2479,8 @@ onyx_pso_library_locked(struct dzn_device *device)
+ {
+    if (onyx_pso.lib)
+       return onyx_pso.lib;
++   if (onyx_pso.failed)
++      return NULL;
+    if (!onyx_pso.inited) {
+       mtx_init(&onyx_pso.lock, mtx_plain);
+       onyx_pso.inited = true;
+@@ -2534,6 +2537,7 @@ onyx_pso_library_locked(struct dzn_device *device)
+       if (FAILED(h)) {
+          mesa_logw("dzn: PSO cache unavailable on this system (0x%08x)", (unsigned)h);
+          onyx_pso.lib = NULL;
++         onyx_pso.failed = true;
+          return NULL;
+       }
+    } else {
+@@ -2546,6 +2550,7 @@ onyx_pso_library_locked(struct dzn_device *device)
+ void
+ onyx_pso_flush(void)
+ {
++   onyx_pso.failed = false; /* a new device may try again */
+    if (!onyx_pso.inited || !onyx_pso.lib)
+       return;
+    mtx_lock(&onyx_pso.lock);
+-- 
+2.43.0
+

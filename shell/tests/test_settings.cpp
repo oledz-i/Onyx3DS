@@ -146,7 +146,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
 
     s.version = 1;
     const Settings back = Settings::FromJson(s.ToJson(), ConsoleModel::SeriesS);
-    CHECK(back.version == 4);
+    CHECK(back.version == 5);
     CHECK(back.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Software");
 
     // Hardware users stay on Vulkan (OpenGL is not offered in this build).
@@ -155,7 +155,7 @@ TEST_CASE("Renderer: Vulkan is opt-in, old settings files move to Software") {
     v2.core[keys::kGraphicsApi] = "Vulkan";
     v2.per_game["0004000000055D00"][keys::kGraphicsApi] = "Vulkan";
     const Settings moved = Settings::FromJson(v2.ToJson(), ConsoleModel::SeriesS);
-    CHECK(moved.version == 4);
+    CHECK(moved.version == 5);
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "").at(keys::kGraphicsApi) == "Vulkan");
     CHECK(moved.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000055D00").at(keys::kGraphicsApi) ==
           "Vulkan");

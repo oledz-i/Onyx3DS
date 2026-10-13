@@ -414,6 +414,11 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         s.qol.direct_display = true;
         s.version = 4;
     }
+    // v5: the pipeline cache crashed the GPU on console (D3D12 pipeline library); it is opt-in again.
+    if (s.version < 5) {
+        s.qol.pipeline_cache = false;
+        s.version = 5;
+    }
     // OpenGL is not offered in this build; anyone who had it goes to Vulkan.
     if (s.core[keys::kGraphicsApi] == "OpenGL") s.core[keys::kGraphicsApi] = "Vulkan";
     for (auto& [title, opts] : s.per_game) {

@@ -457,7 +457,7 @@ void SettingsPage::BuildEmulation() {
              "game from the game's channel page.");
 
     Add(kit::SectionHeader("Emulation"));
-    Add(kit::SettingRow("Remember compiled graphics", "Keeps what the GPU compiled for each game on disk, so scenes load without the pauses on the next visit",
+    Add(kit::SettingRow("Remember compiled graphics (experimental)", "Keeps what the GPU compiled for each game on disk so scenes load without pauses. Crashed the graphics driver in testing, leave off unless asked to try it",
                         kit::Toggle(Cfg().qol.pipeline_cache, [](bool on) {
                             Cfg().qol.pipeline_cache = on;
                             Save();
