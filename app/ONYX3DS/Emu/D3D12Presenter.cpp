@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pch.h"
+#include <emmintrin.h>
 #include "Emu/D3D12Presenter.h"
 #include "onyx/nes_support.h"
 
@@ -12,6 +13,35 @@
 namespace onyx::app {
 
 namespace {
+
+// One row of a frame into the upload buffer (write-combined memory: written once,
+// front to back, never read). rgba: already in R,G,B order, only the alpha is forced.
+void ConvertRow(const uint32_t* in, uint32_t* out, uint32_t width, bool rgba) {
+    const __m128i alpha = _mm_set1_epi32(static_cast<int>(0xFF000000u));
+    uint32_t x = 0;
+    if (rgba) {
+        for (; x + 4 <= width; x += 4) {
+            const __m128i p = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + x));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out + x), _mm_or_si128(p, alpha));
+        }
+        for (; x < width; ++x) out[x] = in[x] | 0xFF000000u;
+    } else {
+        const __m128i gmask = _mm_set1_epi32(0x0000FF00);
+        const __m128i bmask = _mm_set1_epi32(0x000000FF);
+        for (; x + 4 <= width; x += 4) {
+            const __m128i p = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + x));
+            const __m128i b = _mm_slli_epi32(_mm_and_si128(p, bmask), 16);
+            const __m128i g = _mm_and_si128(p, gmask);
+            const __m128i r = _mm_and_si128(_mm_srli_epi32(p, 16), bmask);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out + x),
+                             _mm_or_si128(_mm_or_si128(b, g), _mm_or_si128(r, alpha)));
+        }
+        for (; x < width; ++x) {
+            const uint32_t p = in[x];
+            out[x] = 0xFF000000u | ((p & 0xFFu) << 16) | (p & 0xFF00u) | ((p >> 16) & 0xFFu);
+        }
+    }
+}
 // Waits until `fence` reaches `value`: on the event in 1 ms slices, checking the
 // fence value in between. On Xbox a completion event sometimes fires ~0.5 s late;
 // trusting it alone froze the display for that long every couple of seconds.
@@ -520,18 +550,14 @@ bool D3D12Presenter::PushCpuFrame(const void* data, uint32_t width, uint32_t hei
             upload_size_[u] = total;
         }
 
-        // XRGB8888 (bytes B,G,R,X) -> RGBA8 with opaque alpha.
+        // XRGB8888 (bytes B,G,R,X) -> RGBA8 with opaque alpha, four pixels at a time.
         const auto* src = static_cast<const uint8_t*>(data);
         for (uint32_t y = 0; y < height; ++y) {
-            const uint32_t* in =
+            const auto* in =
                 reinterpret_cast<const uint32_t*>(src + (flip_y ? height - 1 - y : y) * pitch);
-            uint32_t* out = reinterpret_cast<uint32_t*>(upload_mapped_[u] + fp.Offset +
-                                                        static_cast<size_t>(y) * fp.Footprint.RowPitch);
-            for (uint32_t x = 0; x < width; ++x) {
-                const uint32_t p = in[x];
-                out[x] = rgba ? (p | 0xFF000000u)
-                              : 0xFF000000u | ((p & 0xFFu) << 16) | (p & 0xFF00u) | ((p >> 16) & 0xFFu);
-            }
+            auto* out = reinterpret_cast<uint32_t*>(upload_mapped_[u] + fp.Offset +
+                                                    static_cast<size_t>(y) * fp.Footprint.RowPitch);
+            ConvertRow(in, out, width, rgba);
         }
 
         upload_alloc_[u]->Reset();
