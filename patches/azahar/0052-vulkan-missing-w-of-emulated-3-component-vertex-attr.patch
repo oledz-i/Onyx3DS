@@ -1,0 +1,30 @@
+From d2d8c36bd15cf77bf911a71c88683694917e772c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 06:29:57 -0400
+Subject: [PATCH] vulkan: missing w of emulated 3 component vertex attributes
+ is 1, not 0
+
+---
+ src/video_core/shader/generator/glsl_shader_gen.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/shader/generator/glsl_shader_gen.cpp b/src/video_core/shader/generator/glsl_shader_gen.cpp
+index 6de5f96..050519f 100644
+--- a/src/video_core/shader/generator/glsl_shader_gen.cpp
++++ b/src/video_core/shader/generator/glsl_shader_gen.cpp
+@@ -284,7 +284,11 @@ std::string GenerateVertexShader(const ShaderSetup& setup, const PicaVSConfig& c
+         if (used_regs[i]) {
+             out += fmt::format("vs_in_reg{0} = vec4(vs_in_typed_reg{0});\n", i);
+             if (True(extra.load_flags[i] & AttribLoadFlags::ZeroW)) {
+-                out += fmt::format("vs_in_reg{0}.w = 0;\n", i);
++                // ONYX: a 3 component attribute read through a 4 component format (Dozen has no
++                // 3 component byte/short formats). The PICA, and every driver that has the
++                // native format, give the missing w as 1; 0 collapsed the translation of every
++                // position and bone weight stored that way (OoT3D's models).
++                out += fmt::format("vs_in_reg{0}.w = 1.0;\n", i);
+             }
+         }
+     }
+-- 
+2.43.0
+
