@@ -1,0 +1,47 @@
+From 96336302e64182772c4b423e167191e66e0bbdbf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 13:54:32 -0400
+Subject: [PATCH] d3d12 (UWP): expose shader images and texture views so OpenGL
+ reaches 4.3 on Xbox
+
+The console driver lacks typed UAV loads for a few of the extra formats
+ARB_shader_image_load_store lists and lacks relaxed format casting, which hid
+images, compute shaders and texture views, and left the context at 4.1. Images
+stay checked per format; same-format views need no casting.
+---
+ src/gallium/drivers/d3d12/d3d12_screen.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/gallium/drivers/d3d12/d3d12_screen.cpp b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+index df1f81ab..11f97d78 100644
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -415,6 +415,11 @@ d3d12_init_screen_caps(struct d3d12_screen *screen)
+    caps->max_texture_upload_memory_budget = 64 * 1024 * 1024;
+ 
+    caps->sampler_view_target = screen->opts12.RelaxedFormatCastingSupported;
++#ifdef MESA_UWP
++   /* ONYX (Xbox): ARB_texture_view is the last piece of OpenGL 4.3 this driver hides. Views of
++    * the same format (all the emulator creates) need no relaxed casting. */
++   caps->sampler_view_target = true;
++#endif
+ 
+ #ifndef _GAMING_XBOX
+    caps->query_memory_info = true;
+@@ -1824,6 +1829,13 @@ d3d12_init_screen(struct d3d12_screen *screen, IUnknown *adapter)
+ 
+       screen->have_load_at_vertex = can_attribute_at_vertex(screen);
+       screen->support_shader_images = can_shader_image_load_all_formats(screen);
++#ifdef MESA_UWP
++      /* ONYX (Xbox): the console driver lacks typed UAV loads for a few of the extra formats
++       * ARB_shader_image_load_store lists, which hid images, compute and with them OpenGL 4.3.
++       * Images stay checked per format in is_format_supported, so formats without typed UAV
++       * loads are still refused; 3DS emulation only needs R32_UINT images (shadows). */
++      screen->support_shader_images = true;
++#endif
+       static constexpr uint64_t known_good_warp_version_build = 22000ull;
+       bool warp_with_broken_int64 =
+          (screen->vendor_id == HW_VENDOR_MICROSOFT &&
+-- 
+2.43.0
+

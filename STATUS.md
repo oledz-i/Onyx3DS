@@ -278,3 +278,8 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Every new non-compressed surface image is now cleared once after its first layout change (Dozen only). Costs one barrier pair and a clear per new surface.
 - Same hypothesis may also explain the MK7 black characters/white fog and the earlier Zelda logo spots; none of this is confirmed. If Smash still shows static after this, the cause is elsewhere (texture decode, or the shadow companion copy from 0051, which is the other open MK7 suspect).
 - MK7 black characters/fog (onyx_8): not the vertex cache (0 errors, 99% hits, same bytes as the old path) and not skipped draws (complete-graphics mode waits). Still open.
+
+## OpenGL 4.3 on Xbox (Mesa 0034, unverified on console)
+- onyx_10 log: the "OpenGL" run was really Vulkan ("OpenGL renderer requested but unavailable; using Vulkan"): the context is 4.1 because Mesa hides ARB_shader_image_load_store (Xbox lacks typed UAV loads for some extra formats), ARB_compute_shader (needs images) and ARB_texture_view (needs relaxed format casting).
+- 0034 (MESA_UWP builds only): shader images on, still refused per format without typed UAV load/store; texture views on (Azahar only makes same-format views). Expected: "OpenGL context ... 4.3" and the game really running on OpenGL. Risk: a cast view or an image format the driver can't do fails at use time instead of being hidden.
+- Same log: Smash in-game was clean on Vulkan this time while onyx_9 (same renderer, same build) showed static. Consistent with the leftover-memory cause behind 0057.
