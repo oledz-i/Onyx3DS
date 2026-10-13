@@ -1,0 +1,312 @@
+From 4044799e03eb66ad70e15802a05de9e7e585882f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 23:02:00 -0400
+Subject: [PATCH] vulkan: run the shadow path on an R32_UINT companion image on
+ Dozen
+
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         |  3 +
+ .../renderer_vulkan/vk_render_manager.cpp     | 38 +++++++---
+ .../renderer_vulkan/vk_render_manager.h       |  4 +
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 74 ++++++++++++++++++-
+ .../renderer_vulkan/vk_texture_runtime.h      | 49 +++++++++++-
+ 5 files changed, 156 insertions(+), 12 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index a3953f1..543abac 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -910,6 +910,9 @@ void RasterizerVulkan::SyncUtilityTextures(const Framebuffer* framebuffer) {
+         const u32 shadow_texture_unit = regs.lighting.config0.shadow_selector.Value();
+         const auto shadow_texture = regs.texturing.GetTextures()[shadow_texture_unit];
+         Surface& shadow_surface = res_cache.GetTextureSurface(shadow_texture);
++        if (shadow_surface.NeedsShadowCopy()) {
++            shadow_surface.SyncShadowCopy(true); // Dozen: refresh the R32_UINT companion
++        }
+         update_queue.AddStorageImage(utility_set, 0, shadow_surface.StorageView());
+     } else {
+         if (instance.IsNullDescriptorSupported()) {
+diff --git a/src/video_core/renderer_vulkan/vk_render_manager.cpp b/src/video_core/renderer_vulkan/vk_render_manager.cpp
+index a78033e..c0d5b05 100644
+--- a/src/video_core/renderer_vulkan/vk_render_manager.cpp
++++ b/src/video_core/renderer_vulkan/vk_render_manager.cpp
+@@ -40,9 +40,24 @@ void RenderManager::BeginRendering(const Framebuffer* framebuffer,
+         .clear = {},
+         .do_clear = false,
+     };
++    if (!(pass == new_pass)) {
++        // Close the previous pass (and its barriers/copies) before the state below changes.
++        EndRendering();
++    }
+     images = framebuffer->Images();
+     aspects = framebuffer->Aspects();
+     shadow_rendering = framebuffer->shadow_rendering;
++    if (shadow_rendering && framebuffer->ShadowRealImage() && !(pass == new_pass)) {
++        // Dozen: the pass works on an R32_UINT companion that starts as a copy of the surface.
++        shadow_real = framebuffer->ShadowRealImage();
++        shadow_image = images[0];
++        shadow_w = framebuffer->ShadowWidth();
++        shadow_h = framebuffer->ShadowHeight();
++        scheduler.Record([real = shadow_real, shadow = shadow_image, w = shadow_w,
++                          h = shadow_h](vk::CommandBuffer cmdbuf) {
++            RecordShadowCopy(cmdbuf, real, shadow, w, h);
++        });
++    }
+     BeginRendering(new_pass);
+ }
+ 
+@@ -72,8 +87,9 @@ void RenderManager::EndRendering() {
+         return;
+     }
+ 
+-    scheduler.Record([images = images, aspects = aspects,
+-                      shadow_rendering = shadow_rendering](vk::CommandBuffer cmdbuf) {
++    scheduler.Record([images = images, aspects = aspects, shadow_rendering = shadow_rendering,
++                      shadow_real = shadow_real, shadow_image = shadow_image, shadow_w = shadow_w,
++                      shadow_h = shadow_h](vk::CommandBuffer cmdbuf) {
+         u32 num_barriers = 0;
+         vk::PipelineStageFlags pipeline_flags{};
+         vk::AccessFlags src_access_flags{};
+@@ -113,14 +129,16 @@ void RenderManager::EndRendering() {
+             };
+         }
+         cmdbuf.endRenderPass();
+-        if (num_barriers == 0) {
+-            return;
++        if (num_barriers != 0) {
++            cmdbuf.pipelineBarrier(pipeline_flags,
++                                   vk::PipelineStageFlagBits::eFragmentShader |
++                                       vk::PipelineStageFlagBits::eTransfer,
++                                   vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr,
++                                   num_barriers, barriers.data());
++        }
++        if (shadow_real) {
++            RecordShadowCopy(cmdbuf, shadow_image, shadow_real, shadow_w, shadow_h);
+         }
+-        cmdbuf.pipelineBarrier(pipeline_flags,
+-                               vk::PipelineStageFlagBits::eFragmentShader |
+-                                   vk::PipelineStageFlagBits::eTransfer,
+-                               vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr,
+-                               num_barriers, barriers.data());
+     });
+ 
+     // Reset state.
+@@ -128,6 +146,8 @@ void RenderManager::EndRendering() {
+     images = {};
+     aspects = {};
+     shadow_rendering = false;
++    shadow_real = vk::Image{};
++    shadow_image = vk::Image{};
+ 
+     // The Mali guide recommends flushing at the end of each major renderpass
+     // Testing has shown this has a significant effect on rendering performance
+diff --git a/src/video_core/renderer_vulkan/vk_render_manager.h b/src/video_core/renderer_vulkan/vk_render_manager.h
+index 2f0da1f..f633c39 100644
+--- a/src/video_core/renderer_vulkan/vk_render_manager.h
++++ b/src/video_core/renderer_vulkan/vk_render_manager.h
+@@ -68,6 +68,10 @@ private:
+     std::array<vk::Image, 2> images;
+     std::array<vk::ImageAspectFlags, 2> aspects;
+     bool shadow_rendering{};
++    vk::Image shadow_real{};
++    vk::Image shadow_image{};
++    u32 shadow_w{};
++    u32 shadow_h{};
+     RenderPass pass{};
+     u32 num_draws{};
+ };
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index c34cd45..fc387a5 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -1558,6 +1558,67 @@ void Surface::BlitScale(const VideoCore::TextureBlit& blit, bool up_scale) {
+     });
+ }
+ 
++void RecordShadowCopy(vk::CommandBuffer cmdbuf, vk::Image src, vk::Image dst, u32 width,
++                      u32 height) {
++    const vk::MemoryBarrier before = {
++        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
++        .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
++    };
++    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
++                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, before,
++                           {}, {});
++    const vk::ImageCopy region = {
++        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
++        .srcOffset = {0, 0, 0},
++        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
++        .dstOffset = {0, 0, 0},
++        .extent = {width, height, 1},
++    };
++    cmdbuf.copyImage(src, vk::ImageLayout::eGeneral, dst, vk::ImageLayout::eGeneral, region);
++    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
++                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, before,
++                           {}, {});
++}
++
++void Surface::EnsureShadowCopy() {
++    const Handle& real = handles[current];
++    if (shadow_copy.image && shadow_copy.width == real.width && shadow_copy.height == real.height) {
++        return;
++    }
++    runtime.renderpass_cache.EndRendering();
++    shadow_copy.Create(real.width, real.height, 1, VideoCore::TextureType::Texture2D,
++                       vk::Format::eR32Uint,
++                       vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc |
++                           vk::ImageUsageFlagBits::eTransferDst,
++                       vk::ImageCreateFlags{}, vk::ImageAspectFlagBits::eColor, false,
++                       DebugName(false) + " shadow");
++    const std::array<vk::Image, 1> raw_images = {shadow_copy.image};
++    scheduler.Record([raw_images](vk::CommandBuffer cmdbuf) {
++        std::array<vk::ImageMemoryBarrier, 3> barriers;
++        MakeInitBarriers(vk::ImageAspectFlagBits::eColor, 1, raw_images, barriers);
++        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
++                               vk::PipelineStageFlagBits::eTopOfPipe,
++                               vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
++                               barriers.data());
++    });
++}
++
++void Surface::SyncShadowCopy(bool to_shadow) {
++    EnsureShadowCopy();
++    runtime.renderpass_cache.EndRendering();
++    const vk::Image real = Image();
++    const vk::Image shadow = shadow_copy.image;
++    const u32 w = shadow_copy.width;
++    const u32 h = shadow_copy.height;
++    scheduler.Record([real, shadow, w, h, to_shadow](vk::CommandBuffer cmdbuf) {
++        if (to_shadow) {
++            RecordShadowCopy(cmdbuf, real, shadow, w, h);
++        } else {
++            RecordShadowCopy(cmdbuf, shadow, real, w, h);
++        }
++    });
++}
++
+ Framebuffer::Framebuffer(TextureRuntime& runtime, const VideoCore::FramebufferParams& params,
+                          Surface* color, Surface* depth)
+     : VideoCore::FramebufferParams{params}, instance{runtime.GetInstance()},
+@@ -1588,8 +1649,17 @@ Framebuffer::Framebuffer(TextureRuntime& runtime, const VideoCore::FramebufferPa
+         height = extent.height;
+         render_pass =
+             renderpass_cache.GetRenderpass(PixelFormat::Invalid, PixelFormat::Invalid, false);
+-        images[0] = color->Image();
+-        image_views[0] = color->StorageView();
++        if (color->NeedsShadowCopy()) {
++            // The pass writes the R32_UINT companion; RenderManager copies to and from it.
++            image_views[0] = color->StorageView();
++            images[0] = color->ShadowImage();
++            shadow_real = color->Image();
++            shadow_w = color->ShadowWidth();
++            shadow_h = color->ShadowHeight();
++        } else {
++            images[0] = color->Image();
++            image_views[0] = color->StorageView();
++        }
+         aspects[0] = vk::ImageAspectFlagBits::eColor;
+     } else {
+         if (color) {
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.h b/src/video_core/renderer_vulkan/vk_texture_runtime.h
+index 8ce827e..e01cc4f 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.h
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.h
+@@ -243,9 +243,32 @@ public:
+     /// Returns the R32 image view used for atomic load/store.
+     vk::ImageView StorageView() noexcept {
+         is_storage = true;
++        if (NeedsShadowCopy()) {
++            EnsureShadowCopy();
++            return shadow_copy.image_views[ViewType::Sample];
++        }
+         return ImageView(ViewType::Storage);
+     }
+ 
++    /// ONYX: Dozen (Vulkan on D3D12) cannot view an RGBA8 image as R32_UINT, so the shadow
++    /// path works on a companion R32_UINT image that is copied to and from the real one.
++    bool NeedsShadowCopy() const noexcept {
++        return instance.GetDriverID() == vk::DriverId::eMesaDozen &&
++               traits.native == vk::Format::eR8G8B8A8Unorm && handles[current].image;
++    }
++    void EnsureShadowCopy();
++    vk::Image ShadowImage() const noexcept {
++        return shadow_copy.image;
++    }
++    /// Copies the real image into the companion (to_shadow) or the companion back.
++    void SyncShadowCopy(bool to_shadow);
++    u32 ShadowWidth() const noexcept {
++        return shadow_copy.width;
++    }
++    u32 ShadowHeight() const noexcept {
++        return shadow_copy.height;
++    }
++
+     /// Uploads pixel data in staging to a rectangle region of the surface texture
+     void Upload(const VideoCore::BufferTextureCopy& upload, const VideoCore::StagingData& staging);
+ 
+@@ -288,6 +311,7 @@ public:
+     vk::UniqueImageView storage_view;
+     bool is_framebuffer{};
+     bool is_storage{};
++    Handle shadow_copy{instance};
+ };
+ 
+ class Framebuffer : public VideoCore::FramebufferParams {
+@@ -310,7 +334,9 @@ public:
+           formats(std::exchange(
+               other.formats, {VideoCore::PixelFormat::Invalid, VideoCore::PixelFormat::Invalid})),
+           width(std::exchange(other.width, 0)), height(std::exchange(other.height, 0)),
+-          res_scale(std::exchange(other.res_scale, 1)) {}
++          res_scale(std::exchange(other.res_scale, 1)),
++          shadow_real(std::exchange(other.shadow_real, {})),
++          shadow_w(std::exchange(other.shadow_w, 0)), shadow_h(std::exchange(other.shadow_h, 0)) {}
+ 
+     Framebuffer& operator=(Framebuffer&& other) noexcept {
+         VideoCore::FramebufferParams::operator=(std::move(other));
+@@ -325,6 +351,9 @@ public:
+         width = std::exchange(other.width, 0);
+         height = std::exchange(other.height, 0);
+         res_scale = std::exchange(other.res_scale, 1);
++        shadow_real = std::exchange(other.shadow_real, {});
++        shadow_w = std::exchange(other.shadow_w, 0);
++        shadow_h = std::exchange(other.shadow_h, 0);
+ 
+         return *this;
+     }
+@@ -353,6 +382,17 @@ public:
+         return render_pass;
+     }
+ 
++    /// Dozen shadow rendering: the real image behind the companion the pass writes to.
++    [[nodiscard]] vk::Image ShadowRealImage() const noexcept {
++        return shadow_real;
++    }
++    [[nodiscard]] u32 ShadowWidth() const noexcept {
++        return shadow_w;
++    }
++    [[nodiscard]] u32 ShadowHeight() const noexcept {
++        return shadow_h;
++    }
++
+     u32 Scale() const noexcept {
+         return res_scale;
+     }
+@@ -370,8 +410,15 @@ private:
+     u32 width{};
+     u32 height{};
+     u32 res_scale{1};
++    vk::Image shadow_real{};
++    u32 shadow_w{};
++    u32 shadow_h{};
+ };
+ 
++/// Records a full-image copy between same-sized 32-bit images (RGBA8 <-> R32_UINT).
++void RecordShadowCopy(vk::CommandBuffer cmdbuf, vk::Image src, vk::Image dst, u32 width,
++                      u32 height);
++
+ class Sampler {
+ public:
+     Sampler(TextureRuntime& runtime, const VideoCore::SamplerParams& params);
+-- 
+2.43.0
+
