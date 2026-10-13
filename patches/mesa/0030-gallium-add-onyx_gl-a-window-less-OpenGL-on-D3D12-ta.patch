@@ -1,4 +1,4 @@
-From 0df1665d7c0c80ff753862b1de5a39ad8e935ee8 Mon Sep 17 00:00:00 2001
+From ad38d7ea73c07e1c7ccb576053bdd86078a03b4d Mon Sep 17 00:00:00 2001
 From: Jayden Holley <jaydenlholley@gmail.com>
 Date: Tue, 13 Oct 2026 07:52:33 -0400
 Subject: [PATCH] gallium: add onyx_gl, a window-less OpenGL-on-D3D12 target
@@ -11,10 +11,10 @@ Enabled with -Donyx-gl=true.
 ---
  meson.options                           |   7 +
  src/gallium/meson.build                 |   5 +-
- src/gallium/targets/onyx_gl/meson.build |  35 ++++
+ src/gallium/targets/onyx_gl/meson.build |  38 ++++
  src/gallium/targets/onyx_gl/onyx_gl.c   | 255 ++++++++++++++++++++++++
  src/gallium/targets/onyx_gl/onyx_gl.def |   6 +
- 5 files changed, 307 insertions(+), 1 deletion(-)
+ 5 files changed, 310 insertions(+), 1 deletion(-)
  create mode 100644 src/gallium/targets/onyx_gl/meson.build
  create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.c
  create mode 100644 src/gallium/targets/onyx_gl/onyx_gl.def
@@ -52,10 +52,10 @@ index 2a6117c0..bb2cbda2 100644
      if with_gallium_d3d12
 diff --git a/src/gallium/targets/onyx_gl/meson.build b/src/gallium/targets/onyx_gl/meson.build
 new file mode 100644
-index 00000000..81c94607
+index 00000000..435a664e
 --- /dev/null
 +++ b/src/gallium/targets/onyx_gl/meson.build
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,38 @@
 +# ONYX 3DS: OpenGL on D3D12 for Universal Windows apps, without WGL or a window.
 +# SPDX-License-Identifier: MIT
 +
@@ -63,7 +63,10 @@ index 00000000..81c94607
 +# Meson's configure-time test programs still link and run on the build machine.
 +# ONYX_STORE_LIBS: the app-flavoured C/C++ runtime libraries; /LIBPATH is searched
 +# before the LIB environment variable.
-+_onyx_gl_link = ['/APPCONTAINER', 'WindowsApp.lib', 'd3d12.lib', 'dxgi.lib']
++# /FORCE:MULTIPLE: the app C runtime also carries C11 thread functions (call_once,
++# mtx_*, thrd_*); Mesa brings its own, and the build script then checks that the
++# finished DLL imports nothing the console lacks.
++_onyx_gl_link = ['/APPCONTAINER', '/FORCE:MULTIPLE', 'WindowsApp.lib', 'd3d12.lib', 'dxgi.lib']
 +_onyx_store = run_command(
 +  prog_python, '-c', 'import os; print(os.environ.get("ONYX_STORE_LIBS", ""))',
 +  check : true,
