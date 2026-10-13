@@ -256,3 +256,4 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - `GlHost` now loads `onyx_gl.dll` (core 4.3 context, 1x1 stub default framebuffer, core draws into its own FBO, PBO read-back as before).
 - Settings: "Hardware (OpenGL, experimental)" is selectable again (settings v6). Falls back to Vulkan when the DLL is not in the package.
 - Nothing here has been built yet; first CI run will show the Mesa compile/link problems, if any.
+- CI result: onyx_gl.dll builds, links, passes the Xbox import check and is in the package (build with "OpenGL: driver messages go to the app log"). NOT yet run on a console. Fixes it took: no WindowFromDC/GetModuleFileName on UWP, GL headers before windows.h, Mesa's C11 thread functions renamed (the app runtime exports the same names), zlib off, configure with desktop libs and keep the UWP link line on the target only.
