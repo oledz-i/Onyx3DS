@@ -1,0 +1,90 @@
+From 1dc5804929c37526b52f1e4b18ac9b8667814ee0 Mon Sep 17 00:00:00 2001
+From: Jayden Holley <jaydenlholley@gmail.com>
+Date: Tue, 13 Oct 2026 08:39:57 -0400
+Subject: [PATCH] onyx_gl: application log hook; forward debug_printf to it on
+ UWP
+
+The D3D12 gallium driver reports problems through debug_printf, which only
+reaches the debugger output. A UWP app cannot see that, so give the messages
+to the same hook Dozen uses.
+---
+ src/gallium/targets/onyx_gl/onyx_gl.c   | 11 +++++++++++
+ src/gallium/targets/onyx_gl/onyx_gl.def |  1 +
+ src/util/u_debug.c                      | 16 ++++++++++++++++
+ 3 files changed, 28 insertions(+)
+
+diff --git a/src/gallium/targets/onyx_gl/onyx_gl.c b/src/gallium/targets/onyx_gl/onyx_gl.c
+index b8a1d0a3..f28c6824 100644
+--- a/src/gallium/targets/onyx_gl/onyx_gl.c
++++ b/src/gallium/targets/onyx_gl/onyx_gl.c
+@@ -18,6 +18,7 @@
+ #include "util/u_inlines.h"
+ #include "util/u_memory.h"
+ #include "util/u_atomic.h"
++#include "util/log.h"
+ #include "pipe/p_screen.h"
+ #include "pipe/p_context.h"
+ #include "pipe/p_state.h"
+@@ -248,6 +249,16 @@ onyx_gl_get_proc_address(const char *name)
+    return (void *)_mesa_glapi_get_proc_address(name);
+ }
+ 
++/* Lets the application receive every driver message (it cannot see stderr or
++ * the debugger output). Same contract as Dozen's hook. */
++ONYX_GL_API void
++onyx_set_log_hook(void (*hook)(int level, const char *msg))
++{
++   g_mesa_log_hook = hook;
++   if (hook)
++      hook(MESA_LOG_INFO, "onyx_gl: log hook installed");
++}
++
+ ONYX_GL_API const char *
+ onyx_gl_last_error(void)
+ {
+diff --git a/src/gallium/targets/onyx_gl/onyx_gl.def b/src/gallium/targets/onyx_gl/onyx_gl.def
+index 7d9451da..7ec699ec 100644
+--- a/src/gallium/targets/onyx_gl/onyx_gl.def
++++ b/src/gallium/targets/onyx_gl/onyx_gl.def
+@@ -4,3 +4,4 @@ onyx_gl_make_current
+ onyx_gl_destroy_context
+ onyx_gl_get_proc_address
+ onyx_gl_last_error
++onyx_set_log_hook
+diff --git a/src/util/u_debug.c b/src/util/u_debug.c
+index 83e51e16..49993d60 100644
+--- a/src/util/u_debug.c
++++ b/src/util/u_debug.c
+@@ -28,6 +28,7 @@
+ 
+ #include "util/u_atomic.h"
+ #include "util/u_debug.h"
++#include "util/log.h"
+ #include "util/u_string.h"
+ #include "util/u_math.h"
+ #include "c11/threads.h"
+@@ -52,6 +53,21 @@ _debug_vprintf(const char *format, va_list ap)
+    size_t len = strlen(buf);
+    int ret = vsnprintf(buf + len, sizeof(buf) - len, format, ap);
+    if (ret > (int)(sizeof(buf) - len - 1) || strchr(buf + len, '\n')) {
++#ifdef MESA_UWP
++      /* ONYX: the debugger output is not visible in a UWP app; give the
++       * message to the application's log hook as well. */
++      mesa_log_hook_func hook = g_mesa_log_hook;
++      if (hook) {
++         char line[1024];
++         strncpy(line, buf, sizeof(line) - 1);
++         line[sizeof(line) - 1] = '\0';
++         size_t n = strlen(line);
++         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
++            line[--n] = '\0';
++         if (n)
++            hook(MESA_LOG_WARN, line);
++      }
++#endif
+       os_log_message(buf);
+       buf[0] = '\0';
+    }
+-- 
+2.43.0
+

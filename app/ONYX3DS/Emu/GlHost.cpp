@@ -116,6 +116,8 @@ bool GlHost::Load(std::string& error) {
                 std::to_string(GetLastError()) + ")";
         return false;
     }
+    // Before anything else talks to the library, so the first messages are logged too.
+    InstallDriverLogHook(module_);
     auto& f = *fn_;
 #define ONYXGL(name, sym) f.name = reinterpret_cast<decltype(f.name)>(::GetProcAddress(module_, sym))
     ONYXGL(CreateContext, "onyx_gl_create_context");
