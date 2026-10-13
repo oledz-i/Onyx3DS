@@ -228,3 +228,8 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Crossbar hover panel (Settings > Interface > "Game details on the crossbar"): SteamGridDB hero as banner with logo, play facts, then after 350 ms description, release date, developer, publisher, genre (Wikipedia, no key) and two screenshots (libretro thumbnail project, community-made). Cached in cache/info. No clips. The two web sources could not be reached from the build machine, so the live format of their replies is untested; parsers are unit-tested on sample data.
 - Mesa 0025: compiled pipeline states are kept in an ID3D12PipelineLibrary per game (cache/pso/<game>.bin, setting "Remember compiled graphics"). Log lines "PSO cache loaded / saved / closed: N loaded from cache, N compiled". Falls back silently to compiling if the console refuses libraries.
 - Not done from the performance list: frame hand-off copy (readback to the presenter), presenter drop tuning.
+
+### Next build scope (set Mon 2026-10-12 night): performance only
+- Focus: Vulkan on Old 3DS mode (60 and 30 fps options), then stabilise Vulkan for New 3DS mode. No new features.
+- Tester note: "Complete graphics" did not fix the Zelda logo spots, but models looked better. Logo is low priority.
+- Waiting on the test of the pipeline cache and SteamGridDB (logs wanted: "PSO cache" lines, "Artwork:" lines).
