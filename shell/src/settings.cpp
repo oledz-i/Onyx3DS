@@ -131,6 +131,11 @@ CoreOptions Settings::EffectiveCoreOptions(ConsoleModel model,
         if (p != PerfProfile::Custom && base.count(k)) continue;
         out[k] = v;
     }
+    // Known fixes that apply until the player saves their own value for the game.
+    // Ocarina of Time 3D (JP, US, EU): GPU vertex shaders garble the models on Dozen, the CPU path is clean.
+    if (title_id_hex == "0004000000033400" || title_id_hex == "0004000000033500" ||
+        title_id_hex == "0004000000033600")
+        out[keys::kHwShader] = "disabled";
     if (auto it = per_game.find(title_id_hex); it != per_game.end())
         for (const auto& [k, v] : it->second) out[k] = v;
     // Never let a saved value pick a renderer the console cannot run. The Xbox

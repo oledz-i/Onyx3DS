@@ -1,0 +1,74 @@
+From 78c04fc5ad6733c75c65246db84d814aeeb06d04 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 06:22:32 -0400
+Subject: [PATCH] dzn: look for the PSO cache variable again after the first
+ device (home screen)
+
+---
+ src/microsoft/vulkan/dzn_pipeline.c | 35 +++++++++++++++++++++++++----
+ 1 file changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index da028ef5..625c30f3 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -2457,18 +2457,42 @@ onyx_pso_save_locked(void)
+    mesa_logw("dzn: PSO cache saved (%u KB)", (unsigned)(size / 1024));
+ }
+ 
++static ID3D12PipelineLibrary1 *onyx_pso_library_locked(struct dzn_device *device);
++
+ static ID3D12PipelineLibrary1 *
+ onyx_pso_library(struct dzn_device *device)
+ {
+-   if (onyx_pso.inited)
++   static volatile LONG gate;
++   if (onyx_pso.lib)
++      return onyx_pso.lib;
++   /* Several pipeline-compile threads can arrive together: one creates the library. */
++   while (InterlockedCompareExchange(&gate, 1, 0) != 0)
++      Sleep(0);
++   ID3D12PipelineLibrary1 *lib = onyx_pso_library_locked(device);
++   InterlockedExchange(&gate, 0);
++   return lib;
++}
++
++static ID3D12PipelineLibrary1 *
++onyx_pso_library_locked(struct dzn_device *device)
++{
++   if (onyx_pso.lib)
+       return onyx_pso.lib;
+-   mtx_init(&onyx_pso.lock, mtx_plain);
+-   onyx_pso.inited = true;
++   if (!onyx_pso.inited) {
++      mtx_init(&onyx_pso.lock, mtx_plain);
++      onyx_pso.inited = true;
++   }
+    /* The Win32 environment block is shared across DLLs; the CRT copy is not. */
+    char envbuf[512];
+    DWORD envlen = GetEnvironmentVariableA("ONYX_PSO_CACHE", envbuf, sizeof(envbuf));
+    if (envlen == 0 || envlen >= sizeof(envbuf) || envlen >= sizeof(onyx_pso.path)) {
+-      mesa_logw("dzn: PSO cache off (ONYX_PSO_CACHE %s)", envlen ? "too long" : "not set");
++      /* The frontend sets the variable when a game starts; a device created earlier
++       * (the home screen) simply has no cache. Look again on the next pipeline. */
++      static bool logged;
++      if (!logged && envlen) {
++         logged = true;
++         mesa_logw("dzn: PSO cache off (ONYX_PSO_CACHE too long)");
++      }
+       return NULL;
+    }
+    const char *path = envbuf;
+@@ -2530,6 +2554,9 @@ onyx_pso_flush(void)
+    onyx_pso_log_stats("closed");
+    ID3D12PipelineLibrary1_Release(onyx_pso.lib);
+    onyx_pso.lib = NULL;
++   onyx_pso.path[0] = 0;
++   onyx_pso.hits = onyx_pso.misses = onyx_pso.stores = 0;
++   onyx_pso.dirty = false;
+ }
+ 
+ #define ONYX_HASH(T) do { \
+-- 
+2.43.0
+
