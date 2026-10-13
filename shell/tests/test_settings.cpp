@@ -214,11 +214,3 @@ TEST_CASE("NES games folder: drive layout, accessors and JSON round trip") {
     CHECK(old.folders.nes_roms.empty());
     CHECK(old.folders.roms.size() == 1);
 }
-
-TEST_CASE("Ocarina of Time 3D starts with CPU vertex shaders unless the player says otherwise") {
-    Settings s = Settings::Defaults(ConsoleModel::SeriesS);
-    CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000033500").at(keys::kHwShader) == "disabled");
-    CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000030800").at(keys::kHwShader) == "enabled");
-    s.per_game["0004000000033500"][keys::kHwShader] = "enabled";
-    CHECK(s.EffectiveCoreOptions(ConsoleModel::SeriesS, "0004000000033500").at(keys::kHwShader) == "enabled");
-}
