@@ -5,6 +5,9 @@
 // steamgriddb.com/profile/preferences/api, entered in Settings > Services.
 #pragma once
 
+#include <functional>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -67,10 +70,30 @@ private:
     int last_status_ = 0;
 };
 
+// Games SteamGridDB had nothing for, remembered between launches so an unmatched game
+// (a ROM hack, homebrew) is not searched for again on every start. Thread-safe.
+class ArtMissCache {
+public:
+    static constexpr u64 kRetrySeconds = 7ull * 24 * 3600;
+    void Load(IFileSystem& fs, const std::string& path);
+    void Save(IFileSystem& fs, const std::string& path) const;
+    bool RecentlyMissed(const std::string& key, u64 now) const;
+    void Add(const std::string& key, u64 now);
+    void Forget(const std::string& key);
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, u64> missed_;
+};
+
 // Downloads grid/hero/logo for a game into <art_dir> and fills in the
 // GameEntry paths. Returns true when at least one image was saved.
 class ArtScraper {
 public:
+    // Called (on the scraping thread) after each picture is saved, with the game as it is so far,
+    // so a tile can show its cover before the hero and logo have finished downloading.
+    std::function<void(const GameEntry&)> on_saved;
+
     ArtScraper(SteamGridDb& sgdb, IFileSystem& fs, std::string art_dir);
     bool Scrape(GameEntry& game, bool overwrite = false);
     // Same, for a game the user picked themselves.

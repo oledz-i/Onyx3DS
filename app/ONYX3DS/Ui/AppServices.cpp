@@ -44,6 +44,7 @@ void AppServices::Initialize() {
     nes_library_ = std::make_unique<GameLibrary>(fs_, JoinPath(p.cache, "nes"), GameSystem::Nes);
     nes_library_->Load();
     gba_library_ = std::make_unique<GameLibrary>(fs_, JoinPath(p.cache, "gba"), GameSystem::Gba);
+    game_info_ = std::make_unique<GameInfoService>(http_, fs_, JoinPath(p.cache, "info"));
     gba_library_->Load();
     cheat_db_ = std::make_unique<CheatDatabase>(http_, fs_, p.cache);
     ra_ = std::make_unique<Achievements>(http_, [](std::function<void()> f) { RunAsync(std::move(f)); });
@@ -118,40 +119,69 @@ void AppServices::RescanLibrary(std::function<void(size_t)> done) {
             if (done) done(n);
         });
         if (auto_art) {
-            // Fill in missing artwork quietly after the grid is up.
-            SteamGridDb sgdb(http_, settings_.services.steamgriddb_api_key);
+            std::vector<GameEntry> all = games;
+            all.insert(all.end(), nes_games.begin(), nes_games.end());
+            all.insert(all.end(), gba_games.begin(), gba_games.end());
+            FillMissingArt(std::move(all), done);
+        }
+    });
+}
+
+// Downloads missing covers four games at a time. A tile gets its cover as soon as that one picture
+// is saved; games SteamGridDB had nothing for are not asked again for a week.
+void AppServices::FillMissingArt(std::vector<GameEntry> games, std::function<void(size_t)> done) {
+    const std::string misses_file = JoinPath(Paths().art, "misses.txt");
+    if (!art_misses_loaded_) {
+        art_misses_.Load(fs_, misses_file);
+        art_misses_loaded_ = true;
+    }
+    auto queue = std::make_shared<std::vector<GameEntry>>();
+    const u64 now = NowUnix();
+    for (auto& g : games) {
+        if (g.system == GameSystem::N3DS && !g.IsLaunchable()) continue;
+        if (!g.grid_art.empty() && fs_.Exists(g.grid_art)) continue;
+        if (art_misses_.RecentlyMissed(g.path, now)) continue;
+        queue->push_back(g);
+    }
+    if (queue->empty()) return;
+    ONYX_INFO("Artwork: %zu games without a cover, fetching", queue->size());
+    auto next = std::make_shared<std::atomic<size_t>>(0);
+    auto fetched = std::make_shared<std::atomic<int>>(0);
+    auto running = std::make_shared<std::atomic<int>>(4);
+    auto last_refresh = std::make_shared<std::atomic<u64>>(0);
+    const std::string key = settings_.services.steamgriddb_api_key;
+    for (int w = 0; w < 4; ++w) {
+        RunAsync([=, this] {
+            SteamGridDb sgdb(http_, key);
             ArtScraper scraper(sgdb, fs_, Paths().art);
-            int fetched = 0;
-            for (auto g : games) {
-                if (!g.IsLaunchable() || !g.grid_art.empty()) continue;
+            scraper.on_saved = [&](const GameEntry& g) {
+                LibraryFor(g.system).Update(g);
+                // Show the new cover now, but not more than once a second.
+                const u64 t = NowUnix();
+                u64 prev = last_refresh->load();
+                if (t > prev && last_refresh->compare_exchange_strong(prev, t))
+                    RunOnUi([this, done] { if (done) done(library_->All().size()); });
+            };
+            for (size_t i; (i = next->fetch_add(1)) < queue->size();) {
+                GameEntry g = (*queue)[i];
                 if (scraper.Scrape(g)) {
-                    library_->Update(g);
-                    ++fetched;
+                    LibraryFor(g.system).Update(g);
+                    ++*fetched;
+                } else if (sgdb.LastStatus() == 200 || sgdb.LastStatus() == 404) {
+                    art_misses_.Add(g.path, NowUnix()); // reachable, but nothing for this game
                 }
             }
-            for (auto g : nes_games) {
-                if (!g.grid_art.empty()) continue;
-                if (scraper.Scrape(g)) {
-                    nes_library_->Update(g);
-                    ++fetched;
-                }
-            }
-            for (auto g : gba_games) {
-                if (!g.grid_art.empty()) continue;
-                if (scraper.Scrape(g)) {
-                    gba_library_->Update(g);
-                    ++fetched;
-                }
-            }
-            if (fetched) {
-                RunOnUi([this, fetched, done] {
-                    Toast("Artwork downloaded for " + std::to_string(fetched) +
-                          (fetched == 1 ? " game" : " games"));
+            if (--*running == 0) {
+                art_misses_.Save(fs_, misses_file);
+                const int n = fetched->load();
+                ONYX_INFO("Artwork: %d covers fetched", n);
+                RunOnUi([this, n, done] {
+                    if (n) Toast("Artwork downloaded for " + std::to_string(n) + (n == 1 ? " game" : " games"));
                     if (done) done(library_->All().size());
                 });
             }
-        }
-    });
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +451,10 @@ void AppServices::ScrapeArt(const GameEntry& game, bool overwrite, std::function
         SteamGridDb sgdb(http_, key);
         ArtScraper scraper(sgdb, fs_, Paths().art);
         const bool ok = scraper.Scrape(g, overwrite);
-        if (ok) LibraryFor(g.system).Update(g);
+        if (ok) {
+            LibraryFor(g.system).Update(g);
+            art_misses_.Forget(g.path);
+        }
         const int status = sgdb.LastStatus();
         RunOnUi([this, ok, status, done] {
             if (!ok) {
@@ -430,6 +463,23 @@ void AppServices::ScrapeArt(const GameEntry& game, bool overwrite, std::function
                                                      : "No artwork found for this game");
             }
             if (done) done(ok);
+        });
+    });
+}
+
+void AppServices::LoadGameInfo(const GameEntry& game, std::function<void(GameInfo)> done) {
+    RunAsync([this, game, done = std::move(done)] {
+        GameInfo info = game_info_->Cached(game);
+        if (!info.found) {
+            {
+                // One online attempt per game per session: offline, hovering must not keep retrying.
+                std::scoped_lock lock(info_mutex_);
+                if (!info_tried_.insert(GameInfoService::Key(game)).second) return;
+            }
+            info = game_info_->Get(game);
+        }
+        RunOnUi([info = std::move(info), done] {
+            if (done) done(info);
         });
     });
 }

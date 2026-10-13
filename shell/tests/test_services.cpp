@@ -163,3 +163,99 @@ TEST_CASE("SteamGridDB: a game picked by the user and an image link") {
     CHECK_FALSE(scraper.SetGridFromUrl(g, "not a link"));
     CHECK(g.grid_art == before);
 }
+
+TEST_CASE("SteamGridDB: misses are remembered and expire; grids fall back to any size") {
+    TempDir dir;
+    StdFileSystem fs;
+    ArtMissCache cache;
+    cache.Add("0004000000012300", 1000);
+    cache.Save(fs, dir.Str() + "/misses.txt");
+    ArtMissCache loaded;
+    loaded.Load(fs, dir.Str() + "/misses.txt");
+    CHECK(loaded.RecentlyMissed("0004000000012300", 2000));
+    CHECK_FALSE(loaded.RecentlyMissed("other", 2000));
+    CHECK_FALSE(loaded.RecentlyMissed("0004000000012300", 1000 + ArtMissCache::kRetrySeconds + 1));
+    loaded.Forget("0004000000012300");
+    CHECK_FALSE(loaded.RecentlyMissed("0004000000012300", 2000));
+
+    FakeHttp http;
+    const std::string base = "https://www.steamgriddb.com/api/v2";
+    http.routes[base + "/grids/game/9?dimensions=920x430,460x215&mimes=image/png,image/jpeg"
+                       "&types=static&nsfw=false&humor=false"] = {200, R"({"success":true,"data":[]})", ""};
+    http.routes[base + "/grids/game/9?mimes=image/png,image/jpeg&types=static&nsfw=false&humor=false"] =
+        {200, R"({"success":true,"data":[{"id":4,"score":1,"url":"https://cdn/b.png","mime":"image/png"}]})", ""};
+    SteamGridDb sgdb(http, "key");
+    const auto images = sgdb.Images(SgdbArt::Grid, 9);
+    REQUIRE(images.size() == 1);
+    CHECK(images[0].url == "https://cdn/b.png");
+}
+
+#include "onyx/game_info.h"
+
+TEST_CASE("Game info: Wikipedia infobox, release date and screenshot names") {
+    CHECK(GameInfoService::CleanWikiText("[[Nintendo EAD Tokyo|Nintendo EAD]]") == "Nintendo EAD");
+    CHECK(GameInfoService::CleanWikiText("{{Plainlist|\n* [[Nintendo]]\n* [[Monolith Soft]]\n}}") == "Nintendo, Monolith Soft");
+    CHECK(GameInfoService::CleanWikiText("[[Platform game|Platformer]]<ref>x</ref>") == "Platformer");
+    CHECK(GameInfoService::ReleaseDate("{{Video game release|JP|November 3, 2011|NA|November 13, 2011}}") == "November 3, 2011");
+    CHECK(GameInfoService::ReleaseDate("{{vgrelease|WW|2011-11-03}}") == "November 3, 2011");
+    CHECK(GameInfoService::ReleaseDate("2011") == "2011");
+
+    const auto titles = GameInfoService::ParseSearchTitles(
+        R"({"query":{"search":[{"title":"Super Mario 3D Land"},{"title":"Super Mario 3D World"}]}})");
+    REQUIRE(titles.size() == 2);
+    const std::string page = R"({"query":{"pages":[{"title":"Super Mario 3D Land","extract":"Super Mario 3D Land is a platform game.","revisions":[{"slots":{"main":{"content":
+"{{Infobox video game\n| title = Super Mario 3D Land\n| developer = [[Nintendo EAD Tokyo|Nintendo EAD]]\n| publisher = [[Nintendo]]\n| genre = [[Platform game|Platform]]\n| released = {{Video game release|JP|November 3, 2011|NA|November 13, 2011}}\n}}\n"}}}]}]}})";
+    const auto articles = GameInfoService::ParseArticles(page);
+    REQUIRE(articles.size() == 1);
+    const GameInfo info = GameInfoService::FromArticle(articles[0]);
+    CHECK(info.developer == "Nintendo EAD");
+    CHECK(info.publisher == "Nintendo");
+    CHECK(info.genre == "Platform");
+    CHECK(info.released == "November 3, 2011");
+    CHECK(info.summary.starts_with("Super Mario 3D Land"));
+
+    const auto names = GameInfoService::ParseListing(
+        R"(<a href="Super%20Mario%203D%20Land%20%28Europe%29.png">x</a><a href="Super%20Mario%203D%20Land%20%28USA%29.png">y</a><a href="Super%20Mario%203D%20World.png">z</a>)");
+    REQUIRE(names.size() == 3);
+    CHECK(names[1] == "Super Mario 3D Land (USA)");
+    CHECK(GameInfoService::BestSnapName(names, "Super Mario 3D Land") == "Super Mario 3D Land (USA)");
+    CHECK(GameInfoService::BestSnapName(names, "Zelda").empty());
+}
+
+TEST_CASE("Game info: fetch, cache and remember misses") {
+    TempDir dir;
+    StdFileSystem fs;
+    FakeHttp http;
+    const std::string api = "https://en.wikipedia.org/w/api.php";
+    http.routes[api + "?action=query&list=search&srlimit=4&format=json&srsearch=Kart%20Racer%20Nintendo%203DS%20video%20game"] =
+        {200, R"({"query":{"search":[{"title":"Kart Racer"}]}})", ""};
+    http.routes[api + "?action=query&prop=extracts|revisions&exintro=1&explaintext=1&rvprop=content&rvslots=main&redirects=1&format=json&formatversion=2&titles=Kart%20Racer"] =
+        {200, R"({"query":{"pages":[{"title":"Kart Racer","extract":"A racing game.","revisions":[{"slots":{"main":{"content":"{{Infobox video game\n| publisher = [[Nintendo]]\n}}"}}}]}]}})", ""};
+    http.routes["https://thumbnails.libretro.com/Nintendo%20-%20Nintendo%203DS/Named_Snaps/"] =
+        {200, R"(<a href="Kart%20Racer%20%28USA%29.png">a</a>)", ""};
+    http.routes["https://thumbnails.libretro.com/Nintendo%20-%20Nintendo%203DS/Named_Snaps/Kart%20Racer%20%28USA%29.png"] =
+        {200, std::string("\x89PNG\r\n\x1a\n", 8) + "snap", ""};
+    GameInfoService svc(http, fs, dir.Str());
+    GameEntry g;
+    g.title = "Kart Racer";
+    g.title_id = 0x0004000000030800ull;
+    CHECK_FALSE(svc.Cached(g).found);
+    const GameInfo info = svc.Get(g);
+    CHECK(info.found);
+    CHECK(info.publisher == "Nintendo");
+    CHECK(info.shots.size() == 1);
+    const size_t calls = http.log.size();
+    CHECK(svc.Get(g).found); // from disk
+    CHECK(http.log.size() == calls);
+    CHECK(svc.Cached(g).summary == "A racing game.");
+
+    GameEntry unknown;
+    unknown.title = "Nobody Knows";
+    unknown.title_id = 0x0004000000099900ull;
+    http.routes[api + "?action=query&list=search&srlimit=4&format=json&srsearch=Nobody%20Knows%20Nintendo%203DS%20video%20game"] =
+        {200, R"({"query":{"search":[]}})", ""};
+    CHECK_FALSE(svc.Get(unknown).found);
+    const size_t after = http.log.size();
+    CHECK_FALSE(svc.Get(unknown).found);
+    CHECK(http.log.size() == after); // the miss is remembered
+}

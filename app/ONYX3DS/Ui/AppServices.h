@@ -12,8 +12,11 @@
 #include "onyx/core_options.h"
 #include "onyx/library.h"
 #include "onyx/settings.h"
+#include "onyx/game_info.h"
 #include "onyx/steamgriddb.h"
 
+#include <mutex>
+#include <set>
 #include <utility>
 #include "onyx/theme.h"
 
@@ -90,6 +93,8 @@ public:
     void ScrapeArt(const GameEntry& game, bool overwrite, std::function<void(bool)> done);
     // SteamGridDB games that match a title, best match first (3DS releases above
     // older ones); `done(results, http_status)` on the UI thread.
+    // Description, release details and screenshots for the crossbar's hover panel. `done` runs on the UI thread.
+    void LoadGameInfo(const GameEntry& game, std::function<void(GameInfo)> done);
     void SearchArtGames(const GameEntry& game,
                         std::function<void(std::vector<SgdbGame>, int)> done);
     // Fetches art for the SteamGridDB game the user picked.
@@ -142,6 +147,12 @@ private:
     std::unique_ptr<Achievements> ra_;
     std::vector<Theme> themes_;
     std::atomic<bool> scanning_{false};
+    ArtMissCache art_misses_;
+    std::unique_ptr<GameInfoService> game_info_;
+    std::mutex info_mutex_;
+    std::set<std::string> info_tried_;
+    bool art_misses_loaded_ = false;
+    void FillMissingArt(std::vector<GameEntry> games, std::function<void(size_t)> done);
     std::optional<GameEntry> selected_;
     std::mutex save_mutex_;
     std::string pending_settings_;

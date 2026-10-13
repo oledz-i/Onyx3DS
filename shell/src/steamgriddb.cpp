@@ -101,7 +101,14 @@ std::vector<SgdbImage> SteamGridDb::Images(SgdbArt kind, u64 game_id) {
     std::string q = QueryFor(kind);
     q.replace(q.find("{id}"), 4, std::to_string(game_id));
     const auto body = GetJson(q);
-    return body ? ParseImages(*body) : std::vector<SgdbImage>{};
+    auto images = body ? ParseImages(*body) : std::vector<SgdbImage>{};
+    if (images.empty() && body && kind == SgdbArt::Grid) {
+        // The two exact capsule sizes are rare; any static grid still fills a tile.
+        const auto any = GetJson("/grids/game/" + std::to_string(game_id) +
+                                 "?mimes=image/png,image/jpeg&types=static&nsfw=false&humor=false");
+        if (any) images = ParseImages(*any);
+    }
+    return images;
 }
 
 std::optional<std::string> SteamGridDb::Download(const std::string& url) {
@@ -139,9 +146,55 @@ std::optional<SgdbGame> SteamGridDb::BestMatch(const std::vector<SgdbGame>& resu
 ArtScraper::ArtScraper(SteamGridDb& sgdb, IFileSystem& fs, std::string art_dir)
     : sgdb_(sgdb), fs_(fs), art_dir_(std::move(art_dir)) {}
 
+void ArtMissCache::Load(IFileSystem& fs, const std::string& path) {
+    std::scoped_lock lock(mutex_);
+    missed_.clear();
+    const std::string text = fs.ReadText(path);
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        const auto tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        try {
+            missed_[line.substr(0, tab)] = std::stoull(line.substr(tab + 1));
+        } catch (...) {
+        }
+    }
+}
+
+void ArtMissCache::Save(IFileSystem& fs, const std::string& path) const {
+    std::string text;
+    {
+        std::scoped_lock lock(mutex_);
+        for (const auto& [k, t] : missed_) text += k + "\t" + std::to_string(t) + "\n";
+    }
+    fs.WriteText(path, text);
+}
+
+bool ArtMissCache::RecentlyMissed(const std::string& key, u64 now) const {
+    std::scoped_lock lock(mutex_);
+    const auto it = missed_.find(key);
+    return it != missed_.end() && now >= it->second && now - it->second < kRetrySeconds;
+}
+
+void ArtMissCache::Add(const std::string& key, u64 now) {
+    std::scoped_lock lock(mutex_);
+    missed_[key] = now;
+}
+
+void ArtMissCache::Forget(const std::string& key) {
+    std::scoped_lock lock(mutex_);
+    missed_.erase(key);
+}
+
 std::optional<std::string> ArtScraper::SaveFirst(SgdbArt kind, u64 game_id,
                                                  const std::string& base) {
+    int tried = 0;
     for (const auto& img : sgdb_.Images(kind, game_id)) {
+        if (++tried > 3) break; // a few dead links are fine, a whole list of them is not
         const auto data = sgdb_.Download(img.url);
         if (!data) continue;
         const std::string ext = img.mime == "image/jpeg" ? ".jpg" : ".png";
@@ -171,6 +224,7 @@ bool ArtScraper::ScrapeGame(GameEntry& game, u64 sgdb_game_id, bool overwrite) {
         if (auto p = SaveFirst(kind, sgdb_game_id, base + suffix)) {
             slot = *p;
             any = true;
+            if (on_saved) on_saved(game);
         }
     };
     fetch(game.grid_art, SgdbArt::Grid, "_grid");

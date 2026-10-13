@@ -2,6 +2,7 @@
 #pragma once
 
 #include "MainPage.g.h"
+#include "onyx/game_info.h"
 #include "onyx/library.h"
 
 namespace winrt::ONYX3DS::implementation {
@@ -19,6 +20,8 @@ private:
     void BuildPage();
     void BuildXmb();
     void StepCategory(int delta);
+    void UpdateXmbPanel(const onyx::GameEntry& game);
+    void FillXmbInfo(const onyx::GameEntry& game, const onyx::GameInfo& info);
     bool Xmb() const;
     Windows::UI::Xaml::Controls::Button MakeTile(const onyx::GameEntry& game, double w, double h);
     Windows::UI::Xaml::UIElement MakeEmptySlot(double w, double h);
@@ -42,6 +45,11 @@ private:
 
     std::vector<onyx::GameEntry> games_;
     int page_ = 0;
+    Windows::UI::Xaml::Controls::Grid xmb_panel_{nullptr};
+    Windows::UI::Xaml::Controls::StackPanel xmb_info_{nullptr};
+    Windows::UI::Xaml::DispatcherTimer info_timer_{nullptr};
+    std::string xmb_shown_;
+    onyx::GameEntry xmb_pending_;
     int xmb_special_ = 0; // XMB layout: 0 = the home system's games, 1 = recent, 2 = favourites
     int columns_ = 4;
     int rows_ = 3;

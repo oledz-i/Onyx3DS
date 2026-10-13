@@ -711,6 +711,11 @@ void SettingsPage::BuildInterface() {
                             Cfg().qol.xmb_layout = on;
                             Save();
                         })));
+    Add(kit::SettingRow("Game details on the crossbar", "Fetches a description, release details and screenshots of the game you hover on (needs internet)",
+                        kit::Toggle(Cfg().qol.xmb_info, [](bool on) {
+                            Cfg().qol.xmb_info = on;
+                            Save();
+                        })));
     Add(kit::SettingRow("Channels per row", "3 to 6 (channel layout)",
                         kit::Range(3, 6, 1, Cfg().qol.grid_columns, [](double v) {
                             Cfg().qol.grid_columns = static_cast<int>(v);

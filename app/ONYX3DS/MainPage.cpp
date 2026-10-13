@@ -508,6 +508,7 @@ void MainPage::OnTileFocused(Button const& tile, const GameEntry& game, bool foc
     }
     if (!focused) return;
     focused_path_ = game.path;
+    if (Xmb()) UpdateXmbPanel(game);
     Svc().SetSelectedGame(game);
     Svc().PlaySfx("move");
     SelectedText().Text(kit::H(game.DisplayTitle()));
@@ -673,6 +674,152 @@ void MainPage::StepCategory(int delta) {
     }
 }
 
+// Banner, title and facts of the focused game, then (after a short pause, so scrolling past games
+// costs nothing) the description, release details and screenshots from the web.
+void MainPage::UpdateXmbPanel(const GameEntry& game) {
+    if (!xmb_panel_ || xmb_shown_ == game.path) return;
+    xmb_shown_ = game.path;
+    const Theme& t = Svc().CurrentTheme();
+    xmb_panel_.Children().Clear();
+
+    StackPanel column;
+    column.Spacing(14);
+    // Banner: the SteamGridDB hero, else the cover, else a themed card.
+    Grid banner;
+    banner.Height(300);
+    Border art;
+    art.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{18, 18, 18, 18});
+    const std::string& pic = !game.hero_art.empty() && CachedExists(game.hero_art) ? game.hero_art : game.grid_art;
+    if (!pic.empty() && CachedExists(pic)) {
+        ImageBrush brush;
+        brush.ImageSource(ImageFromFile(pic, 1100));
+        brush.Stretch(Stretch::UniformToFill);
+        art.Background(brush);
+    } else {
+        art.Background(Svc().ThemeBrush(kit::WithAlpha(t.colors.panel, 0xD0)));
+    }
+    banner.Children().Append(art);
+    Border scrim;
+    scrim.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{18, 18, 18, 18});
+    scrim.IsHitTestVisible(false);
+    LinearGradientBrush fade;
+    fade.StartPoint(Point{0, 0});
+    fade.EndPoint(Point{0, 1});
+    GradientStop top, bottom;
+    top.Color(winrt::Windows::UI::ColorHelper::FromArgb(0x00, 0, 0, 0));
+    top.Offset(0.45);
+    bottom.Color(winrt::Windows::UI::ColorHelper::FromArgb(0xC8, 0, 0, 0));
+    bottom.Offset(1);
+    fade.GradientStops().Append(top);
+    fade.GradientStops().Append(bottom);
+    scrim.Background(fade);
+    banner.Children().Append(scrim);
+    if (!game.logo_art.empty() && CachedExists(game.logo_art)) {
+        Image logo;
+        logo.Source(ImageFromFile(game.logo_art, 600));
+        logo.MaxWidth(360);
+        logo.MaxHeight(110);
+        logo.HorizontalAlignment(HorizontalAlignment::Left);
+        logo.VerticalAlignment(VerticalAlignment::Bottom);
+        logo.Margin(Thickness{26, 0, 0, 22});
+        banner.Children().Append(logo);
+    } else {
+        auto title = kit::Text(game.DisplayTitle(), 34, true, "#FFFFFF");
+        title.TextTrimming(TextTrimming::CharacterEllipsis);
+        title.MaxLines(2);
+        title.TextWrapping(TextWrapping::Wrap);
+        title.VerticalAlignment(VerticalAlignment::Bottom);
+        title.Margin(Thickness{26, 0, 26, 22});
+        banner.Children().Append(title);
+    }
+    column.Children().Append(banner);
+
+    std::string facts = SystemLabel(game.system);
+    if (game.play_seconds) facts += "  ·  " + FormatPlayTime(game.play_seconds);
+    else if (game.last_played) facts += "  ·  " + FormatLastPlayed(game.last_played);
+    column.Children().Append(kit::Text(facts, 20, false, kit::WithAlpha(t.colors.text_muted, 0xE8)));
+
+    xmb_info_ = StackPanel();
+    xmb_info_.Spacing(12);
+    xmb_info_.Opacity(0);
+    xmb_info_.OpacityTransition(ScalarTransition());
+    column.Children().Append(xmb_info_);
+    xmb_panel_.Children().Append(column);
+    if (!Svc().Config().qol.xmb_info) return;
+
+    xmb_pending_ = game;
+    if (!info_timer_) {
+        info_timer_ = DispatcherTimer();
+        info_timer_.Interval(Ms(350));
+        auto weak = get_weak();
+        info_timer_.Tick([weak](auto&&, auto&&) {
+            auto self = weak.get();
+            if (!self) return;
+            self->info_timer_.Stop();
+            const GameEntry entry = self->xmb_pending_;
+            if (self->xmb_shown_ != entry.path) return;
+            Svc().LoadGameInfo(entry, [weak, entry](GameInfo info) {
+                if (auto self = weak.get())
+                    if (self->xmb_shown_ == entry.path) self->FillXmbInfo(entry, info);
+            });
+        });
+    }
+    info_timer_.Stop();
+    info_timer_.Start();
+}
+
+void MainPage::FillXmbInfo(const GameEntry&, const GameInfo& info) {
+    if (!xmb_info_ || !info.found) return;
+    const Theme& t = Svc().CurrentTheme();
+    xmb_info_.Children().Clear();
+    auto detail = [&](const char* label, const std::string& value) {
+        if (value.empty()) return;
+        StackPanel row;
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(10);
+        auto l = kit::Text(label, 18, true, kit::WithAlpha(t.colors.text_muted, 0xE0));
+        auto v = kit::Text(value, 18);
+        v.TextTrimming(TextTrimming::CharacterEllipsis);
+        v.MaxWidth(620);
+        row.Children().Append(l);
+        row.Children().Append(v);
+        xmb_info_.Children().Append(row);
+    };
+    detail("Released", info.released);
+    detail("Developer", info.developer);
+    detail("Publisher", info.publisher);
+    detail("Genre", info.genre);
+    if (!info.summary.empty()) {
+        auto text = kit::Text(info.summary, 19);
+        text.TextWrapping(TextWrapping::Wrap);
+        text.MaxLines(6);
+        text.TextTrimming(TextTrimming::CharacterEllipsis);
+        text.Margin(Thickness{0, 4, 0, 0});
+        xmb_info_.Children().Append(text);
+    }
+    if (!info.shots.empty()) {
+        StackPanel shots;
+        shots.Orientation(Orientation::Horizontal);
+        shots.Spacing(14);
+        for (const auto& path : info.shots) {
+            Border frame;
+            frame.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{10, 10, 10, 10});
+            frame.Width(320);
+            frame.Height(192);
+            ImageBrush brush;
+            brush.ImageSource(ImageFromFile(path, 400));
+            brush.Stretch(Stretch::UniformToFill);
+            frame.Background(brush);
+            shots.Children().Append(frame);
+        }
+        xmb_info_.Children().Append(shots);
+    }
+    if (!info.source.empty())
+        xmb_info_.Children().Append(kit::Text("Details from Wikipedia, screenshots from the libretro thumbnail project", 14, false,
+                                              kit::WithAlpha(t.colors.text_muted, 0xB0)));
+    xmb_info_.Opacity(1);
+}
+
 // The crossbar: category names across the top, the chosen category's games down the page.
 void MainPage::BuildXmb() {
     const Theme& t = Svc().CurrentTheme();
@@ -723,6 +870,23 @@ void MainPage::BuildXmb() {
     Grid::SetRow(line, 0);
     grid.Children().Append(line);
 
+    Grid content;
+    ColumnDefinition list_col;
+    list_col.Width(GridLengthHelper::FromPixels(780));
+    ColumnDefinition panel_col;
+    panel_col.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+    content.ColumnDefinitions().Append(list_col);
+    content.ColumnDefinitions().Append(panel_col);
+    Grid::SetRow(content, 1);
+    grid.Children().Append(content);
+
+    // The hover panel on the right: banner, details and screenshots of the focused game.
+    xmb_panel_ = Grid();
+    xmb_panel_.Margin(Thickness{30, 14, 0, 20});
+    Grid::SetColumn(xmb_panel_, 1);
+    content.Children().Append(xmb_panel_);
+    xmb_shown_.clear();
+
     ScrollViewer scroll;
     scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Hidden);
     scroll.HorizontalScrollMode(ScrollMode::Disabled);
@@ -760,8 +924,8 @@ void MainPage::BuildXmb() {
     }
     animate_entrance_ = false;
     scroll.Content(list);
-    Grid::SetRow(scroll, 1);
-    grid.Children().Append(scroll);
+    Grid::SetColumn(scroll, 0);
+    content.Children().Append(scroll);
 
     UpdateGreeting();
     PageDots().Children().Clear();

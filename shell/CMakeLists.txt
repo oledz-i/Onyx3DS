@@ -32,6 +32,7 @@ add_library(onyx_shell STATIC
     src/library.cpp
     src/cheats.cpp
     src/steamgriddb.cpp
+    src/game_info.cpp
     src/achievements.cpp
     src/theme.cpp
     src/core_options.cpp

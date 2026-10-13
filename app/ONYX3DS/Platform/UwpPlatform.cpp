@@ -189,7 +189,15 @@ HttpResponse UwpHttpClient::Send(const HttpRequest& request) {
         }
         HttpResponseMessage resp = op.GetResults();
         out.status = static_cast<int>(resp.StatusCode());
-        const Streams::IBuffer buffer = resp.Content().ReadAsBufferAsync().get();
+        auto body = resp.Content().ReadAsBufferAsync();
+        // A stalled download must not hold a worker thread forever.
+        if (body.wait_for(std::chrono::seconds(30)) != AsyncStatus::Completed) {
+            body.Cancel();
+            out.status = 0;
+            out.error = "timeout reading the response";
+            return out;
+        }
+        const Streams::IBuffer buffer = body.GetResults();
         out.body.assign(reinterpret_cast<const char*>(buffer.data()), buffer.Length());
     } catch (hresult_error const& e) {
         out.status = 0;
