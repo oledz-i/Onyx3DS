@@ -272,3 +272,9 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 ## OpenGL crash at first make-current (Mesa 0033)
 - onyx_gl.dll+0x2de996 = d3d12_is_format_supported dereferencing the absent sw winsys for PIPE_BIND_DISPLAY_TARGET (decoded with the onyx_gl map now published to the dev release). Fixed; get_fd guarded too.
 - GlHost asks for core 3.3 and logs the real version; below 4.3 it lists the missing 4.x extensions.
+
+## Clear new images on Dozen (Azahar 0057, hypothesis, unverified on console)
+- Smash log onyx_9 (build 3.1.0.150): no driver warnings, vertex cache mostly bypassed (volatile buffers), yet the photo shows black holes and coloured static where the stage should be. Looks like leftover GPU memory: Dozen places new images in heap memory used a moment earlier, D3D12 zeroes only at heap creation, and Azahar treats undrawn parts of a new surface as empty.
+- Every new non-compressed surface image is now cleared once after its first layout change (Dozen only). Costs one barrier pair and a clear per new surface.
+- Same hypothesis may also explain the MK7 black characters/white fog and the earlier Zelda logo spots; none of this is confirmed. If Smash still shows static after this, the cause is elsewhere (texture decode, or the shadow companion copy from 0051, which is the other open MK7 suspect).
+- MK7 black characters/fog (onyx_8): not the vertex cache (0 errors, 99% hits, same bytes as the old path) and not skipped draws (complete-graphics mode waits). Still open.

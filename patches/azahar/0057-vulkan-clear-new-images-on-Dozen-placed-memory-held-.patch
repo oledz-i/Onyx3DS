@@ -1,0 +1,89 @@
+From 2d90c05771335df44016b0ec04b206664dc59aa0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 13:51:40 -0400
+Subject: [PATCH] vulkan: clear new images on Dozen (placed memory held other
+ pictures: static in Smash, holes in Zelda, black models in Mario Kart 7)
+
+Dozen places new images in heap memory the GPU used a moment earlier and D3D12 only zeroes a heap
+when it is created. Azahar treats the parts of a new surface nothing has drawn to as empty, so
+they showed leftover pictures. Every new non-compressed surface image is cleared once after its
+first layout change, on Dozen only.
+---
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 49 ++++++++++++++++++-
+ 1 file changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index fc387a5..342debe 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -130,6 +130,46 @@ u32 UnpackDepthStencil(const VideoCore::StagingData& data, vk::Format dest) {
+     return depth_offset;
+ }
+ 
++// ONYX: on Dozen a new image is placed in memory the GPU used for something else a moment ago,
++// and D3D12 only zeroes memory when a heap is first created. Azahar assumes the parts of a new
++// surface that nothing has drawn to are empty (black); they came out as leftover pictures
++// (coloured static in Smash and the Zelda logo, black or washed-out models in Mario Kart 7).
++// Clear every new image once, right after its first layout change.
++void RecordZeroClear(vk::CommandBuffer cmdbuf, vk::ImageAspectFlags aspect,
++                     std::span<const vk::Image> images) {
++    const vk::MemoryBarrier barrier = {
++        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
++        .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
++    };
++    const vk::ImageSubresourceRange range = {
++        .aspectMask = aspect,
++        .baseMipLevel = 0,
++        .levelCount = VK_REMAINING_MIP_LEVELS,
++        .baseArrayLayer = 0,
++        .layerCount = VK_REMAINING_ARRAY_LAYERS,
++    };
++    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
++                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, barrier,
++                           {}, {});
++    for (const vk::Image image : images) {
++        if (aspect & vk::ImageAspectFlagBits::eColor) {
++            const vk::ClearColorValue zero{std::array<float, 4>{0.f, 0.f, 0.f, 0.f}};
++            cmdbuf.clearColorImage(image, vk::ImageLayout::eGeneral, zero, range);
++        } else {
++            const vk::ClearDepthStencilValue zero{0.f, 0};
++            cmdbuf.clearDepthStencilImage(image, vk::ImageLayout::eGeneral, zero, range);
++        }
++    }
++    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
++                           vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlags{}, barrier,
++                           {}, {});
++}
++
++bool IsCompressedFormat(vk::Format format) {
++    const int f = static_cast<int>(format);
++    return f >= 131 && f <= 184; // BC, ETC2, EAC and ASTC
++}
++
+ void MakeInitBarriers(vk::ImageAspectFlags aspect, u32 num_images,
+                       std::span<const vk::Image> images,
+                       std::span<vk::ImageMemoryBarrier> out_barriers) {
+@@ -897,12 +937,19 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
+     current = res_scale != 1 ? Type::Scaled : Type::Base;
+ 
+     runtime.renderpass_cache.EndRendering();
+-    scheduler.Record([raw_images, num_images, aspect = traits.aspect](vk::CommandBuffer cmdbuf) {
++    const bool zero_new = instance.GetDriverID() == vk::DriverId::eMesaDozen &&
++                          !IsCompressedFormat(format) &&
++                          (traits.usage & vk::ImageUsageFlagBits::eTransferDst);
++    scheduler.Record([raw_images, num_images, aspect = traits.aspect,
++                      zero_new](vk::CommandBuffer cmdbuf) {
+         std::array<vk::ImageMemoryBarrier, 3> barriers;
+         MakeInitBarriers(aspect, num_images, raw_images, barriers);
+         cmdbuf.pipelineBarrier(
+             vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTopOfPipe,
+             vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, num_images, barriers.data());
++        if (zero_new) {
++            RecordZeroClear(cmdbuf, aspect, std::span<const vk::Image>{raw_images.data(), num_images});
++        }
+     });
+ }
+ 
+-- 
+2.43.0
+
