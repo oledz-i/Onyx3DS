@@ -1,0 +1,340 @@
+From 1e74ff71956c58eb61a657d00b871a6dae2c9fcf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 22:04:15 -0400
+Subject: [PATCH] dzn: keep compiled pipeline states in a D3D12 pipeline
+ library on disk
+
+---
+ src/microsoft/vulkan/dzn_device.c   |   1 +
+ src/microsoft/vulkan/dzn_pipeline.c | 260 +++++++++++++++++++++++++++-
+ src/microsoft/vulkan/dzn_private.h  |   3 +
+ 3 files changed, 255 insertions(+), 9 deletions(-)
+
+diff --git a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+index d0f99ef9..dbef7f4a 100644
+--- a/src/microsoft/vulkan/dzn_device.c
++++ b/src/microsoft/vulkan/dzn_device.c
+@@ -2285,6 +2285,7 @@ dzn_device_destroy(struct dzn_device *device, const VkAllocationCallbacks *pAllo
+ 
+    dzn_device_query_finish(device);
+    dzn_meta_finish(device);
++   onyx_pso_flush();
+ 
+    dzn_foreach_pool_type(type) {
+       dzn_descriptor_heap_finish(&device->device_heaps[type].heap);
+diff --git a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+index 3a145961..f62b6652 100644
+--- a/src/microsoft/vulkan/dzn_pipeline.c
++++ b/src/microsoft/vulkan/dzn_pipeline.c
+@@ -23,6 +23,9 @@
+ 
+ #include "dzn_private.h"
+ #include "util/os_time.h"
++
++static HRESULT onyx_create_pso(struct dzn_device *device, const D3D12_PIPELINE_STATE_STREAM_DESC *sd,
++                               ID3D12PipelineState **out);
+ #include "dxil_nir_lower_int_samplers.h"
+ 
+ #include "spirv/nir_spirv.h"
+@@ -2132,9 +2135,8 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
+    }
+ 
+    if (!pipeline->variants) {
+-      hres = DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, stream_desc,
+-                                               &IID_ID3D12PipelineState,
+-                                               (void **)&pipeline->base.state));
++      hres = DZN_HR(device->dev, "CreatePipelineState", onyx_create_pso(device, stream_desc,
++                                               &pipeline->base.state));
+       if (FAILED(hres)) {
+          ret = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+          goto out;
+@@ -2403,6 +2405,248 @@ onyx_dump_pipeline_state(const uint8_t *buf, size_t size)
+    }
+ }
+ 
++/* ONYX: persistent pipeline-state cache. The Xbox driver takes 1-3 s to compile
++ * each pipeline state; ID3D12PipelineLibrary keeps the compiled result, so the
++ * second visit to a scene (or the next run of the game) loads it in
++ * milliseconds. ONYX_PSO_CACHE names the file (one per game). A pipeline is
++ * keyed by a hash of everything in its state stream, with the shader bytecode,
++ * input layout and string pointers replaced by their contents. */
++static struct {
++   mtx_t lock;
++   bool inited;
++   ID3D12PipelineLibrary1 *lib;
++   char path[512];
++   bool dirty;
++   int64_t last_save_ns;
++   unsigned hits, misses, stores;
++} onyx_pso = { 0 };
++
++static void
++onyx_pso_log_stats(const char *what)
++{
++   mesa_logw("dzn: PSO cache %s: %u loaded from cache, %u compiled, %u stored", what,
++             onyx_pso.hits, onyx_pso.misses, onyx_pso.stores);
++}
++
++static void
++onyx_pso_save_locked(void)
++{
++   if (!onyx_pso.lib || !onyx_pso.dirty || !onyx_pso.path[0])
++      return;
++   const SIZE_T size = ID3D12PipelineLibrary1_GetSerializedSize(onyx_pso.lib);
++   if (!size)
++      return;
++   void *buf = malloc(size);
++   if (!buf)
++      return;
++   if (SUCCEEDED(ID3D12PipelineLibrary1_Serialize(onyx_pso.lib, buf, size))) {
++      WCHAR wpath[512];
++      if (MultiByteToWideChar(CP_UTF8, 0, onyx_pso.path, -1, wpath, 512)) {
++         CREATEFILE2_EXTENDED_PARAMETERS ext = { sizeof(ext), FILE_ATTRIBUTE_NORMAL };
++         HANDLE f = CreateFile2(wpath, GENERIC_WRITE, 0, CREATE_ALWAYS, &ext);
++         if (f != INVALID_HANDLE_VALUE) {
++            DWORD written = 0;
++            if (WriteFile(f, buf, (DWORD)size, &written, NULL) && written == size)
++               onyx_pso.dirty = false;
++            CloseHandle(f);
++         }
++      }
++   }
++   free(buf);
++   onyx_pso.last_save_ns = os_time_get_nano();
++   mesa_logw("dzn: PSO cache saved (%u KB)", (unsigned)(size / 1024));
++}
++
++static ID3D12PipelineLibrary1 *
++onyx_pso_library(struct dzn_device *device)
++{
++   if (onyx_pso.inited)
++      return onyx_pso.lib;
++   mtx_init(&onyx_pso.lock, mtx_plain);
++   onyx_pso.inited = true;
++   const char *path = getenv("ONYX_PSO_CACHE");
++   if (!path || !path[0] || strlen(path) >= sizeof(onyx_pso.path))
++      return NULL;
++   strcpy(onyx_pso.path, path);
++
++   void *blob = NULL;
++   DWORD blob_size = 0;
++   WCHAR wpath[512];
++   if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 512)) {
++      CREATEFILE2_EXTENDED_PARAMETERS ext = { sizeof(ext), FILE_ATTRIBUTE_NORMAL };
++      HANDLE f = CreateFile2(wpath, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, &ext);
++      if (f != INVALID_HANDLE_VALUE) {
++         LARGE_INTEGER sz;
++         if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (256ll << 20)) {
++            blob = malloc((size_t)sz.QuadPart);
++            DWORD got = 0;
++            if (blob && ReadFile(f, blob, (DWORD)sz.QuadPart, &got, NULL) && got == sz.QuadPart)
++               blob_size = got;
++            else {
++               free(blob);
++               blob = NULL;
++            }
++         }
++         CloseHandle(f);
++      }
++   }
++   HRESULT h = E_FAIL;
++   if (blob) {
++      h = ID3D12Device1_CreatePipelineLibrary((ID3D12Device1 *)device->dev, blob, blob_size,
++                                              &IID_ID3D12PipelineLibrary1, (void **)&onyx_pso.lib);
++      if (FAILED(h))
++         mesa_logw("dzn: PSO cache file refused (0x%08x), starting a new one", (unsigned)h);
++      free(blob);
++   }
++   if (FAILED(h)) {
++      onyx_pso.lib = NULL;
++      h = ID3D12Device1_CreatePipelineLibrary((ID3D12Device1 *)device->dev, NULL, 0,
++                                              &IID_ID3D12PipelineLibrary1, (void **)&onyx_pso.lib);
++      if (FAILED(h)) {
++         mesa_logw("dzn: PSO cache unavailable on this system (0x%08x)", (unsigned)h);
++         onyx_pso.lib = NULL;
++         return NULL;
++      }
++   } else {
++      mesa_logw("dzn: PSO cache loaded (%u KB)", (unsigned)(blob_size / 1024));
++   }
++   onyx_pso.last_save_ns = os_time_get_nano();
++   return onyx_pso.lib;
++}
++
++void
++onyx_pso_flush(void)
++{
++   if (!onyx_pso.inited || !onyx_pso.lib)
++      return;
++   mtx_lock(&onyx_pso.lock);
++   onyx_pso_save_locked();
++   mtx_unlock(&onyx_pso.lock);
++   onyx_pso_log_stats("closed");
++   ID3D12PipelineLibrary1_Release(onyx_pso.lib);
++   onyx_pso.lib = NULL;
++}
++
++#define ONYX_HASH(T) do { \
++   off = ALIGN_POT(off, alignof(T)); \
++   d = buf + off; off += sizeof(T); \
++   _mesa_blake3_update(&h, d, sizeof(T)); \
++} while (0)
++
++/* Name for a pipeline state stream; false if it holds something unknown. */
++static bool
++onyx_pso_name(const D3D12_PIPELINE_STATE_STREAM_DESC *sd, WCHAR name[40])
++{
++   const uint8_t *buf = sd->pPipelineStateSubobjectStream;
++   const size_t size = sd->SizeInBytes;
++   blake3_hasher h;
++   _mesa_blake3_init(&h);
++   size_t off = 0;
++   unsigned guard = 0;
++   while (off + sizeof(uint32_t) <= size && guard++ < 40) {
++      off = ALIGN_POT(off, alignof(void *));
++      const uint32_t type = *(const uint32_t *)(buf + off);
++      off += sizeof(uint32_t);
++      _mesa_blake3_update(&h, &type, sizeof(type));
++      const uint8_t *d = NULL;
++      switch ((int)type) {
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
++         off = ALIGN_POT(off, alignof(void *)) + sizeof(void *); /* pointer: not stable */
++         break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS: {
++         off = ALIGN_POT(off, alignof(D3D12_SHADER_BYTECODE));
++         const D3D12_SHADER_BYTECODE *bc = (const void *)(buf + off);
++         off += sizeof(D3D12_SHADER_BYTECODE);
++         _mesa_blake3_update(&h, &bc->BytecodeLength, sizeof(bc->BytecodeLength));
++         if (bc->pShaderBytecode)
++            _mesa_blake3_update(&h, bc->pShaderBytecode, bc->BytecodeLength);
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: ONYX_HASH(D3D12_BLEND_DESC); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: ONYX_HASH(UINT); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: ONYX_HASH(D3D12_RASTERIZER_DESC); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER1: ONYX_HASH(D3D12_RASTERIZER_DESC1); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER2: ONYX_HASH(D3D12_RASTERIZER_DESC2); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL: ONYX_HASH(D3D12_DEPTH_STENCIL_DESC); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: ONYX_HASH(D3D12_DEPTH_STENCIL_DESC1); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2: ONYX_HASH(D3D12_DEPTH_STENCIL_DESC2); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: {
++         off = ALIGN_POT(off, alignof(D3D12_INPUT_LAYOUT_DESC));
++         const D3D12_INPUT_LAYOUT_DESC *il = (const void *)(buf + off);
++         off += sizeof(D3D12_INPUT_LAYOUT_DESC);
++         _mesa_blake3_update(&h, &il->NumElements, sizeof(il->NumElements));
++         for (unsigned i = 0; il->pInputElementDescs && i < il->NumElements; i++) {
++            const D3D12_INPUT_ELEMENT_DESC *e = &il->pInputElementDescs[i];
++            if (e->SemanticName)
++               _mesa_blake3_update(&h, e->SemanticName, strlen(e->SemanticName));
++            _mesa_blake3_update(&h, &e->SemanticIndex, sizeof(e->SemanticIndex));
++            _mesa_blake3_update(&h, &e->Format, sizeof(e->Format));
++            _mesa_blake3_update(&h, &e->InputSlot, sizeof(e->InputSlot));
++            _mesa_blake3_update(&h, &e->AlignedByteOffset, sizeof(e->AlignedByteOffset));
++            _mesa_blake3_update(&h, &e->InputSlotClass, sizeof(e->InputSlotClass));
++            _mesa_blake3_update(&h, &e->InstanceDataStepRate, sizeof(e->InstanceDataStepRate));
++         }
++         break;
++      }
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE: ONYX_HASH(UINT); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY: ONYX_HASH(D3D12_PRIMITIVE_TOPOLOGY_TYPE); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: ONYX_HASH(struct D3D12_RT_FORMAT_ARRAY); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT: ONYX_HASH(DXGI_FORMAT); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: ONYX_HASH(DXGI_SAMPLE_DESC); break;
++      case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS: ONYX_HASH(D3D12_PIPELINE_STATE_FLAGS); break;
++      default:
++         return false; /* view instancing and anything else: compile as before */
++      }
++   }
++   uint8_t digest[BLAKE3_KEY_LEN];
++   _mesa_blake3_final(&h, digest);
++   static const char hex[] = "0123456789abcdef";
++   for (unsigned i = 0; i < 16; i++) {
++      name[i * 2] = hex[digest[i] >> 4];
++      name[i * 2 + 1] = hex[digest[i] & 15];
++   }
++   name[32] = 0;
++   return true;
++}
++
++/* CreatePipelineState through the library: load when known, compile and keep when not. */
++static HRESULT
++onyx_create_pso(struct dzn_device *device, const D3D12_PIPELINE_STATE_STREAM_DESC *sd,
++                ID3D12PipelineState **out)
++{
++   ID3D12PipelineLibrary1 *lib = onyx_pso_library(device);
++   WCHAR name[40];
++   const bool keyed = lib && onyx_pso_name(sd, name);
++   if (keyed) {
++      mtx_lock(&onyx_pso.lock);
++      HRESULT lh = ID3D12PipelineLibrary1_LoadPipeline(lib, name, sd, &IID_ID3D12PipelineState,
++                                                       (void **)out);
++      mtx_unlock(&onyx_pso.lock);
++      if (SUCCEEDED(lh)) {
++         onyx_pso.hits++;
++         return lh;
++      }
++      *out = NULL;
++   }
++   HRESULT hres = ID3D12Device4_CreatePipelineState(device->dev, sd, &IID_ID3D12PipelineState,
++                                                    (void **)out);
++   if (keyed && SUCCEEDED(hres)) {
++      mtx_lock(&onyx_pso.lock);
++      onyx_pso.misses++;
++      if (SUCCEEDED(ID3D12PipelineLibrary1_StorePipeline(lib, name, *out))) {
++         onyx_pso.stores++;
++         onyx_pso.dirty = true;
++      }
++      /* Do not lose a long session's work if the app is killed: save every 30 s of news. */
++      if (onyx_pso.dirty && os_time_get_nano() - onyx_pso.last_save_ns > 30ll * 1000000000ll)
++         onyx_pso_save_locked();
++      mtx_unlock(&onyx_pso.lock);
++   }
++   return hres;
++}
++
+ ID3D12PipelineState *
+ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+                                 const struct dzn_graphics_pipeline_variant_key *key)
+@@ -2460,9 +2704,8 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
+       update_stencil_state(pdev, pipeline, stream_buf, &masked_key);
+ 
+       const int64_t onyx_t0 = os_time_get_nano();
+-      ASSERTED HRESULT hres = DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
+-                                                                &IID_ID3D12PipelineState,
+-                                                                (void**)(&variant->state)));
++      ASSERTED HRESULT hres = DZN_HR(device->dev, "CreatePipelineState", onyx_create_pso(device, &stream_desc,
++                                                                &variant->state));
+       if (FAILED(hres)) {
+          /* ONYX: the Xbox driver can refuse a variant (E_INVALIDARG seen). A
+           * NULL state was later bound and crashed the app in D3D12. Remember the
+@@ -2899,9 +3142,8 @@ dzn_compute_pipeline_create(struct dzn_device *device,
+    if (ret != VK_SUCCESS)
+       goto out;
+ 
+-   if (FAILED(DZN_HR(device->dev, "CreatePipelineState", ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,
+-                                                &IID_ID3D12PipelineState,
+-                                                (void **)&pipeline->base.state))))
++   if (FAILED(DZN_HR(device->dev, "CreatePipelineState", onyx_create_pso(device, &stream_desc,
++                                                &pipeline->base.state))))
+       ret = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+ out:
+diff --git a/src/microsoft/vulkan/dzn_private.h b/src/microsoft/vulkan/dzn_private.h
+index 2a9dd052..51b72ab9 100644
+--- a/src/microsoft/vulkan/dzn_private.h
++++ b/src/microsoft/vulkan/dzn_private.h
+@@ -303,6 +303,9 @@ struct dzn_device_descriptor_heap {
+ 
+ #define NUM_POOL_TYPES D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER + 1
+ 
++/* ONYX: writes the pipeline-state cache to disk and closes it (dzn_pipeline.c). */
++void onyx_pso_flush(void);
++
+ struct dzn_device {
+    struct vk_device vk;
+    struct vk_device_extension_table enabled_extensions;
+-- 
+2.43.0
+

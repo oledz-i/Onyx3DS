@@ -85,6 +85,7 @@ struct QolSettings {
     // pieces) at the price of a short pause the first time an effect appears; off skips the
     // draw instead and keeps the game moving.
     bool complete_shaders = true;
+    bool pipeline_cache = true; // keep compiled GPU pipelines on disk (per game)
     bool show_battery_style_status = true; // controller battery in the top bar
     bool resume_last_game = false;         // jump straight into the last game on launch
     bool quick_launch = false;             // A on a channel starts the game (skip the preview)

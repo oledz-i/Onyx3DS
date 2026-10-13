@@ -213,6 +213,7 @@ std::string Settings::ToJson() const {
         {"direct_display", q.direct_display},
         {"gl_fast_mode", q.gl_fast_mode},
         {"complete_shaders", q.complete_shaders},
+        {"pipeline_cache", q.pipeline_cache},
         {"show_battery_style_status", q.show_battery_style_status},
         {"resume_last_game", q.resume_last_game},
         {"quick_launch", q.quick_launch},
@@ -294,6 +295,7 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         Take(*q, "direct_display", o.direct_display);
         Take(*q, "gl_fast_mode", o.gl_fast_mode);
         Take(*q, "complete_shaders", o.complete_shaders);
+        Take(*q, "pipeline_cache", o.pipeline_cache);
         Take(*q, "show_battery_style_status", o.show_battery_style_status);
         Take(*q, "resume_last_game", o.resume_last_game);
         Take(*q, "quick_launch", o.quick_launch);

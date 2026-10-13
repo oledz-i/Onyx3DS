@@ -433,6 +433,14 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
         }
     }
     _putenv_s("ONYX_COMPLETE_SHADERS", settings.qol.complete_shaders ? "1" : "0");
+    {
+        // Compiled GPU pipelines are kept per game, so a scene seen before loads without the 1-3 s compiles.
+        const std::string dir = JoinPath(Paths().cache, "pso");
+        UwpFileSystem().CreateDirs(dir);
+        _putenv_s("ONYX_PSO_CACHE", settings.qol.pipeline_cache && !software_ && !use_gl_
+                                        ? JoinPath(dir, game.SaveKey() + ".bin").c_str()
+                                        : "");
+    }
     UpdateFolders(settings.folders);
     ff_speed_ = settings.qol.fast_forward_speed;
     fast_forward_ = false;
