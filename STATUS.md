@@ -234,3 +234,5 @@ Hypothetical, exploration only: GameCube/Wii via Dolphin, Switch (2027).
 - Tester note: "Complete graphics" did not fix the Zelda logo spots, but models looked better. Logo is low priority.
 - Waiting on the test of the pipeline cache and SteamGridDB (logs wanted: "PSO cache" lines, "Artwork:" lines).
 - Cartridge tile style: scrapped by the tester (Mon 2026-10-12 night). Crossbar stays an optional setting (already is, off by default).
+- Added to the next build (tester, Mon 2026-10-12 night): crossbar hover panel gets a screenshot slideshow (slow pan and crossfade) behind the panel using the screenshots already fetched. Must cost almost nothing; performance work stays the priority.
+- Logs wanted for the performance work: Old 3DS mode at 60 and at 30 on Mario Kart 7, Super Mario 3D Land and Zelda (each twice, to see the pipeline cache); the same in New 3DS mode; one long session closed normally; one log with the home screen sitting open for a minute after a fresh start (artwork timing).
