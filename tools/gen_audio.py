@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Synthesises the original menu music loops and UI sounds for ONYX 3DS.
+"""Synthesises the original menu music loops and UI sounds for OnyxEMU.
 
 Everything is generated from scratch (FM electric piano, soft bass, bells,
 brushes, pads), so the audio is original and freely redistributable with the

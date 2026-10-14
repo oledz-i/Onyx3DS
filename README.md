@@ -1,12 +1,12 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.png">
-    <img src="docs/assets/logo-light.png" alt="ONYX" width="320">
+    <img src="docs/assets/logo-light.png" alt="OnyxEMU" width="320">
   </picture>
 </p>
 
 <p align="center">
-  <b>A Nintendo 3DS emulator for Xbox, built on Azahar.</b><br>
+  <b>OnyxEMU (ONYX): emulation for Xbox. 3DS through Azahar, plus GBA and NES.</b><br>
   Couch-friendly, controller-first, made for Xbox Series X|S in Dev Mode.<br>
   <b>ALPHA software: early in development, expect rough edges.</b>
 </p>
@@ -20,7 +20,7 @@
 
 ---
 
-ONYX wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core in a full-screen Xbox app: a game library with box art, per-game settings, save states, cheats and themes, all driven from a controller on the TV.
+OnyxEMU (ONYX for short, formerly ONYX 3DS) wraps the [Azahar](https://github.com/azahar-emu/azahar) 3DS emulator core in a full-screen Xbox app: a game library with box art, per-game settings, save states, cheats and themes, all driven from a controller on the TV.
 
 > [!WARNING]
 > **ONYX is in ALPHA and still in its infancy.** It is not expected to work flawlessly

@@ -345,12 +345,12 @@ void SettingsPage::Show(const std::string& section) {
 void SettingsPage::BuildFolders() {
     auto weak = get_weak();
     Add(kit::SectionHeader("Folders"));
-    Note("Point ONYX 3DS at your USB drive. Updates, DLC, texture packs, mods and cheats are read "
+    Note("Point OnyxEMU at your USB drive. Updates, DLC, texture packs, mods and cheats are read "
          "straight from these folders, so nothing has to be copied onto the console.");
 
     const auto drives = RemovableDriveRoots();
     for (const auto& d : drives) {
-        Add(kit::SettingRow("Set up " + d + " for ONYX 3DS",
+        Add(kit::SettingRow("Set up " + d + " for OnyxEMU",
                             "Creates " + d + "/ONYX3DS with Roms, Updates & DLC, Textures, Mods, Cheats, "
                             "System, Screenshots, Music and Themes, and fills any empty folder below.",
                             kit::ActionButton("Set up", kit::glyph::Usb, [weak, d] {
@@ -891,7 +891,7 @@ void SettingsPage::BuildServices() {
     auto& ra = Svc().RetroAchievements();
     Note("Sign in with your retroachievements.org account. Your password is only used to get a login "
          "token and is never saved. Note: as of October 2026 RetroAchievements has not published any 3DS "
-         "achievement sets yet. ONYX 3DS identifies your games and will pick sets up as soon as they exist.");
+         "achievement sets yet. OnyxEMU identifies your games and will pick sets up as soon as they exist.");
     if (ra.LoggedIn()) {
         Add(kit::SettingRow("Signed in as " + ra.UserName(), "",
                             kit::ActionButton("Sign out", kit::glyph::Quit, [weak] {
@@ -965,9 +965,9 @@ void SettingsPage::BuildSystem() {
     Note(std::string("Model: ") + ConsoleModelName(Svc().Model()) + "    Profile in use: " +
          PerfProfileName(Svc().EffectiveProfile()));
     const uint64_t limit = winrt::Windows::System::MemoryManager::AppMemoryUsageLimit();
-    Note("Memory available to ONYX 3DS: " + FormatSize(limit));
+    Note("Memory available to OnyxEMU: " + FormatSize(limit));
     if (limit < (3ull << 30)) {
-        auto warn = kit::Text("ONYX 3DS is running with App resources. In Dev Home, select ONYX 3DS, press "
+        auto warn = kit::Text("OnyxEMU is running with App resources. In Dev Home, select OnyxEMU, press "
                               "View > View details, and set App type to Game. Games need the extra memory "
                               "and GPU time.",
                               20, true, "#E8A33D");
@@ -1020,7 +1020,7 @@ void SettingsPage::BuildSystem() {
 
 void SettingsPage::BuildAbout() {
     const auto v = winrt::Windows::ApplicationModel::Package::Current().Id().Version();
-    Add(kit::SectionHeader("ONYX 3DS " + std::to_string(v.Major) + "." + std::to_string(v.Minor) + "." +
+    Add(kit::SectionHeader("OnyxEMU " + std::to_string(v.Major) + "." + std::to_string(v.Minor) + "." +
                            std::to_string(v.Build)));
     {
         // Same value as "Build stamp" in onyx.log: tells test builds apart on the TV.
@@ -1034,7 +1034,7 @@ void SettingsPage::BuildAbout() {
     }
     Note("A Nintendo 3DS emulator frontend for Xbox Series X|S Dev Mode, running the Azahar emulator core "
          "with Vulkan translated to DirectX 12 by Mesa.");
-    Note("Bring your own games: dump cartridges and system files from a 3DS you own. ONYX 3DS does not "
+    Note("Bring your own games: dump cartridges and system files from a 3DS you own. OnyxEMU does not "
          "include or download any games, firmware or keys.");
     Add(kit::SectionHeader("Credits & licences"));
     for (const char* line : {
@@ -1043,13 +1043,13 @@ void SettingsPage::BuildAbout() {
              "rcheevos by RetroAchievements (MIT)",
              "nlohmann/json (MIT), doctest (MIT)",
              "DirectX Shader Compiler DXIL.dll (Microsoft redistributable)",
-             "Menu artwork, themes and music: original, generated for ONYX 3DS (GPLv3+)",
+             "Menu artwork, themes and music: original, generated for OnyxEMU (GPLv3+)",
              "Rounded M+ 1c font by The Rounded M+ Project Authors (SIL Open Font License 1.1)",
              "Cheat database: CTRPF Action Replay codes by the community",
              "Artwork: SteamGridDB community uploads",
              "Game details: Wikipedia (CC BY-SA); screenshots and box art: libretro thumbnail project; box art (c) Nintendo",
              "Game Boy Advance core: mGBA (MPL-2.0)",
-             "ONYX 3DS is GPLv3+. Source: see README on the project's repository."})
+             "OnyxEMU is GPLv3+. Source: see README on the project's repository."})
         Note(line);
 }
 

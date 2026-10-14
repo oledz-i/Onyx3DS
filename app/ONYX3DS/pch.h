@@ -1,4 +1,4 @@
-// ONYX 3DS - Xbox (UWP) frontend for the Azahar 3DS emulator
+// OnyxEMU - Xbox (UWP) frontend for the Azahar 3DS emulator
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 

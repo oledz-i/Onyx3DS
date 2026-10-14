@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  ONYX 3DS - UWP app for Xbox Dev Mode (C++/WinRT, XAML).
+  OnyxEMU - UWP app for Xbox Dev Mode (C++/WinRT, XAML).
   Build the dependencies first (tools\build-all.ps1 does everything), which
   fills ..\..\deps with:
     lib\azahar_all.lib   Azahar libretro core + its libraries, static, UWP

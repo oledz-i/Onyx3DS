@@ -55,7 +55,7 @@
                 <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                     <Border x:Name="MarkHost" VerticalAlignment="Center" />
                     <StackPanel VerticalAlignment="Center">
-                        <TextBlock x:Name="TitleText" Text="ONYX 3DS" FontSize="34" FontWeight="SemiBold" />
+                        <TextBlock x:Name="TitleText" Text="OnyxEMU" FontSize="34" FontWeight="SemiBold" />
                         <TextBlock x:Name="GreetingText" FontSize="18" />
                     </StackPanel>
                     <!-- 3DS | NES tabs, built in MainPage.cpp (hidden when the NES core is not in the package). -->

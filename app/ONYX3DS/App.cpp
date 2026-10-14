@@ -32,7 +32,7 @@ void ShowFatal(std::wstring const& message) {
         text.FontSize(28);
         text.Margin(Thickness{96, 64, 96, 64});
         text.Foreground(winrt::Windows::UI::Xaml::Media::SolidColorBrush(winrt::Windows::UI::Colors::White()));
-        text.Text(L"ONYX 3DS hit a problem.\n\n" + message +
+        text.Text(L"OnyxEMU hit a problem.\n\n" + message +
                   L"\n\nTake a photo of this screen. The full log is in the Device Portal under "
                   L"File explorer > LocalAppData > ONYX3DS > LocalState > onyx.log.");
         Grid g;
@@ -79,7 +79,7 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     InstallCrashHandler();
     // Dozen and the DXIL validator explain rejected shaders on stderr.
     CaptureStderr(Wide(onyx::JoinPath(Paths().local_state, "driver.log")));
-    ONYX_INFO("ONYX 3DS starting");
+    ONYX_INFO("OnyxEMU starting");
     LogMemoryUsage("at launch"); // the limit shows whether Dev Home runs this as an App or a Game
 
     // Full 1920x1080 layout on Xbox (otherwise XAML scales to 200% = 960x540)

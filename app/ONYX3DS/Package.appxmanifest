@@ -12,8 +12,8 @@
   <mp:PhoneIdentity PhoneProductId="6f3a9c1e-2b7d-4e55-9a0c-3d8e1f2a4b60" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
 
   <Properties>
-    <DisplayName>ONYX 3DS</DisplayName>
-    <PublisherDisplayName>ONYX 3DS</PublisherDisplayName>
+    <DisplayName>OnyxEMU</DisplayName>
+    <PublisherDisplayName>OnyxEMU</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
@@ -28,12 +28,12 @@
   <Applications>
     <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="ONYX3DS.App">
       <uap:VisualElements
-        DisplayName="ONYX 3DS"
-        Description="Nintendo 3DS emulator for Xbox, powered by Azahar"
+        DisplayName="OnyxEMU"
+        Description="OnyxEMU: emulation for Xbox (3DS, GBA, NES), powered by Azahar"
         BackgroundColor="#101218"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">
-        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" ShortName="ONYX 3DS">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" ShortName="OnyxEMU">
           <uap:ShowNameOnTiles>
             <uap:ShowOn Tile="square150x150Logo" />
           </uap:ShowNameOnTiles>

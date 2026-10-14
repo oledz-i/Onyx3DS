@@ -1,4 +1,4 @@
-# ONYX 3DS CI. Azahar, Dozen and the app build in parallel so one run shows
+# OnyxEMU CI. Azahar, Dozen and the app build in parallel so one run shows
 # every stage's errors; build trees are cached even when a job fails, so the
 # next run only recompiles what changed. The package job runs when all pass.
 name: build

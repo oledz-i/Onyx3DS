@@ -1,4 +1,4 @@
-# ONYX 3DS portable shell: library model, settings, cheats, art and
+# OnyxEMU portable shell: library model, settings, cheats, art and
 # achievements. Built into the Xbox app and unit-tested on any desktop OS.
 cmake_minimum_required(VERSION 3.20)
 project(onyx_shell CXX C)

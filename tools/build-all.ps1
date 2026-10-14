@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# One command from a fresh clone to a sideloadable ONYX 3DS package.
+# One command from a fresh clone to a sideloadable OnyxEMU package.
 #   powershell -ExecutionPolicy Bypass -File tools\build-all.ps1
 param(
     [string]$Configuration = "Release",

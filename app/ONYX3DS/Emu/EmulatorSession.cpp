@@ -374,7 +374,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     }
     input_.SetBlocked(false); // never start a game with the controller locked
     if (core_crashed_) {
-        error = "The emulator stopped after an error earlier. Restart ONYX 3DS to play again.";
+        error = "The emulator stopped after an error earlier. Restart OnyxEMU to play again.";
         return false;
     }
     const bool nes = IsRetroSystem(game.system); // "nes" below = a DLL core (NES or GBA)

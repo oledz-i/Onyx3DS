@@ -1,7 +1,7 @@
 {
   "id": "dual-screen",
   "name": "Dual Screen",
-  "author": "ONYX 3DS",
+  "author": "OnyxEMU",
   "description": "Optional: clean silver and white with a dot grid, styled after the 3DS home menu.",
   "colors": {
     "background_top": "#FDFDFE",

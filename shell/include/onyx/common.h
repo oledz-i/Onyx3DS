@@ -1,4 +1,4 @@
-// ONYX 3DS - Xbox frontend for the Azahar 3DS emulator
+// OnyxEMU - Xbox frontend for the Azahar 3DS emulator
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Small shared helpers used by every part of the portable shell. Nothing in

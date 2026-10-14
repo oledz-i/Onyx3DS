@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Builds and signs the ONYX 3DS .msix for sideloading through the Xbox Device
+# Builds and signs the OnyxEMU .msix for sideloading through the Xbox Device
 # Portal. Output: out\AppPackages\ONYX3DS_<version>_x64_Test\
 param([string]$Configuration = "Release")
 . "$PSScriptRoot\common.ps1"
@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Root "out") | Out-Null
 if (!(Test-Path $pfx)) {
     Write-Step "Creating a signing certificate (CN=ONYX3DS)"
     $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=ONYX3DS" -KeyUsage DigitalSignature `
-        -FriendlyName "ONYX 3DS sideload" -CertStoreLocation "Cert:\CurrentUser\My" `
+        -FriendlyName "OnyxEMU sideload" -CertStoreLocation "Cert:\CurrentUser\My" `
         -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
     $pw = ConvertTo-SecureString -String "onyx3ds" -Force -AsPlainText
     Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pw | Out-Null
@@ -53,7 +53,7 @@ $gba = Join-Path $Root "deps\bin\mgba_libretro.dll"
 if (Test-Path $gba) { Copy-Item $gba (Join-Path $Root "app\ONYX3DS\mgba_libretro.dll") -Force }
 else { Write-Warning "mgba_libretro.dll not found in deps\bin; GBA will not be available in this package" }
 
-Write-Step "Building ONYX 3DS ($Configuration|x64)"
+Write-Step "Building OnyxEMU ($Configuration|x64)"
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "out") | Out-Null
 Invoke-Checked msbuild $proj /m /restore /p:Configuration=$Configuration /p:Platform=x64 `
     /p:AppxBundle=Never /p:UapAppxPackageBuildMode=SideloadOnly /p:AppxPackageSigningEnabled=true `

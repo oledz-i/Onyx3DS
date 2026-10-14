@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Shared helpers for the ONYX 3DS Windows build scripts.
+# Shared helpers for the OnyxEMU Windows build scripts.
 
 $ErrorActionPreference = "Stop"
 $Script:Root = (Resolve-Path "$PSScriptRoot\..").Path

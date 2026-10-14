@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Generates the built-in home-menu themes for ONYX 3DS.
+"""Generates the built-in home-menu themes for OnyxEMU.
 
 Every texture is drawn procedurally (gradients, blurred light, grain, glass
 highlights), so the themes are original artwork with no third-party assets.
@@ -485,7 +485,7 @@ def build(theme, seed):
     round_button(*theme["button"], glyph_col=c["text"]).save(os.path.join(out, "button.png"), optimize=True)
 
     manifest = {
-        "id": theme["id"], "name": theme["name"], "author": "ONYX 3DS",
+        "id": theme["id"], "name": theme["name"], "author": "OnyxEMU",
         "description": theme["description"], "colors": c,
         "textures": {"background": "background.jpg", "background_far": "background_far.png",
                      "background_near": "background_near.png", "tile_frame": "tile_frame.png",

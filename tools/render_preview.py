@@ -138,7 +138,7 @@ def main(theme_id, out_path):
         d.text((bx + 56 - lw / 2, H - 62), label, font=f_b, fill=text)
     # Title strip over the focused channel
     f_t = font(30, True)
-    d.text((x0, 30), "ONYX 3DS", font=f_t, fill=hex_rgb(col["text"]))
+    d.text((x0, 30), "OnyxEMU", font=f_t, fill=hex_rgb(col["text"]))
     f_s = font(24)
     hint = "Sky Quest  ·  Last played yesterday  ·  2h 14m"
     hw = d.textlength(hint, font=f_s)
