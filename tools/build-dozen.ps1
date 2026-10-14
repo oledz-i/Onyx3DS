@@ -16,13 +16,19 @@ $link = "/APPCONTAINER WindowsApp.lib d3d12.lib dxgi.lib"
 $store = Join-Path $env:VCToolsInstallDir "lib\x64\store"
 if (!(Test-Path (Join-Path $store "msvcrt.lib"))) { throw "Store CRT libs not found in $store" }
 $desktopLib = $env:LIB
-$env:LIB = "$store;$desktopLib"
+# Configure with the desktop libraries and NO UWP link options: Meson links and runs small test
+# programs while configuring (sizeof, sanity checks), and a program linked for an app container
+# or against VCRUNTIME140_APP.dll cannot start on a build machine (exit code 0xC0000135). The UWP
+# link options reach the real link through link.exe's _LINK_ variable at build time instead.
+$uwpLib = "$store;$desktopLib"
 
 # Always (re)configure so option changes reach a cached build directory.
 $reconfigure = @()
 if (Test-Path (Join-Path $build "build.ninja")) { $reconfigure = @("--reconfigure") }
 if ($true) {
     Write-Step "Configuring Mesa (Dozen only, UWP)"
+    $env:LIB = $desktopLib
+    Remove-Item Env:_LINK_ -ErrorAction SilentlyContinue
     $env:CC = "cl"
     $env:CXX = "cl"
     $mesonArgs = @(
@@ -36,23 +42,14 @@ if ($true) {
         "-Dzstd=disabled", "-Dxmlconfig=disabled", "-Dvalgrind=disabled", "-Dlibunwind=disabled",
         "-Dmesa-clc=auto", "-Dprecomp-compiler=auto",
         "-Dc_args=$uwp", "-Dcpp_args=$uwp",
-        "-Dc_link_args=$link", "-Dcpp_link_args=$link"
+        "-Dc_link_args=", "-Dcpp_link_args="
     )
-    if ($reconfigure.Count -eq 0) {
-        # A fresh configure links and RUNS a small test program. Linked against the app-flavoured
-        # runtime it cannot start on a build machine (VCRUNTIME140_APP.dll is missing, exit code
-        # 0xC0000135), so configure once with the desktop libraries and no UWP link options, then
-        # reconfigure below with the real ones (compiler checks are not repeated).
-        $env:LIB = $desktopLib
-        $first = $mesonArgs | ForEach-Object { if ($_ -like "-Dc_link_args=*" -or $_ -like "-Dcpp_link_args=*") { ($_ -split "=")[0] + "=" } else { $_ } }
-        Invoke-Checked meson @first
-        $env:LIB = "$store;$desktopLib"
-        $reconfigure = @("--reconfigure")
-    }
     Invoke-Checked meson @mesonArgs @reconfigure
 }
 
 Write-Step "Building vulkan_dzn.dll"
+$env:LIB = $uwpLib
+$env:_LINK_ = $link
 # Force a relink: a LIB change alone does not make ninja relink a cached build.
 Remove-Item (Join-Path $build "src\microsoft\vulkan\vulkan_dzn.dll") -ErrorAction SilentlyContinue
 Invoke-Checked ninja -k 0 -C $build src/microsoft/vulkan/vulkan_dzn.dll
