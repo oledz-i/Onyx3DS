@@ -467,7 +467,7 @@ void SettingsPage::BuildEmulation() {
                             Cfg().qol.complete_shaders = on;
                             Save();
                         })));
-    Add(kit::SettingRow("Fast vertex cache", "Keeps 3D model data on the graphics card between frames for speed. Turn it off to test whether it causes glitches such as flicker on characters or noise on models (slower). Takes effect on the next game",
+    Add(kit::SettingRow("Vertex cache (experimental)", "Keeps 3D model data on the graphics card between frames. Off is the stable choice: with it on, Mario Kart 7 characters and sky flickered. Takes effect on the next game",
                         kit::Toggle(Cfg().qol.vertex_cache, [](bool on) {
                             Cfg().qol.vertex_cache = on;
                             Save();
