@@ -302,3 +302,12 @@ Open: OpenGL bottom screen (no GL log since build 153; need a short GL log).
 
 ## OpenGL bottom screen black (Azahar 0059, diagnostics only)
 Log from build 154 (real OpenGL 4.6): top screen lit, no GL errors, layout large_screen with bottom at 502x375 in the corner; user reports the bottom screen is black. Top and bottom share the same draw code, so the difference must be in how the bottom texture is produced. 0059 logs per screen every ~5 s: size, format, address, CPU-copy vs cache texture, texcoords. No fix yet. Known issue for 3.1.0.
+
+## v3.2.0 "new look" (Wed 2026-10-14, draft, unpublished)
+- Home screen: faded full-page backdrop of the focused game (libretro gameplay screenshot, else SteamGridDB hero, else grid art), two cross-fading layers with a slow composition scale; banner and slideshow removed. Settings: "Game picture as the background" (default on), "Box art" (default off).
+- Box art: GameInfoService::EnsureBoxArt (libretro Named_Boxarts listing + best-name match, cached as <key>_box.png, misses remembered as <key>_box.none); background prefetch pass when the setting is on; tall tiles in the crossbar, centred box on the grid card, big cover in the panel. Credit "(c) Nintendo" in the panel, Settings > About and README.
+- Info panel: critics' stars + score (Wikipedia "Video game reviews" MC/GR field, parsed; none when the platform is unclear), genre chips, summary, one details line. Info cache is versioned (v2) so old caches refetch once.
+- Motion: ScrollXmbTo glides (ChangeView), row nudges toward the panel, panel slides in, launch fades the page for 170 ms before opening the game.
+- Music: tools/make_theme_music.py generates six original tracks (aero-channel, carbon, dual-screen, matcha, midnight-onyx, sunset-arcade), 91-124 s, 112 kbps AAC, loop-safe reverb. Loudness -14 to -18 LUFS, peaks about -5 dBFS. UNHEARD by the author of this change: the numbers check out, the taste does not.
+- Untested on a console; the app code is compiled only in CI. Shell tests: 71 cases pass locally (new: score parsing, stars, box art fetch/miss).
+- MK7 black sky: nothing new found in the build-154 log (3-5 ms/frame, 99% vertex cache hits, only a benign DXIL PSV warning at startup). The checksum guard from 0058 is still the untested lead; its "found stale by checksum" log number decides.

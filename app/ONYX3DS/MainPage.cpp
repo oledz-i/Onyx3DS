@@ -70,6 +70,13 @@ void MainPage::OnNavigatedTo(NavigationEventArgs const&) {
     clock_.Start();
     if (sparkles_) sparkles_.Begin();
     animate_entrance_ = true;
+    // Back from a game: undo the launch flourish.
+    launching_ = false;
+    backdrop_game_.clear(); // settings may have changed; the next focus re-asks
+    ContentArea().OpacityTransition(nullptr);
+    BottomBar().OpacityTransition(nullptr);
+    ContentArea().Opacity(1);
+    BottomBar().Opacity(1);
     Svc().StartMusic();
 
     if (!initialised_) {
@@ -258,6 +265,22 @@ void MainPage::Rebuild(bool keep_focus) {
     }
     page_ = std::clamp(page_, 0, pages - 1);
     BuildPage();
+
+    // Box art on: fetch what is missing for the whole library in the background, then redraw once.
+    if (BoxArtOn() && !box_prefetch_started_) {
+        box_prefetch_started_ = true;
+        std::vector<GameEntry> all;
+        for (const GameSystem s : AvailableSystems()) {
+            auto part = Svc().LibraryFor(s).GridView(Svc().Config().qol);
+            all.insert(all.end(), part.begin(), part.end());
+        }
+        Svc().PrefetchBoxArt(std::move(all), [weak = get_weak()](int fetched) {
+            auto self = weak.get();
+            if (!self) return;
+            self->box_prefetch_started_ = false;
+            if (fetched > 0) self->Rebuild();
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -391,12 +414,9 @@ Button MainPage::MakeTile(const GameEntry& game, double w, double h) {
     Border art;
     art.Margin(Thickness{w * 0.026, w * 0.026, w * 0.026, w * 0.026});
     art.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{r * 0.8, r * 0.8, r * 0.8, r * 0.8});
-    if (!game.grid_art.empty() && CachedExists(game.grid_art)) {
-        ImageBrush brush;
-        brush.ImageSource(ImageFromFile(game.grid_art, static_cast<int>(w * 1.3)));
-        brush.Stretch(Stretch::UniformToFill);
-        art.Background(brush);
-    } else {
+    const std::string box = BoxArtOn() ? Svc().BoxArtPath(game) : std::string{};
+    const bool portrait_tile = w <= h * 1.1;
+    auto fill_gradient = [&] {
         LinearGradientBrush bg;
         GradientStop a, b;
         a.Color(Svc().ThemeColor(t.colors.tile_face));
@@ -408,6 +428,28 @@ Button MainPage::MakeTile(const GameEntry& game, double w, double h) {
         bg.StartPoint(Point{0, 0});
         bg.EndPoint(Point{0, 1});
         art.Background(bg);
+    };
+    if (!box.empty() && portrait_tile) {
+        // A tall tile made for the box: the cover fills it.
+        ImageBrush brush;
+        brush.ImageSource(ImageFromFile(box, static_cast<int>(h * 1.2)));
+        brush.Stretch(Stretch::UniformToFill);
+        art.Background(brush);
+    } else if (!box.empty()) {
+        // A wide tile (the channel grid): the box stands in the middle of the card.
+        fill_gradient();
+        Image cover;
+        cover.Source(ImageFromFile(box, static_cast<int>(h * 1.2)));
+        cover.Stretch(Stretch::Uniform);
+        cover.Margin(Thickness{h * 0.05, h * 0.05, h * 0.05, h * 0.05});
+        art.Child(cover);
+    } else if (!game.grid_art.empty() && CachedExists(game.grid_art)) {
+        ImageBrush brush;
+        brush.ImageSource(ImageFromFile(game.grid_art, static_cast<int>(w * 1.3)));
+        brush.Stretch(Stretch::UniformToFill);
+        art.Background(brush);
+    } else {
+        fill_gradient();
         StackPanel inner;
         inner.HorizontalAlignment(HorizontalAlignment::Center);
         inner.VerticalAlignment(VerticalAlignment::Center);
@@ -506,9 +548,18 @@ void MainPage::OnTileFocused(Button const& tile, const GameEntry& game, bool foc
         auto children = g.Children();
         if (children.Size()) children.GetAt(children.Size() - 1).Opacity(focused ? 1.0 : 0.0);
     }
+    if (Xmb()) {
+        // The whole row nudges toward the panel while it is the one in focus.
+        if (const auto row = VisualTreeHelper::GetParent(tile).try_as<StackPanel>())
+            row.Translation(float3{focused ? 26.f : 0.f, 0.f, 0.f});
+    }
     if (!focused) return;
     focused_path_ = game.path;
-    if (Xmb()) UpdateXmbPanel(game);
+    if (Xmb()) {
+        UpdateXmbPanel(game);
+        ScrollXmbTo(tile);
+    }
+    ShowBackdrop(game);
     Svc().SetSelectedGame(game);
     Svc().PlaySfx("move");
     SelectedText().Text(kit::H(game.DisplayTitle()));
@@ -674,78 +725,74 @@ void MainPage::StepCategory(int delta) {
     }
 }
 
-// Banner, title and facts of the focused game, then (after a short pause, so scrolling past games
-// costs nothing) the description, release details and screenshots from the web.
+// Title (or logo), facts and, after a short pause so that scrolling past games costs nothing, the
+// critics' score, description and release details from the web. The picture of the game itself
+// is the faded backdrop of the whole page (ShowBackdrop), not a banner in here.
+static void SetCover(Border const& host, const std::string& path, ThemeShadow const& shadow) {
+    Image img;
+    img.Source(ImageFromFile(path, 700));
+    img.Stretch(Stretch::Uniform);
+    img.MaxHeight(430);
+    img.HorizontalAlignment(HorizontalAlignment::Left);
+    img.Shadow(shadow);
+    img.Translation(float3{0.f, 0.f, 32.f});
+    host.Child(img);
+    host.Visibility(Visibility::Visible);
+}
+
 void MainPage::UpdateXmbPanel(const GameEntry& game) {
     if (!xmb_panel_ || xmb_shown_ == game.path) return;
     xmb_shown_ = game.path;
-    if (xmb_show_timer_) xmb_show_timer_.Stop();
     const Theme& t = Svc().CurrentTheme();
     xmb_panel_.Children().Clear();
 
+    StackPanel layout;
+    layout.Orientation(Orientation::Horizontal);
+    layout.Spacing(40);
+    layout.VerticalAlignment(VerticalAlignment::Center);
+
+    xmb_cover_ = Border();
+    xmb_cover_.VerticalAlignment(VerticalAlignment::Top);
+    xmb_cover_.Visibility(Visibility::Collapsed);
+    xmb_cover_.MaxWidth(300);
+    if (BoxArtOn()) {
+        if (const std::string box = Svc().BoxArtPath(game); !box.empty()) SetCover(xmb_cover_, box, shadow_);
+    }
+    layout.Children().Append(xmb_cover_);
+
     StackPanel column;
     column.Spacing(14);
-    // Banner: the SteamGridDB hero, else the cover, else a themed card.
-    Grid banner;
-    banner.Height(300);
-    Border art;
-    art.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{18, 18, 18, 18});
-    const std::string& pic = !game.hero_art.empty() && CachedExists(game.hero_art) ? game.hero_art : game.grid_art;
-    if (!pic.empty() && CachedExists(pic)) {
-        ImageBrush brush;
-        brush.ImageSource(ImageFromFile(pic, 1100));
-        brush.Stretch(Stretch::UniformToFill);
-        art.Background(brush);
-    } else {
-        art.Background(Svc().ThemeBrush(kit::WithAlpha(t.colors.panel, 0xD0)));
-    }
-    banner.Children().Append(art);
-    Border scrim;
-    scrim.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{18, 18, 18, 18});
-    scrim.IsHitTestVisible(false);
-    LinearGradientBrush fade;
-    fade.StartPoint(Point{0, 0});
-    fade.EndPoint(Point{0, 1});
-    GradientStop top, bottom;
-    top.Color(winrt::Windows::UI::ColorHelper::FromArgb(0x00, 0, 0, 0));
-    top.Offset(0.45);
-    bottom.Color(winrt::Windows::UI::ColorHelper::FromArgb(0xC8, 0, 0, 0));
-    bottom.Offset(1);
-    fade.GradientStops().Append(top);
-    fade.GradientStops().Append(bottom);
-    scrim.Background(fade);
-    banner.Children().Append(scrim);
+    column.MaxWidth(BoxArtOn() ? 620 : 800);
+    column.VerticalAlignment(VerticalAlignment::Center);
     if (!game.logo_art.empty() && CachedExists(game.logo_art)) {
         Image logo;
-        logo.Source(ImageFromFile(game.logo_art, 600));
-        logo.MaxWidth(360);
-        logo.MaxHeight(110);
+        logo.Source(ImageFromFile(game.logo_art, 700));
+        logo.MaxWidth(520);
+        logo.MaxHeight(150);
+        logo.Stretch(Stretch::Uniform);
         logo.HorizontalAlignment(HorizontalAlignment::Left);
-        logo.VerticalAlignment(VerticalAlignment::Bottom);
-        logo.Margin(Thickness{26, 0, 0, 22});
-        banner.Children().Append(logo);
+        column.Children().Append(logo);
     } else {
-        auto title = kit::Text(game.DisplayTitle(), 34, true, "#FFFFFF");
+        auto title = kit::Text(game.DisplayTitle(), 54, true);
         title.TextTrimming(TextTrimming::CharacterEllipsis);
         title.MaxLines(2);
         title.TextWrapping(TextWrapping::Wrap);
-        title.VerticalAlignment(VerticalAlignment::Bottom);
-        title.Margin(Thickness{26, 0, 26, 22});
-        banner.Children().Append(title);
+        column.Children().Append(title);
     }
-    column.Children().Append(banner);
 
     std::string facts = SystemLabel(game.system);
     if (game.play_seconds) facts += "  ·  " + FormatPlayTime(game.play_seconds);
     else if (game.last_played) facts += "  ·  " + FormatLastPlayed(game.last_played);
-    column.Children().Append(kit::Text(facts, 20, false, kit::WithAlpha(t.colors.text_muted, 0xE8)));
+    column.Children().Append(kit::Text(facts, 20, false, kit::WithAlpha(t.colors.text_muted, 0xF0)));
 
     xmb_info_ = StackPanel();
-    xmb_info_.Spacing(12);
+    xmb_info_.Spacing(14);
     xmb_info_.Opacity(0);
     xmb_info_.OpacityTransition(ScalarTransition());
     column.Children().Append(xmb_info_);
-    xmb_panel_.Children().Append(column);
+    layout.Children().Append(column);
+    xmb_panel_.Children().Append(layout);
+    kit::Entrance(layout, 30, 0, 0, 260);
     if (!Svc().Config().qol.xmb_info) return;
 
     xmb_pending_ = game;
@@ -769,95 +816,162 @@ void MainPage::UpdateXmbPanel(const GameEntry& game) {
     info_timer_.Start();
 }
 
+// Critics' stars, e.g. four and a half.
+static std::string StarText(double stars) {
+    const int full = static_cast<int>(stars);
+    const bool half = stars - full >= 0.5;
+    std::string out;
+    for (int i = 0; i < full; ++i) out += "\xE2\x98\x85"; // black star
+    if (half) out += "\xC2\xBD";
+    for (int i = full + (half ? 1 : 0); i < 5; ++i) out += "\xE2\x98\x86"; // white star
+    return out;
+}
+
 void MainPage::FillXmbInfo(const GameEntry&, const GameInfo& info) {
     if (!xmb_info_ || !info.found) return;
     const Theme& t = Svc().CurrentTheme();
     xmb_info_.Children().Clear();
-    auto detail = [&](const char* label, const std::string& value) {
-        if (value.empty()) return;
+    if (BoxArtOn() && !info.boxart.empty() && xmb_cover_ && !xmb_cover_.Child())
+        SetCover(xmb_cover_, info.boxart, shadow_);
+
+    if (info.score > 0) {
         StackPanel row;
         row.Orientation(Orientation::Horizontal);
-        row.Spacing(10);
-        auto l = kit::Text(label, 18, true, kit::WithAlpha(t.colors.text_muted, 0xE0));
-        auto v = kit::Text(value, 18);
-        v.TextTrimming(TextTrimming::CharacterEllipsis);
-        v.MaxWidth(620);
-        row.Children().Append(l);
-        row.Children().Append(v);
+        row.Spacing(16);
+        auto stars = kit::Text(StarText(info.Stars()), 32, false, t.colors.accent);
+        stars.VerticalAlignment(VerticalAlignment::Center);
+        auto score = kit::Text(std::to_string(info.score), 28, true);
+        score.VerticalAlignment(VerticalAlignment::Center);
+        auto from = kit::Text("Critics' average, " + info.score_source, 16, false, kit::WithAlpha(t.colors.text_muted, 0xE0));
+        from.VerticalAlignment(VerticalAlignment::Center);
+        row.Children().Append(stars);
+        row.Children().Append(score);
+        row.Children().Append(from);
         xmb_info_.Children().Append(row);
-    };
-    detail("Released", info.released);
-    detail("Developer", info.developer);
-    detail("Publisher", info.publisher);
-    detail("Genre", info.genre);
+    }
+    if (!info.genre.empty()) {
+        StackPanel chips;
+        chips.Orientation(Orientation::Horizontal);
+        chips.Spacing(10);
+        std::string rest = info.genre;
+        int shown = 0;
+        while (!rest.empty() && shown < 3) {
+            const auto comma = rest.find(',');
+            std::string one = rest.substr(0, comma);
+            rest = comma == std::string::npos ? std::string{} : rest.substr(comma + 1);
+            const auto first = one.find_first_not_of(' ');
+            if (first == std::string::npos) continue;
+            chips.Children().Append(kit::Chip(one.substr(first)));
+            ++shown;
+        }
+        if (shown) xmb_info_.Children().Append(chips);
+    }
     if (!info.summary.empty()) {
-        auto text = kit::Text(info.summary, 19);
+        auto text = kit::Text(info.summary, 21);
         text.TextWrapping(TextWrapping::Wrap);
         text.MaxLines(6);
         text.TextTrimming(TextTrimming::CharacterEllipsis);
-        text.Margin(Thickness{0, 4, 0, 0});
+        text.LineHeight(31);
         xmb_info_.Children().Append(text);
     }
-    if (!info.shots.empty()) {
-        // A slow screenshot slideshow: two stacked frames cross-fade while the one in view creeps
-        // outwards (a composition scale, so it costs the UI thread nothing per frame).
-        Grid stage;
-        stage.Width(640);
-        stage.Height(360);
-        stage.HorizontalAlignment(HorizontalAlignment::Left);
-        Border clip;
-        clip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{14, 14, 14, 14});
-        Grid layers;
-        std::vector<Border> frames;
-        for (int i = 0; i < 2; ++i) {
-            Border frame;
-            frame.Opacity(i == 0 ? 1 : 0);
-            frame.OpacityTransition(ScalarTransition());
-            frame.CenterPoint(float3{320.f, 180.f, 0.f});
-            Vector3Transition zoom;
-            zoom.Duration(std::chrono::seconds(7));
-            frame.ScaleTransition(zoom);
-            layers.Children().Append(frame);
-            frames.push_back(frame);
-        }
-        clip.Child(layers);
-        stage.Children().Append(clip);
-        xmb_info_.Children().Append(stage);
-
-        auto shots = std::make_shared<std::vector<std::string>>(info.shots);
-        auto index = std::make_shared<int>(0);
-        auto front = std::make_shared<int>(0);
-        auto show = [frames, shots, index, front]() {
-            const int next = 1 - *front;
-            Border in = frames[next];
-            Border out = frames[*front];
-            ImageBrush brush;
-            brush.ImageSource(ImageFromFile((*shots)[*index % shots->size()], 800));
-            brush.Stretch(Stretch::UniformToFill);
-            in.Background(brush);
-            in.ScaleTransition(nullptr);  // snap back to full size unseen, then creep outwards slowly
-            in.Scale(float3{1.0f, 1.0f, 1.0f});
-            Vector3Transition zoom;
-            zoom.Duration(std::chrono::seconds(7));
-            in.ScaleTransition(zoom);
-            in.Opacity(1);
-            in.Scale(float3{1.08f, 1.08f, 1.0f});
-            out.Opacity(0);
-            *front = next;
-            ++*index;
-        };
-        show();
-        if (shots->size() > 1) {
-            xmb_show_timer_ = DispatcherTimer();
-            xmb_show_timer_.Interval(std::chrono::seconds(6));
-            xmb_show_timer_.Tick([show](auto&&, auto&&) { show(); });
-            xmb_show_timer_.Start();
-        }
+    std::string details;
+    auto add = [&](const char* label, const std::string& v) {
+        if (v.empty()) return;
+        details += (details.empty() ? "" : "     ") + std::string(label) + "  " + v;
+    };
+    add("Released", info.released);
+    add("Developer", info.developer);
+    add("Publisher", info.publisher);
+    if (!details.empty()) {
+        auto line = kit::Text(details, 17, false, kit::WithAlpha(t.colors.text_muted, 0xF0));
+        line.TextWrapping(TextWrapping::Wrap);
+        line.MaxLines(2);
+        xmb_info_.Children().Append(line);
     }
-    if (!info.source.empty())
-        xmb_info_.Children().Append(kit::Text("Details from Wikipedia, screenshots from the libretro thumbnail project", 14, false,
-                                              kit::WithAlpha(t.colors.text_muted, 0xB0)));
+    std::string credit = "Details from Wikipedia, pictures from the libretro thumbnail project";
+    if (BoxArtOn() && !info.boxart.empty()) credit += ". Box art (c) Nintendo";
+    xmb_info_.Children().Append(kit::Text(credit, 13, false, kit::WithAlpha(t.colors.text_muted, 0xA0)));
     xmb_info_.Opacity(1);
+}
+
+// ---------------------------------------------------------------------------
+// The focused game's picture, faded behind the whole page
+
+bool MainPage::BoxArtOn() const { return Svc().Config().qol.box_art; }
+
+void MainPage::HideBackdrop() {
+    BackdropA().Opacity(0);
+    BackdropB().Opacity(0);
+    BackdropScrim().Opacity(0);
+    backdrop_file_.clear();
+}
+
+void MainPage::SetBackdropImage(const std::string& path) {
+    if (path == backdrop_file_) return;
+    backdrop_file_ = path;
+    backdrop_front_ = !backdrop_front_;
+    Image in = backdrop_front_ ? BackdropA() : BackdropB();
+    Image out = backdrop_front_ ? BackdropB() : BackdropA();
+    in.Source(ImageFromFile(path, 1280));
+    // Snap back to full size unseen, then creep outwards slowly. A composition scale: it costs the
+    // UI thread nothing per frame.
+    in.ScaleTransition(nullptr);
+    in.Scale(float3{1.0f, 1.0f, 1.0f});
+    in.CenterPoint(float3{static_cast<float>(Root().ActualWidth() / 2), static_cast<float>(Root().ActualHeight() / 2), 0.f});
+    Vector3Transition zoom;
+    zoom.Duration(std::chrono::seconds(14));
+    in.ScaleTransition(zoom);
+    in.Scale(float3{1.07f, 1.07f, 1.0f});
+    in.Opacity(0.6);
+    out.Opacity(0);
+    BackdropScrim().Opacity(1);
+}
+
+// Asks for the picture a moment after the cursor settles, so moving quickly through a list costs
+// nothing and the old picture stays until the new one is ready.
+void MainPage::ShowBackdrop(const GameEntry& game) {
+    if (!Svc().Config().qol.game_backdrop) {
+        if (!backdrop_file_.empty()) HideBackdrop();
+        return;
+    }
+    if (backdrop_game_ == game.path) return;
+    backdrop_game_ = game.path;
+    backdrop_entry_ = game;
+    if (!backdrop_timer_) {
+        backdrop_timer_ = DispatcherTimer();
+        backdrop_timer_.Interval(Ms(240));
+        auto weak = get_weak();
+        backdrop_timer_.Tick([weak](auto&&, auto&&) {
+            auto self = weak.get();
+            if (!self) return;
+            self->backdrop_timer_.Stop();
+            const GameEntry entry = self->backdrop_entry_;
+            Svc().LoadGameInfo(entry, [weak, entry](GameInfo info) {
+                auto self = weak.get();
+                if (!self || self->backdrop_game_ != entry.path) return;
+                // A gameplay screenshot first; else the game's SteamGridDB hero, else its cover.
+                std::string pic = !info.shots.empty() ? info.shots.front() : std::string{};
+                if (pic.empty() && !entry.hero_art.empty() && CachedExists(entry.hero_art)) pic = entry.hero_art;
+                if (pic.empty() && !entry.grid_art.empty() && CachedExists(entry.grid_art)) pic = entry.grid_art;
+                if (pic.empty()) self->HideBackdrop();
+                else self->SetBackdropImage(pic);
+            });
+        });
+    }
+    backdrop_timer_.Stop();
+    backdrop_timer_.Start();
+}
+
+// Keeps the focused row a little below the top and glides there.
+void MainPage::ScrollXmbTo(Button const& tile) {
+    if (!xmb_scroll_) return;
+    const auto content = xmb_scroll_.Content().try_as<UIElement>();
+    if (!content) return;
+    try {
+        const auto pt = tile.TransformToVisual(content).TransformPoint(Point{0.f, 0.f});
+        xmb_scroll_.ChangeView(nullptr, std::max(0.0, static_cast<double>(pt.Y) - 150.0), nullptr, false);
+    } catch (...) {
+    }
 }
 
 // The crossbar: category names across the top, the chosen category's games down the page.
@@ -912,7 +1026,7 @@ void MainPage::BuildXmb() {
 
     Grid content;
     ColumnDefinition list_col;
-    list_col.Width(GridLengthHelper::FromPixels(780));
+    list_col.Width(GridLengthHelper::FromPixels(690));
     ColumnDefinition panel_col;
     panel_col.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
     content.ColumnDefinitions().Append(list_col);
@@ -932,11 +1046,13 @@ void MainPage::BuildXmb() {
     scroll.HorizontalScrollMode(ScrollMode::Disabled);
     scroll.VerticalScrollMode(ScrollMode::Enabled);
     scroll.Margin(Thickness{40, 14, 0, 0});
+    scroll.BringIntoViewOnFocusChange(false); // ScrollXmbTo glides there instead
+    xmb_scroll_ = scroll;
     StackPanel list;
     list.Spacing(14);
     list.Padding(Thickness{0, 12, 0, 40});
     Button focus_target{nullptr};
-    const double th = 118, tw = th / 0.5625;
+    const double th_wide = 118, tw = th_wide / 0.5625;
     if (games_.empty()) {
         list.Children().Append(kit::Text(xmb_special_ == 2 ? "Press Y on a game to add it here."
                                                            : "Games you play show up here.",
@@ -947,18 +1063,29 @@ void MainPage::BuildXmb() {
         StackPanel row;
         row.Orientation(Orientation::Horizontal);
         row.Spacing(26);
-        auto tile = MakeTile(game, tw, th);
+        // With box art on, a game that has its box gets a tall tile; the rest keep the wide one.
+        const bool boxed = BoxArtOn() && !Svc().BoxArtPath(game).empty();
+        const double th = boxed ? 156 : th_wide;
+        auto tile = MakeTile(game, boxed ? th * 0.86 : tw, th);
         if (game.path == focused_path_ || (!focus_target && focused_path_.empty())) focus_target = tile;
         row.Children().Append(tile);
         StackPanel words;
         words.VerticalAlignment(VerticalAlignment::Center);
-        words.Children().Append(kit::Text(game.DisplayTitle(), 28, true));
+        auto name = kit::Text(game.DisplayTitle(), 28, true);
+        name.TextWrapping(TextWrapping::Wrap);
+        name.MaxLines(2);
+        name.TextTrimming(TextTrimming::CharacterEllipsis);
+        words.MaxWidth(400);
+        words.Children().Append(name);
         std::string sub = SystemLabel(game.system);
         if (game.play_seconds) sub += "  ·  " + FormatPlayTime(game.play_seconds);
         else if (game.last_played) sub += "  ·  " + FormatLastPlayed(game.last_played);
         words.Children().Append(kit::Text(sub, 18, false, kit::WithAlpha(t.colors.text_muted, 0xE0)));
         row.Children().Append(words);
-        if (animate_entrance_) kit::Entrance(row, 0, 18, std::min(slot, 10) * 30, 280);
+        Vector3Transition glide;
+        glide.Duration(Ms(240));
+        row.TranslationTransition(glide);
+        if (animate_entrance_) kit::Entrance(row, 0, 0, std::min(slot, 10) * 30, 280);
         list.Children().Append(row);
         ++slot;
     }
@@ -1112,15 +1239,33 @@ void MainPage::BuildSparkles() {
 // Actions
 
 void MainPage::OpenGame(const GameEntry& game) {
+    if (launching_) return;
+    launching_ = true;
     Svc().PlaySfx("select");
     focused_path_ = game.path;
-    if (Svc().Config().qol.quick_launch) {
+    const bool quick = Svc().Config().qol.quick_launch;
+    if (quick) {
         Svc().StopMusic();
         Svc().PlaySfx("launch");
-        Frame().Navigate(xaml_typename<ONYX3DS::EmulationPage>(), box_value(kit::H(game.path)));
-    } else {
-        Frame().Navigate(xaml_typename<ONYX3DS::GamePage>(), box_value(kit::H(game.path)));
     }
+    // The page fades away over the game's picture for a beat, then the game opens.
+    ScalarTransition fade;
+    fade.Duration(Ms(170));
+    ContentArea().OpacityTransition(fade);
+    BottomBar().OpacityTransition(fade);
+    ContentArea().Opacity(0);
+    BottomBar().Opacity(0);
+    auto timer = DispatcherTimer();
+    timer.Interval(Ms(170));
+    const std::string path = game.path;
+    timer.Tick([weak = get_weak(), quick, path](IInspectable const& sender, auto&&) {
+        sender.as<DispatcherTimer>().Stop();
+        auto self = weak.get();
+        if (!self) return;
+        if (quick) self->Frame().Navigate(xaml_typename<ONYX3DS::EmulationPage>(), box_value(kit::H(path)));
+        else self->Frame().Navigate(xaml_typename<ONYX3DS::GamePage>(), box_value(kit::H(path)));
+    });
+    timer.Start();
 }
 
 void MainPage::ShowToolsMenu() {

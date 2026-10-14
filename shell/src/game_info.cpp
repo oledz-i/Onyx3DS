@@ -442,7 +442,7 @@ found:
     FetchShots(g, info);
     if (!info.shots.empty()) info.found = true;
     if (!reachable) return info; // offline: do not remember the miss
-    info.boxart = EnsureBoxArt(g);
+    if (fetch_boxart_) info.boxart = EnsureBoxArt(g);
     json j = {{"found", info.found}, {"summary", info.summary}, {"developer", info.developer},
               {"publisher", info.publisher}, {"released", info.released}, {"genre", info.genre},
               {"source", info.source}, {"shots", info.shots}, {"score", info.score},

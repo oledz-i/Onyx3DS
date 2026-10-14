@@ -721,6 +721,16 @@ void SettingsPage::BuildInterface() {
                             Cfg().qol.xmb_info = on;
                             Save();
                         })));
+    Add(kit::SettingRow("Game picture as the background", "The game you highlight fades in behind the menu: a screenshot of it, downloaded once (needs internet)",
+                        kit::Toggle(Cfg().qol.game_backdrop, [](bool on) {
+                            Cfg().qol.game_backdrop = on;
+                            Save();
+                        })));
+    Add(kit::SettingRow("Box art", "Show each game's box art instead of its banner picture. Downloaded once per game (needs internet). Box art belongs to Nintendo",
+                        kit::Toggle(Cfg().qol.box_art, [](bool on) {
+                            Cfg().qol.box_art = on;
+                            Save();
+                        })));
     Add(kit::SettingRow("Channels per row", "3 to 6 (channel layout)",
                         kit::Range(3, 6, 1, Cfg().qol.grid_columns, [](double v) {
                             Cfg().qol.grid_columns = static_cast<int>(v);
@@ -1032,6 +1042,8 @@ void SettingsPage::BuildAbout() {
              "Rounded M+ 1c font by The Rounded M+ Project Authors (SIL Open Font License 1.1)",
              "Cheat database: CTRPF Action Replay codes by the community",
              "Artwork: SteamGridDB community uploads",
+             "Game details: Wikipedia (CC BY-SA); screenshots and box art: libretro thumbnail project; box art (c) Nintendo",
+             "Game Boy Advance core: mGBA (MPL-2.0)",
              "ONYX 3DS is GPLv3+. Source: see README on the project's repository."})
         Note(line);
 }

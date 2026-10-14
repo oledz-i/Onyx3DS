@@ -240,6 +240,7 @@ TEST_CASE("Game info: fetch, cache and remember misses") {
     http.routes["https://thumbnails.libretro.com/Nintendo%20-%20Nintendo%203DS/Named_Boxarts/Kart%20Racer%20%28USA%29.png"] =
         {200, std::string("\x89PNG\r\n\x1a\n", 8) + "box", ""};
     GameInfoService svc(http, fs, dir.Str());
+    svc.SetFetchBoxArt(true);
     GameEntry g;
     g.title = "Kart Racer";
     g.title_id = 0x0004000000030800ull;

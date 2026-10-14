@@ -9,6 +9,36 @@
          page dots and the empty state are built in MainPage.cpp. -->
     <Grid x:Name="Root" Background="Black">
         <Image x:Name="BackgroundImage" Stretch="UniformToFill" />
+        <!-- The focused game's picture, faded in behind everything (two layers cross-fade). -->
+        <Image x:Name="BackdropA" Stretch="UniformToFill" Opacity="0" IsHitTestVisible="False">
+            <Image.OpacityTransition><ScalarTransition Duration="0:0:0.6" /></Image.OpacityTransition>
+        </Image>
+        <Image x:Name="BackdropB" Stretch="UniformToFill" Opacity="0" IsHitTestVisible="False">
+            <Image.OpacityTransition><ScalarTransition Duration="0:0:0.6" /></Image.OpacityTransition>
+        </Image>
+        <Grid x:Name="BackdropScrim" Opacity="0" IsHitTestVisible="False">
+            <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.5" /></Grid.OpacityTransition>
+            <Rectangle>
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="#F0000000" Offset="0" />
+                        <GradientStop Color="#B0000000" Offset="0.38" />
+                        <GradientStop Color="#20000000" Offset="0.75" />
+                        <GradientStop Color="#00000000" Offset="1" />
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+            <Rectangle>
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#50000000" Offset="0" />
+                        <GradientStop Color="#00000000" Offset="0.25" />
+                        <GradientStop Color="#00000000" Offset="0.6" />
+                        <GradientStop Color="#E0000000" Offset="1" />
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+        </Grid>
         <Image x:Name="FarLayer" Stretch="UniformToFill" Margin="-80" IsHitTestVisible="False" />
         <Image x:Name="NearLayer" Stretch="UniformToFill" Margin="-120" IsHitTestVisible="False" />
         <Grid x:Name="ShadowReceiver" />

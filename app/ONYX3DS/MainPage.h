@@ -21,6 +21,11 @@ private:
     void BuildXmb();
     void StepCategory(int delta);
     void UpdateXmbPanel(const onyx::GameEntry& game);
+    void ShowBackdrop(const onyx::GameEntry& game);
+    void SetBackdropImage(const std::string& path);
+    void HideBackdrop();
+    void ScrollXmbTo(Windows::UI::Xaml::Controls::Button const& tile);
+    bool BoxArtOn() const;
     void FillXmbInfo(const onyx::GameEntry& game, const onyx::GameInfo& info);
     bool Xmb() const;
     Windows::UI::Xaml::Controls::Button MakeTile(const onyx::GameEntry& game, double w, double h);
@@ -50,6 +55,16 @@ private:
     Windows::UI::Xaml::DispatcherTimer info_timer_{nullptr};
     Windows::UI::Xaml::DispatcherTimer xmb_show_timer_{nullptr};
     std::string xmb_shown_;
+    Windows::UI::Xaml::DispatcherTimer backdrop_timer_{nullptr};
+    onyx::GameEntry backdrop_entry_;
+    std::string backdrop_game_;   // the game the backdrop was asked for
+    std::string backdrop_file_;   // the picture currently showing
+    bool backdrop_front_ = false; // which of the two cross-fading layers is on top
+    Windows::UI::Xaml::Controls::Border xmb_cover_{nullptr};
+    Windows::UI::Xaml::Controls::ScrollViewer xmb_scroll_{nullptr};
+    double xmb_stride_ = 132;     // height of one crossbar row, for scrolling
+    bool launching_ = false;
+    bool box_prefetch_started_ = false;
     onyx::GameEntry xmb_pending_;
     int xmb_special_ = 0; // XMB layout: 0 = the home system's games, 1 = recent, 2 = favourites
     int columns_ = 4;

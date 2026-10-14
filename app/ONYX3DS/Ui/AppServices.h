@@ -95,6 +95,11 @@ public:
     // older ones); `done(results, http_status)` on the UI thread.
     // Description, release details and screenshots for the crossbar's hover panel. `done` runs on the UI thread.
     void LoadGameInfo(const GameEntry& game, std::function<void(GameInfo)> done);
+    // Box art already on disk for a game ("" if none). Never touches the network.
+    std::string BoxArtPath(const GameEntry& game);
+    // Downloads box art for every game that lacks it, one at a time in the background.
+    // `done(count)` runs on the UI thread when it finishes, with how many pictures arrived.
+    void PrefetchBoxArt(std::vector<GameEntry> games, std::function<void(int)> done);
     void SearchArtGames(const GameEntry& game,
                         std::function<void(std::vector<SgdbGame>, int)> done);
     // Fetches art for the SteamGridDB game the user picked.
@@ -151,6 +156,9 @@ private:
     std::unique_ptr<GameInfoService> game_info_;
     std::mutex info_mutex_;
     std::set<std::string> info_tried_;
+    std::atomic<bool> box_prefetching_{false};
+    std::mutex box_mutex_;
+    std::map<std::string, std::string> box_seen_; // game key -> box art path ("" = none on disk yet)
     bool art_misses_loaded_ = false;
     void FillMissingArt(std::vector<GameEntry> games, std::function<void(size_t)> done);
     std::optional<GameEntry> selected_;

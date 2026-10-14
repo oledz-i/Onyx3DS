@@ -468,18 +468,56 @@ void AppServices::ScrapeArt(const GameEntry& game, bool overwrite, std::function
 }
 
 void AppServices::LoadGameInfo(const GameEntry& game, std::function<void(GameInfo)> done) {
+    game_info_->SetFetchBoxArt(settings_.qol.box_art);
     RunAsync([this, game, done = std::move(done)] {
         GameInfo info = game_info_->Cached(game);
         if (!info.found) {
+            bool first_try = false;
             {
                 // One online attempt per game per session: offline, hovering must not keep retrying.
                 std::scoped_lock lock(info_mutex_);
-                if (!info_tried_.insert(GameInfoService::Key(game)).second) return;
+                first_try = info_tried_.insert(GameInfoService::Key(game)).second;
             }
-            info = game_info_->Get(game);
+            if (first_try) {
+                info = game_info_->Get(game);
+                std::scoped_lock lock(box_mutex_);
+                box_seen_.erase(GameInfoService::Key(game)); // Get may have downloaded the box
+            }
         }
         RunOnUi([info = std::move(info), done] {
             if (done) done(info);
+        });
+    });
+}
+
+std::string AppServices::BoxArtPath(const GameEntry& game) {
+    // The disk is asked once per game until a download pass finishes: Xbox brokers every file call.
+    const std::string key = GameInfoService::Key(game);
+    {
+        std::scoped_lock lock(box_mutex_);
+        if (const auto it = box_seen_.find(key); it != box_seen_.end()) return it->second;
+    }
+    std::string path = game_info_->CachedBoxArt(game);
+    std::scoped_lock lock(box_mutex_);
+    box_seen_[key] = path;
+    return path;
+}
+
+void AppServices::PrefetchBoxArt(std::vector<GameEntry> games, std::function<void(int)> done) {
+    if (box_prefetching_.exchange(true)) return; // one pass at a time
+    RunAsync([this, games = std::move(games), done = std::move(done)] {
+        int fetched = 0;
+        for (const auto& g : games) {
+            if (!game_info_->CachedBoxArt(g).empty()) continue;
+            if (!game_info_->EnsureBoxArt(g).empty()) ++fetched;
+        }
+        box_prefetching_ = false;
+        {
+            std::scoped_lock lock(box_mutex_);
+            box_seen_.clear();
+        }
+        RunOnUi([fetched, done] {
+            if (done) done(fetched);
         });
     });
 }

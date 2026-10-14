@@ -6,6 +6,7 @@
 // fetched on the player's console, cached on disk, and silently absent when not found.
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <string>
@@ -61,6 +62,8 @@ public:
     std::string EnsureBoxArt(const GameEntry& game);
     // Disk only.
     std::string CachedBoxArt(const GameEntry& game) const;
+    // Whether Get() also downloads the box art (the Box art setting). Off by default.
+    void SetFetchBoxArt(bool on) { fetch_boxart_ = on; }
 
 private:
     std::string InfoPath(const GameEntry& game) const;
@@ -71,6 +74,7 @@ private:
     IFileSystem& fs_;
     std::string dir_;
     std::mutex mutex_;
+    std::atomic<bool> fetch_boxart_{false};
     std::map<std::string, std::vector<std::string>> listings_;
 };
 
