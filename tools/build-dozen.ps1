@@ -15,7 +15,8 @@ $link = "/APPCONTAINER WindowsApp.lib d3d12.lib dxgi.lib"
 # link.exe searches LIB in order, so the store folder must come first.
 $store = Join-Path $env:VCToolsInstallDir "lib\x64\store"
 if (!(Test-Path (Join-Path $store "msvcrt.lib"))) { throw "Store CRT libs not found in $store" }
-$env:LIB = "$store;$env:LIB"
+$desktopLib = $env:LIB
+$env:LIB = "$store;$desktopLib"
 
 # Always (re)configure so option changes reach a cached build directory.
 $reconfigure = @()
@@ -37,6 +38,17 @@ if ($true) {
         "-Dc_args=$uwp", "-Dcpp_args=$uwp",
         "-Dc_link_args=$link", "-Dcpp_link_args=$link"
     )
+    if ($reconfigure.Count -eq 0) {
+        # A fresh configure links and RUNS a small test program. Linked against the app-flavoured
+        # runtime it cannot start on a build machine (VCRUNTIME140_APP.dll is missing, exit code
+        # 0xC0000135), so configure once with the desktop libraries and no UWP link options, then
+        # reconfigure below with the real ones (compiler checks are not repeated).
+        $env:LIB = $desktopLib
+        $first = $mesonArgs | ForEach-Object { if ($_ -like "-Dc_link_args=*" -or $_ -like "-Dcpp_link_args=*") { ($_ -split "=")[0] + "=" } else { $_ } }
+        Invoke-Checked meson @first
+        $env:LIB = "$store;$desktopLib"
+        $reconfigure = @("--reconfigure")
+    }
     Invoke-Checked meson @mesonArgs @reconfigure
 }
 
