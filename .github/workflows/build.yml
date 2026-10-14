@@ -1,4 +1,5 @@
 # OnyxEMU CI. Azahar, Dozen and the app build in parallel so one run shows
+# (azahar2/dozen2 cache keys: the repo was renamed, so the checkout path changed and old CMake/Meson build dirs no longer match.)
 # every stage's errors; build trees are cached even when a job fails, so the
 # next run only recompiles what changed. The package job runs when all pass.
 name: build
@@ -34,8 +35,8 @@ jobs:
           path: |
             deps/azahar
             deps/build/azahar
-          key: azahar-${{ github.run_id }}
-          restore-keys: azahar-
+          key: azahar2-${{ github.run_id }}
+          restore-keys: azahar2-
       - name: Build Azahar (UWP static core)
         run: |
           set -o pipefail
@@ -48,7 +49,7 @@ jobs:
           path: |
             deps/azahar
             deps/build/azahar
-          key: azahar-${{ github.run_id }}
+          key: azahar2-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: azahar-lib
@@ -72,8 +73,8 @@ jobs:
             deps/mesa
             deps/build/mesa
             deps/bin/dxil.dll
-          key: dozen-${{ github.run_id }}
-          restore-keys: dozen-
+          key: dozen2-${{ github.run_id }}
+          restore-keys: dozen2-
       - name: Build Dozen (Vulkan on D3D12, UWP)
         run: |
           set -o pipefail
@@ -87,7 +88,7 @@ jobs:
             deps/mesa
             deps/build/mesa
             deps/bin/dxil.dll
-          key: dozen-${{ github.run_id }}
+          key: dozen2-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: dozen-bin
