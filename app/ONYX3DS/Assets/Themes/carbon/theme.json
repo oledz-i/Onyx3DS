@@ -29,7 +29,7 @@
     "cursor": "cursor.png"
   },
   "audio": {
-    "music": "../../Audio/midnight-onyx.m4a",
+    "music": "../../Audio/carbon.m4a",
     "move": "../../Audio/move.wav",
     "select": "../../Audio/select.wav",
     "back": "../../Audio/back.wav",

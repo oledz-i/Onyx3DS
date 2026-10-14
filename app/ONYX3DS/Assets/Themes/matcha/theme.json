@@ -29,7 +29,7 @@
     "cursor": "cursor.png"
   },
   "audio": {
-    "music": "../../Audio/aero-channel.m4a",
+    "music": "../../Audio/matcha.m4a",
     "move": "../../Audio/move.wav",
     "select": "../../Audio/select.wav",
     "back": "../../Audio/back.wav",
