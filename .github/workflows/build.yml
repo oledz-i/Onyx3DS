@@ -284,7 +284,7 @@ jobs:
           tools/ci-annotate.sh report-launch.txt Launch $lvl
 
   # Publishes a GitHub Release with just what an install needs: the .msix and
-  # its x64 dependency (plus the map file for decoding crash logs). Runs for
+  # its x64 dependency. Runs for
   # a v* tag, or on main when the package version (Package.appxmanifest,
   # e.g. 2.1.0.0 -> v2.1.0) has no release yet and its notes,
   # docs/releases/<tag>.md, are not marked "<!-- draft -->".
@@ -338,7 +338,6 @@ jobs:
           [ -n "$msix" ] || { echo "no package found"; exit 1; }
           cp "$msix" "dist/ONYX3DS-$TAG.msix"
           find pkg -path '*Dependencies/x64/*' -type f -exec cp {} dist/ \;
-          if [ -f pkg/ONYX3DS.map ]; then cp pkg/ONYX3DS.map "dist/ONYX3DS-$TAG.map"; fi
           ls -la dist
       - name: Publish release
         if: steps.tag.outputs.publish == 'true'
@@ -348,14 +347,16 @@ jobs:
         run: |
           notes="docs/releases/$TAG.md"
           [ -f "$notes" ] || notes=/dev/null
-          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "ONYX $TAG" --notes-file "$notes" --latest
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "OnyxEMU $TAG" --notes-file "$notes" --latest
 
   # Keeps each main build's map file on a rolling "dev" pre-release, named by the
   # link timestamp that ONYX writes to onyx.log ("Build stamp"), so offsets in a
   # profile or crash log can be decoded for exactly that build.
   dev-maps:
     needs: verify
-    if: github.ref == 'refs/heads/main'
+    # Off: map files no longer go to the public Releases page (they confused people). They are still
+    # inside the build artifact of each run. Remove the 'false &&' to turn this back on.
+    if: false && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
