@@ -467,6 +467,11 @@ void SettingsPage::BuildEmulation() {
                             Cfg().qol.complete_shaders = on;
                             Save();
                         })));
+    Add(kit::SettingRow("Fast vertex cache", "Keeps 3D model data on the graphics card between frames for speed. Turn it off to test whether it causes glitches such as flicker on characters or noise on models (slower). Takes effect on the next game",
+                        kit::Toggle(Cfg().qol.vertex_cache, [](bool on) {
+                            Cfg().qol.vertex_cache = on;
+                            Save();
+                        })));
     const CoreOptionCatalog catalog = Svc().Catalog();
     for (auto c : CuratedOptions()) {
         // The core also lists OpenGL/auto renderers the Xbox build does not have.

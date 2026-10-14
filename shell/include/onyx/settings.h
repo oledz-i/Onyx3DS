@@ -85,6 +85,8 @@ struct QolSettings {
     // pieces) at the price of a short pause the first time an effect appears; off skips the
     // draw instead and keeps the game moving.
     bool complete_shaders = true;
+    // Keeps game vertex data on the GPU between frames (a big speed-up). Off sends it fresh every draw: slower, but a way to tell if the cache is behind a graphics glitch.
+    bool vertex_cache = true;
     bool pipeline_cache = false; // EXPERIMENTAL: keep compiled GPU pipelines on disk (per game). Creating the D3D12 pipeline library removed the device on Xbox in build 127.
     bool show_battery_style_status = true; // controller battery in the top bar
     bool resume_last_game = false;         // jump straight into the last game on launch

@@ -469,6 +469,7 @@ bool EmulatorSession::Start(const GameEntry& game, const Settings& settings, Con
     }
     if (!renderer_note.empty()) Message(renderer_note);
     _putenv_s("ONYX_COMPLETE_SHADERS", settings.qol.complete_shaders ? "1" : "0");
+    _putenv_s("ONYX_VERTEX_CACHE", settings.qol.vertex_cache ? "1" : "0");
     {
         // Compiled GPU pipelines are kept per game, so a scene seen before loads without the 1-3 s compiles.
         const std::string dir = JoinPath(Paths().cache, "pso");

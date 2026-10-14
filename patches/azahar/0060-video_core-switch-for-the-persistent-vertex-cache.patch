@@ -1,0 +1,89 @@
+From be5e0c69ec9559ddec0476c50ea8046c16d7cfad Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 09:29:50 -0400
+Subject: [PATCH] video_core: ONYX_VERTEX_CACHE=0 switches the persistent
+ vertex cache off for A/B testing
+
+---
+ src/video_core/renderer_opengl/gl_rasterizer.cpp | 5 +++++
+ src/video_core/renderer_vulkan/vk_rasterizer.cpp | 5 +++++
+ src/video_core/vertex_region_cache.h             | 9 +++++++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.cpp b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+index e66b6a6..e762dad 100644
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <cstdlib>
+ #include <chrono>
+ #include <memory>
+ #include "common/alignment.h"
+@@ -138,6 +139,10 @@ RasterizerOpenGL::RasterizerOpenGL(Memory::MemorySystem& memory, Pica::PicaCore&
+             }
+             return Common::ComputeHash64(p, std::min<std::size_t>(ref.GetSize(), size));
+         });
++        if (const char* on = std::getenv("ONYX_VERTEX_CACHE"); on && on[0] == '0') {
++            vertex_cache->SetDisabled(true);
++            LOG_INFO(Render_OpenGL, "Persistent vertex cache is switched off");
++        }
+     }
+     state.Apply();
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 327a339..a5ac2ed 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <cstdlib>
+ #include <chrono>
+ #include "common/alignment.h"
+ #include "common/hash.h"
+@@ -104,6 +105,10 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
+             }
+             return Common::ComputeHash64(p, std::min<std::size_t>(ref.GetSize(), size));
+         });
++        if (const char* on = std::getenv("ONYX_VERTEX_CACHE"); on && on[0] == '0') {
++            vertex_cache->SetDisabled(true);
++            LOG_INFO(Render_Vulkan, "Persistent vertex cache is switched off");
++        }
+     }
+ 
+     // Query uniform buffer alignment.
+diff --git a/src/video_core/vertex_region_cache.h b/src/video_core/vertex_region_cache.h
+index e1b8468..df21b7d 100644
+--- a/src/video_core/vertex_region_cache.h
++++ b/src/video_core/vertex_region_cache.h
+@@ -99,7 +99,15 @@ public:
+         return frame;
+     }
+ 
++    /// ONYX: switch the cache off for A/B testing; every draw then takes the plain upload path.
++    void SetDisabled(bool off) {
++        disabled = off;
++    }
++
+     bool IsVolatile(std::uint64_t key) const {
++        if (disabled) {
++            return true;
++        }
+         const auto it = key_stats.find(key);
+         return it != key_stats.end() && it->second.volatile_until > frame;
+     }
+@@ -442,6 +450,7 @@ private:
+     std::uint32_t count;
+     std::uint32_t size;
+     TrackFn track;
++    bool disabled{false};
+     HashFn hasher;
+     std::uint32_t validate_budget{VALIDATE_BYTES_PER_FRAME};
+     std::uint32_t active{0};
+-- 
+2.43.0
+
