@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <regex>
+#include <set>
 
 #include <nlohmann/json.hpp>
 
@@ -16,6 +17,7 @@ namespace {
 constexpr u64 kRetryMissSeconds = 14ull * 24 * 3600;
 const char* kApi = "https://en.wikipedia.org/w/api.php";
 const char* kThumbs = "https://thumbnails.libretro.com/";
+const char* kGameTdb = "https://art.gametdb.com/";
 constexpr int kInfoVersion = 2; // 2: critics' score and box art
 
 u64 Now() {
@@ -255,31 +257,99 @@ std::vector<std::string> GameInfoService::ParseListing(std::string_view html) {
     return out;
 }
 
-std::string GameInfoService::BestSnapName(const std::vector<std::string>& names, const std::string& title) {
-    const std::string want = Canonical(title);
-    if (want.empty()) return {};
-    auto region_rank = [](const std::string& n) {
-        if (n.find("(USA") != std::string::npos) return 0;
-        if (n.find("(World") != std::string::npos) return 1;
-        if (n.find("(Europe") != std::string::npos) return 2;
-        return 3;
+namespace {
+// Words that differ between a game's own title and the thumbnail project's file names without
+// naming a different game: articles ("Legend of Zelda, The"), "for Nintendo 3DS", "&".
+std::vector<std::string> NameTokens(std::string_view s) {
+    static const std::set<std::string> noise = {"the", "a", "an", "for", "nintendo", "3ds", "edition", "and", "n3ds"};
+    std::string t = ToLower(s);
+    for (size_t p = 0; (p = t.find('&', p)) != std::string::npos;) t.replace(p, 1, " and ");
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&] {
+        if (!cur.empty() && !noise.count(cur)) out.push_back(cur);
+        cur.clear();
     };
+    for (unsigned char c : t) {
+        if (std::isalnum(c)) cur += static_cast<char>(c);
+        else flush();
+    }
+    flush();
+    return out;
+}
+
+int RegionRank(const std::string& n) {
+    if (n.find("(USA") != std::string::npos) return 0;
+    if (n.find("(World") != std::string::npos) return 1;
+    if (n.find("(Europe") != std::string::npos) return 2;
+    return 3; // Japan, Korea, Asia ... still a valid box
+}
+} // namespace
+
+std::string GameInfoService::BestSnapName(const std::vector<std::string>& names, const std::string& title) {
+    return BestSnapNameAny(names, {title});
+}
+
+std::string GameInfoService::BestSnapNameAny(const std::vector<std::string>& names,
+                                             const std::vector<std::string>& titles) {
     std::string best;
     int best_score = -1;
-    for (const auto& n : names) {
-        const std::string c = Canonical(StripTags(n));
-        int score = 0;
-        if (c == want) score = 100;
-        else if (c.size() > want.size() && c.starts_with(want) && c.size() - want.size() <= 6) score = 60;
-        else continue;
-        score -= region_rank(n);
-        if (n.find("(Beta") != std::string::npos || n.find("(Demo") != std::string::npos || n.find("(Proto") != std::string::npos) score -= 20;
-        if (score > best_score) {
-            best_score = score;
-            best = n;
+    for (const std::string& raw : titles) {
+        const std::string title = StripTags(raw);
+        const std::string want = Canonical(title);
+        if (want.empty()) continue;
+        const auto want_tokens = NameTokens(title);
+        const std::set<std::string> want_set(want_tokens.begin(), want_tokens.end());
+        for (const auto& n : names) {
+            const std::string stripped = StripTags(n);
+            const std::string c = Canonical(stripped);
+            int score = 0;
+            if (c == want) score = 100;
+            else if (c.size() > want.size() && c.starts_with(want) && c.size() - want.size() <= 6) score = 60;
+            else if (!want_set.empty()) {
+                // Same words in another order or with extras: "Super Mario Maker for Nintendo 3DS"
+                // against "Super Mario Maker", "Legend of Zelda, The - Ocarina of Time 3D" against
+                // "The Legend of Zelda: Ocarina of Time 3D".
+                const auto cand_tokens = NameTokens(stripped);
+                const std::set<std::string> cand_set(cand_tokens.begin(), cand_tokens.end());
+                if (cand_set.empty()) continue;
+                size_t common = 0;
+                for (const auto& w : want_set) common += cand_set.count(w);
+                const size_t total = want_set.size() + cand_set.size() - common;
+                const double jaccard = static_cast<double>(common) / static_cast<double>(total);
+                const bool one_word = want_set.size() == 1 || cand_set.size() == 1;
+                if (common == 0 || (one_word && common != total)) continue;
+                if (jaccard < 0.6) continue;
+                score = 40 + static_cast<int>(jaccard * 40); // 64..80; below an exact match
+                if (jaccard == 1.0) score = 90;
+            } else {
+                continue;
+            }
+            score -= RegionRank(n);
+            if (n.find("(Beta") != std::string::npos || n.find("(Demo") != std::string::npos ||
+                n.find("(Proto") != std::string::npos)
+                score -= 20;
+            if (score > best_score) {
+                best_score = score;
+                best = n;
+            }
         }
     }
     return best;
+}
+
+std::vector<std::string> GameInfoService::TitleCandidates(const GameEntry& g) {
+    std::vector<std::string> out;
+    auto add = [&out](std::string t) {
+        for (char& c : t)
+            if (c == '\n' || c == '\r') c = ' ';
+        t = Trim(t);
+        if (!t.empty() && std::find(out.begin(), out.end(), t) == out.end()) out.push_back(t);
+    };
+    add(g.DisplayTitle());
+    add(g.title);
+    add(g.long_title);
+    return out;
 }
 
 const char* GameInfoService::LibretroFolder(GameSystem system) {
@@ -361,28 +431,62 @@ std::string GameInfoService::CachedBoxArt(const GameEntry& g) const {
 
 std::string GameInfoService::EnsureBoxArt(const GameEntry& g) {
     if (const std::string have = CachedBoxArt(g); !have.empty()) return have;
-    // A game the thumbnail project has no box for is remembered, so it is not asked about again.
-    const std::string none = JoinPath(dir_, Key(g) + "_box.none");
+    // A game no source has a box for is remembered, so it is not asked about again. (The name
+    // changed with the wider matching so earlier misses are tried again once.)
+    const std::string none = JoinPath(dir_, Key(g) + "_box2.none");
     if (fs_.Exists(none)) return {};
     const auto names = SnapNames(g.system, "Named_Boxarts");
     if (names.empty()) return {}; // offline: try again later
-    const std::string name = BestSnapName(names, g.DisplayTitle());
     fs_.CreateDirs(dir_);
-    if (name.empty()) {
-        fs_.WriteText(none, "none");
-        return {};
-    }
-    const HttpResponse r = http_.Get(std::string(kThumbs) + UrlEncode(LibretroFolder(g.system)) + "/Named_Boxarts/" +
-                                         UrlEncode(name) + ".png",
-                                     {{"User-Agent", "ONYX3DS"}});
-    if (!r.ok() || r.body.size() < 8 || r.body.compare(0, 4, "\x89PNG") != 0) return {};
     const std::string path = JoinPath(dir_, Key(g) + "_box.png");
-    return fs_.WriteText(path, r.body) ? path : std::string{};
+    auto fetch = [&](const std::string& url) {
+        const HttpResponse r = http_.Get(url, {{"User-Agent", "ONYX3DS"}});
+        if (!r.ok() || r.body.size() < 8 || r.body.compare(0, 4, "\x89PNG") != 0) return false;
+        return fs_.WriteText(path, r.body);
+    };
+    const std::string name = BestSnapNameAny(names, TitleCandidates(g));
+    if (!name.empty() && fetch(std::string(kThumbs) + UrlEncode(LibretroFolder(g.system)) + "/Named_Boxarts/" + UrlEncode(name) + ".png"))
+        return path;
+    // Not in the thumbnail project (or under another name): GameTDB keys its covers by the
+    // 4-character game ID on the cartridge, for every region.
+    if (const std::string code = GameTdbId(g); !code.empty()) {
+        for (const char* region : GameTdbRegions(code))
+            for (const char* kind : {"box", "cover"})
+                if (fetch(std::string(kGameTdb) + "3ds" + "/" + kind + "/" + region + "/" + code + ".png"))
+                    return path;
+    }
+    fs_.WriteText(none, "none");
+    return {};
+}
+
+std::string GameInfoService::GameTdbId(const GameEntry& g) {
+    if (IsRetroSystem(g.system)) return {}; // GameTDB's art covers the 3DS
+    std::string c = g.product_code;
+    if (c.size() > 4) c = c.substr(c.size() - 4); // "CTR-P-AJ8E" -> "AJ8E"
+    if (c.size() != 4) return {};
+    for (unsigned char ch : c)
+        if (!std::isalnum(ch)) return {};
+    for (char& ch : c) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return c;
+}
+
+std::vector<const char*> GameInfoService::GameTdbRegions(const std::string& code) {
+    // The last letter of the ID is the region; the game's own region first, then the others.
+    std::vector<const char*> out;
+    switch (code.back()) {
+    case 'E': out = {"US", "EN", "JA"}; break;
+    case 'P': case 'D': case 'F': case 'S': case 'I': case 'H': case 'X': case 'Y': out = {"EN", "FR", "DE", "ES", "IT", "NL", "US"}; break;
+    case 'J': out = {"JA", "US", "EN"}; break;
+    case 'K': out = {"KO", "JA", "US"}; break;
+    case 'W': case 'C': case 'T': out = {"ZHTW", "ZHCN", "JA", "US"}; break;
+    default: out = {"US", "EN", "JA"}; break;
+    }
+    return out;
 }
 
 void GameInfoService::FetchShots(const GameEntry& g, GameInfo& info) {
     const auto names = SnapNames(g.system);
-    const std::string name = BestSnapName(names, g.DisplayTitle());
+    const std::string name = BestSnapNameAny(names, TitleCandidates(g));
     if (name.empty()) return;
     const std::string base = std::string(kThumbs) + UrlEncode(LibretroFolder(g.system)) + "/";
     for (const char* kind : {"Named_Snaps", "Named_Titles"}) {

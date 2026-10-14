@@ -175,7 +175,7 @@ ONYX stands on the work of these projects:
 - [Mesa / Dozen](https://gitlab.freedesktop.org/mesa/mesa): Vulkan on Direct3D 12 (MIT)
 - [rcheevos](https://github.com/RetroAchievements/rcheevos): RetroAchievements client (MIT)
 - [SteamGridDB](https://www.steamgriddb.com): artwork
-- [libretro thumbnails](https://thumbnails.libretro.com): screenshots and box art, fetched on demand. Box art is the property of Nintendo
+- [libretro thumbnails](https://thumbnails.libretro.com) and [GameTDB](https://www.gametdb.com): screenshots and box art, fetched on demand. Box art is the property of Nintendo
 - [Wikipedia](https://www.wikipedia.org): game descriptions and critics' scores (CC BY-SA)
 - [nlohmann/json](https://github.com/nlohmann/json) and [doctest](https://github.com/doctest/doctest) (MIT)
 

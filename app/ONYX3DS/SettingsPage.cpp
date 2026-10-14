@@ -1047,7 +1047,7 @@ void SettingsPage::BuildAbout() {
              "Rounded M+ 1c font by The Rounded M+ Project Authors (SIL Open Font License 1.1)",
              "Cheat database: CTRPF Action Replay codes by the community",
              "Artwork: SteamGridDB community uploads",
-             "Game details: Wikipedia (CC BY-SA); screenshots and box art: libretro thumbnail project; box art (c) Nintendo",
+             "Game details: Wikipedia (CC BY-SA); screenshots and box art: libretro thumbnail project and GameTDB; box art (c) Nintendo",
              "Game Boy Advance core: mGBA (MPL-2.0)",
              "OnyxEMU is GPLv3+. Source: see README on the project's repository."})
         Note(line);

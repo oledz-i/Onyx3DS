@@ -53,6 +53,13 @@ public:
     static std::string ReleaseDate(std::string_view value);
     static std::vector<std::string> ParseListing(std::string_view html);
     static std::string BestSnapName(const std::vector<std::string>& names, const std::string& title);
+    // The best file name for any of several titles (display title, SMDH title, long title).
+    static std::string BestSnapNameAny(const std::vector<std::string>& names, const std::vector<std::string>& titles);
+    static std::vector<std::string> TitleCandidates(const GameEntry& game);
+    // 4-character game ID from the product code ("" for NES or when there is none) and the
+    // GameTDB regions to try for it, the game's own first.
+    static std::string GameTdbId(const GameEntry& game);
+    static std::vector<const char*> GameTdbRegions(const std::string& code);
     static const char* LibretroFolder(GameSystem system);
     static std::string Key(const GameEntry& game);
     // "85/100" style critics' score from an article's review box. Returns 0 when there is none.

@@ -220,6 +220,37 @@ TEST_CASE("Game info: Wikipedia infobox, release date and screenshot names") {
     CHECK(names[1] == "Super Mario 3D Land (USA)");
     CHECK(GameInfoService::BestSnapName(names, "Super Mario 3D Land") == "Super Mario 3D Land (USA)");
     CHECK(GameInfoService::BestSnapName(names, "Zelda").empty());
+
+    // Names that differ from the game's own title: articles moved, "for Nintendo 3DS", extra subtitles,
+    // and games only released in Japan.
+    const std::vector<std::string> real = {
+        "Legend of Zelda, The - Ocarina of Time 3D (USA)", "Legend of Zelda, The - Ocarina of Time 3D (Europe)",
+        "Legend of Zelda, The - Majora's Mask 3D (USA)", "Super Smash Bros. for Nintendo 3DS (USA)",
+        "Super Mario Maker for Nintendo 3DS (USA)", "Super Mario Maker for Nintendo 3DS (Europe)",
+        "Animal Crossing - New Leaf - Welcome amiibo (USA)", "Mario Kart 7 (USA)", "Mario Kart 7 (Japan)",
+        "Phoenix Wright - Ace Attorney - Dual Destinies (USA)", "Gyakuten Saiban 123 Naruhodou Selection (Japan)",
+        "Fire Emblem - Awakening (USA)", "Fire Emblem Fates - Birthright (USA)"};
+    CHECK(GameInfoService::BestSnapName(real, "The Legend of Zelda: Ocarina of Time 3D") == "Legend of Zelda, The - Ocarina of Time 3D (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Super Smash Bros.") == "Super Smash Bros. for Nintendo 3DS (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Super Smash Bros. for Nintendo 3DS") == "Super Smash Bros. for Nintendo 3DS (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Super Mario Maker") == "Super Mario Maker for Nintendo 3DS (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Animal Crossing: New Leaf") == "Animal Crossing - New Leaf - Welcome amiibo (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Fire Emblem Awakening") == "Fire Emblem - Awakening (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Gyakuten Saiban 123 Naruhodou Selection") == "Gyakuten Saiban 123 Naruhodou Selection (Japan)");
+    CHECK(GameInfoService::BestSnapName(real, "Phoenix Wright: Ace Attorney - Dual Destinies") == "Phoenix Wright - Ace Attorney - Dual Destinies (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Mario Kart 7") == "Mario Kart 7 (USA)");
+    CHECK(GameInfoService::BestSnapName(real, "Awakening").empty());            // one word never guesses
+    CHECK(GameInfoService::BestSnapName(real, "Fire Emblem Echoes").empty());    // a different game
+    CHECK(GameInfoService::BestSnapNameAny(real, {"Smash", "Super Smash Bros.\nfor Nintendo 3DS"}) == "Super Smash Bros. for Nintendo 3DS (USA)");
+
+    GameEntry ge;
+    ge.product_code = "CTR-P-AJ8E";
+    CHECK(GameInfoService::GameTdbId(ge) == "AJ8E");
+    CHECK(std::string(GameInfoService::GameTdbRegions("AJ8E")[0]) == "US");
+    ge.product_code = "CTR-P-BPRJ";
+    CHECK(std::string(GameInfoService::GameTdbRegions("BPRJ")[0]) == "JA");
+    ge.product_code = "";
+    CHECK(GameInfoService::GameTdbId(ge).empty());
 }
 
 TEST_CASE("Game info: fetch, cache and remember misses") {
