@@ -25,6 +25,11 @@ struct GameInfo {
     std::string genre;
     std::string source; // article title
     std::vector<std::string> shots; // local picture files: gameplay first, then title screen
+    int score = 0;                  // critics' average out of 100 (0 = none found)
+    std::string score_source;       // where the score came from (Metacritic, GameRankings)
+    std::string boxart;             // local picture file of the box art ("" = none)
+    // The critics' score as stars, in halves: 87 -> 4.5 (0 when there is no score).
+    double Stars() const { return score <= 0 ? 0.0 : static_cast<int>(score / 10.0 + 0.5) / 2.0; }
 };
 
 class GameInfoService {
@@ -49,17 +54,24 @@ public:
     static std::string BestSnapName(const std::vector<std::string>& names, const std::string& title);
     static const char* LibretroFolder(GameSystem system);
     static std::string Key(const GameEntry& game);
+    // "85/100" style critics' score from an article's review box. Returns 0 when there is none.
+    static int ParseScore(std::string_view wikitext, std::string* source = nullptr);
+    // Box art on disk for the game, downloading it if it is not there yet (call off the UI thread).
+    // Returns "" when the thumbnail project has none.
+    std::string EnsureBoxArt(const GameEntry& game);
+    // Disk only.
+    std::string CachedBoxArt(const GameEntry& game) const;
 
 private:
     std::string InfoPath(const GameEntry& game) const;
-    std::vector<std::string> SnapNames(GameSystem system);
+    std::vector<std::string> SnapNames(GameSystem system, const char* kind = "Named_Snaps");
     void FetchShots(const GameEntry& game, GameInfo& info);
 
     IHttpClient& http_;
     IFileSystem& fs_;
     std::string dir_;
     std::mutex mutex_;
-    std::map<int, std::vector<std::string>> listings_;
+    std::map<std::string, std::vector<std::string>> listings_;
 };
 
 } // namespace onyx

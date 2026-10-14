@@ -232,6 +232,8 @@ std::string Settings::ToJson() const {
         {"grid_columns", q.grid_columns},
         {"xmb_layout", q.xmb_layout},
         {"xmb_info", q.xmb_info},
+        {"game_backdrop", q.game_backdrop},
+        {"box_art", q.box_art},
         {"theme_id", q.theme_id},
         {"ui_language", q.ui_language},
     };
@@ -311,6 +313,8 @@ Settings Settings::FromJson(std::string_view text, ConsoleModel model) {
         Take(*q, "grid_columns", o.grid_columns);
         Take(*q, "xmb_layout", o.xmb_layout);
         Take(*q, "xmb_info", o.xmb_info);
+        Take(*q, "game_backdrop", o.game_backdrop);
+        Take(*q, "box_art", o.box_art);
         Take(*q, "theme_id", o.theme_id);
         Take(*q, "ui_language", o.ui_language);
         std::string tmp;

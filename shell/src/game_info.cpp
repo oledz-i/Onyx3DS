@@ -16,6 +16,7 @@ namespace {
 constexpr u64 kRetryMissSeconds = 14ull * 24 * 3600;
 const char* kApi = "https://en.wikipedia.org/w/api.php";
 const char* kThumbs = "https://thumbnails.libretro.com/";
+constexpr int kInfoVersion = 2; // 2: critics' score and box art
 
 u64 Now() {
     return static_cast<u64>(std::chrono::duration_cast<std::chrono::seconds>(
@@ -215,11 +216,34 @@ GameInfo GameInfoService::FromArticle(const Article& a) {
     info.publisher = CleanWikiText(InfoboxField(a.wikitext, "publisher"));
     info.genre = CleanWikiText(InfoboxField(a.wikitext, "genre"));
     info.released = ReleaseDate(InfoboxField(a.wikitext, "released"));
+    info.score = ParseScore(a.wikitext, &info.score_source);
     if (info.summary.size() > 700) {
         const auto cut = info.summary.rfind(". ", 700);
         info.summary = cut != std::string::npos && cut > 200 ? info.summary.substr(0, cut + 1) : info.summary.substr(0, 700) + "...";
     }
     return info;
+}
+
+int GameInfoService::ParseScore(std::string_view wikitext, std::string* source) {
+    const std::string w(wikitext);
+    static const std::regex mc(R"(\|\s*MC\s*=\s*(\d{1,3})\s*/\s*100)", std::regex::icase);
+    static const std::regex gr(R"(\|\s*GR\s*=\s*(\d{1,3})(?:\.\d+)?\s*%)", std::regex::icase);
+    std::smatch m;
+    if (std::regex_search(w, m, mc)) {
+        const int v = std::stoi(m[1].str());
+        if (v >= 1 && v <= 100) {
+            if (source) *source = "Metacritic";
+            return v;
+        }
+    }
+    if (std::regex_search(w, m, gr)) {
+        const int v = std::stoi(m[1].str());
+        if (v >= 1 && v <= 100) {
+            if (source) *source = "GameRankings";
+            return v;
+        }
+    }
+    return 0;
 }
 
 std::vector<std::string> GameInfoService::ParseListing(std::string_view html) {
@@ -281,6 +305,7 @@ GameInfo GameInfoService::Cached(const GameEntry& g) const {
     const std::string text = const_cast<IFileSystem&>(fs_).ReadText(InfoPath(g));
     const json j = json::parse(text, nullptr, false);
     if (!j.is_object()) return info;
+    if (j.value("v", 1) < kInfoVersion) return info; // an older cache lacks scores and box art: fetch again
     info.found = j.value("found", false);
     info.summary = j.value("summary", "");
     info.developer = j.value("developer", "");
@@ -288,6 +313,9 @@ GameInfo GameInfoService::Cached(const GameEntry& g) const {
     info.released = j.value("released", "");
     info.genre = j.value("genre", "");
     info.source = j.value("source", "");
+    info.score = j.value("score", 0);
+    info.score_source = j.value("score_source", "");
+    info.boxart = CachedBoxArt(g);
     if (j.contains("shots"))
         for (const auto& s : j["shots"]) {
             const std::string p = s.get<std::string>();
@@ -296,18 +324,20 @@ GameInfo GameInfoService::Cached(const GameEntry& g) const {
     return info;
 }
 
-std::vector<std::string> GameInfoService::SnapNames(GameSystem system) {
+std::vector<std::string> GameInfoService::SnapNames(GameSystem system, const char* kind) {
+    const std::string cache_key = std::string(kind) + std::to_string(static_cast<int>(system));
     {
         std::scoped_lock lock(mutex_);
-        if (auto it = listings_.find(static_cast<int>(system)); it != listings_.end()) return it->second;
+        if (auto it = listings_.find(cache_key); it != listings_.end()) return it->second;
     }
-    const std::string file = JoinPath(dir_, std::string("snaps_") + std::to_string(static_cast<int>(system)) + ".txt");
+    const std::string file = JoinPath(dir_, (std::string(kind) == "Named_Snaps" ? "snaps_" : "boxarts_") +
+                                                std::to_string(static_cast<int>(system)) + ".txt");
     std::vector<std::string> names;
     const std::string cached = fs_.ReadText(file);
     if (!cached.empty()) {
         names = Split(cached, '\n');
     } else {
-        const HttpResponse r = http_.Get(std::string(kThumbs) + UrlEncode(LibretroFolder(system)) + "/Named_Snaps/",
+        const HttpResponse r = http_.Get(std::string(kThumbs) + UrlEncode(LibretroFolder(system)) + "/" + kind + "/",
                                          {{"User-Agent", "ONYX3DS"}});
         if (r.ok()) {
             names = ParseListing(r.body);
@@ -320,8 +350,34 @@ std::vector<std::string> GameInfoService::SnapNames(GameSystem system) {
         }
     }
     std::scoped_lock lock(mutex_);
-    listings_[static_cast<int>(system)] = names;
+    listings_[cache_key] = names;
     return names;
+}
+
+std::string GameInfoService::CachedBoxArt(const GameEntry& g) const {
+    const std::string path = JoinPath(dir_, Key(g) + "_box.png");
+    return const_cast<IFileSystem&>(fs_).Exists(path) ? path : std::string{};
+}
+
+std::string GameInfoService::EnsureBoxArt(const GameEntry& g) {
+    if (const std::string have = CachedBoxArt(g); !have.empty()) return have;
+    // A game the thumbnail project has no box for is remembered, so it is not asked about again.
+    const std::string none = JoinPath(dir_, Key(g) + "_box.none");
+    if (fs_.Exists(none)) return {};
+    const auto names = SnapNames(g.system, "Named_Boxarts");
+    if (names.empty()) return {}; // offline: try again later
+    const std::string name = BestSnapName(names, g.DisplayTitle());
+    fs_.CreateDirs(dir_);
+    if (name.empty()) {
+        fs_.WriteText(none, "none");
+        return {};
+    }
+    const HttpResponse r = http_.Get(std::string(kThumbs) + UrlEncode(LibretroFolder(g.system)) + "/Named_Boxarts/" +
+                                         UrlEncode(name) + ".png",
+                                     {{"User-Agent", "ONYX3DS"}});
+    if (!r.ok() || r.body.size() < 8 || r.body.compare(0, 4, "\x89PNG") != 0) return {};
+    const std::string path = JoinPath(dir_, Key(g) + "_box.png");
+    return fs_.WriteText(path, r.body) ? path : std::string{};
 }
 
 void GameInfoService::FetchShots(const GameEntry& g, GameInfo& info) {
@@ -342,7 +398,7 @@ GameInfo GameInfoService::Get(const GameEntry& g) {
     {
         const std::string text = fs_.ReadText(InfoPath(g));
         const json j = json::parse(text, nullptr, false);
-        if (j.is_object()) {
+        if (j.is_object() && j.value("v", 1) >= kInfoVersion) {
             const u64 when = j.value("fetched", u64{0});
             const bool miss = !j.value("found", false);
             if (!miss || Now() - when < kRetryMissSeconds) return Cached(g);
@@ -386,9 +442,11 @@ found:
     FetchShots(g, info);
     if (!info.shots.empty()) info.found = true;
     if (!reachable) return info; // offline: do not remember the miss
+    info.boxart = EnsureBoxArt(g);
     json j = {{"found", info.found}, {"summary", info.summary}, {"developer", info.developer},
               {"publisher", info.publisher}, {"released", info.released}, {"genre", info.genre},
-              {"source", info.source}, {"shots", info.shots}, {"fetched", Now()}};
+              {"source", info.source}, {"shots", info.shots}, {"score", info.score},
+              {"score_source", info.score_source}, {"v", kInfoVersion}, {"fetched", Now()}};
     fs_.CreateDirs(dir_);
     fs_.WriteText(InfoPath(g), j.dump());
     return info;

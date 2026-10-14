@@ -103,6 +103,8 @@ struct QolSettings {
     SortMode sort = SortMode::RecentlyPlayed;
     int grid_columns = 4;                  // 3-6 channels per row
     bool xmb_info = true;                  // crossbar: banner, description and screenshots of the focused game
+    bool game_backdrop = true;             // the focused game's screenshot, faded, fills the background
+    bool box_art = false;                  // show each game's box art (downloaded) instead of its banner art
     bool xmb_layout = false;               // home screen as a crossbar of categories (PSP/PS3 style)
     std::string theme_id = "aero-channel";
     std::string ui_language = "en";

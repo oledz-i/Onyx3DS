@@ -235,6 +235,10 @@ TEST_CASE("Game info: fetch, cache and remember misses") {
         {200, R"(<a href="Kart%20Racer%20%28USA%29.png">a</a>)", ""};
     http.routes["https://thumbnails.libretro.com/Nintendo%20-%20Nintendo%203DS/Named_Snaps/Kart%20Racer%20%28USA%29.png"] =
         {200, std::string("\x89PNG\r\n\x1a\n", 8) + "snap", ""};
+    http.routes["https://thumbnails.libretro.com/Nintendo%20-%20Nintendo%203DS/Named_Boxarts/"] =
+        {200, R"(<a href="Kart%20Racer%20%28USA%29.png">a</a>)", ""};
+    http.routes["https://thumbnails.libretro.com/Nintendo%20-%20Nintendo%203DS/Named_Boxarts/Kart%20Racer%20%28USA%29.png"] =
+        {200, std::string("\x89PNG\r\n\x1a\n", 8) + "box", ""};
     GameInfoService svc(http, fs, dir.Str());
     GameEntry g;
     g.title = "Kart Racer";
@@ -244,6 +248,8 @@ TEST_CASE("Game info: fetch, cache and remember misses") {
     CHECK(info.found);
     CHECK(info.publisher == "Nintendo");
     CHECK(info.shots.size() == 1);
+    CHECK_FALSE(info.boxart.empty());
+    CHECK(svc.Cached(g).boxart == info.boxart);
     const size_t calls = http.log.size();
     CHECK(svc.Get(g).found); // from disk
     CHECK(http.log.size() == calls);
@@ -258,4 +264,34 @@ TEST_CASE("Game info: fetch, cache and remember misses") {
     const size_t after = http.log.size();
     CHECK_FALSE(svc.Get(unknown).found);
     CHECK(http.log.size() == after); // the miss is remembered
+
+    // A game with no box in the thumbnail project is asked about once.
+    CHECK(svc.EnsureBoxArt(unknown).empty());
+    const size_t boxes = http.log.size();
+    CHECK(svc.EnsureBoxArt(unknown).empty());
+    CHECK(http.log.size() == boxes);
+}
+
+TEST_CASE("Game info: critics' score and stars") {
+    std::string src;
+    CHECK(GameInfoService::ParseScore("{{Video game reviews\n| MC = 85/100\n| Edge = 8/10\n}}", &src) == 85);
+    CHECK(src == "Metacritic");
+    CHECK(GameInfoService::ParseScore("|MC=94 / 100") == 94);
+    CHECK(GameInfoService::ParseScore("| GR = 87.5%", &src) == 87);
+    CHECK(src == "GameRankings");
+    CHECK(GameInfoService::ParseScore("| MC = (3DS) 85/100") == 0); // unclear platform: no score
+    CHECK(GameInfoService::ParseScore("no reviews here") == 0);
+    CHECK(GameInfoService::ParseScore("| MC = 0/100") == 0);
+    GameInfo i;
+    CHECK(i.Stars() == 0.0);
+    i.score = 85;
+    CHECK(i.Stars() == 4.5);
+    i.score = 94;
+    CHECK(i.Stars() == 4.5);
+    i.score = 96;
+    CHECK(i.Stars() == 5.0);
+    i.score = 60;
+    CHECK(i.Stars() == 3.0);
+    i.score = 42;
+    CHECK(i.Stars() == 2.0);
 }
