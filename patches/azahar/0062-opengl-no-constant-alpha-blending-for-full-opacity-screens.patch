@@ -1,0 +1,39 @@
+From 1a6c0132e6bd257006888b1af58da797aab69f00 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 09:35:40 -0400
+Subject: [PATCH] opengl: no constant-alpha blending for full-opacity screens
+ (black bottom screen on Mesa D3D12)
+
+---
+ src/video_core/renderer_opengl/renderer_opengl.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/video_core/renderer_opengl/renderer_opengl.cpp b/src/video_core/renderer_opengl/renderer_opengl.cpp
+index 454bdd5..0306b13 100644
+--- a/src/video_core/renderer_opengl/renderer_opengl.cpp
++++ b/src/video_core/renderer_opengl/renderer_opengl.cpp
+@@ -740,12 +740,19 @@ void RendererOpenGL::DrawScreens(const Layout::FramebufferLayout& layout, bool f
+     if (!Settings::values.swap_screen.GetValue()) {
+         DrawTopScreen(layout, top_screen);
+         glUniform1i(uniform_layer, 0);
+-        ApplySecondLayerOpacity(layout.bottom_opacity);
++        // ONYX: only blend with a constant alpha when the layer really is see-through. At full
++        // opacity it adds nothing, and Mesa's D3D12 driver took the constant alpha as 0 for
++        // colour, which left the bottom screen black.
++        if (layout.bottom_opacity < 1.0f) {
++            ApplySecondLayerOpacity(layout.bottom_opacity);
++        }
+         DrawBottomScreen(layout, bottom_screen);
+     } else {
+         DrawBottomScreen(layout, bottom_screen);
+         glUniform1i(uniform_layer, 0);
+-        ApplySecondLayerOpacity(layout.top_opacity);
++        if (layout.top_opacity < 1.0f) {
++            ApplySecondLayerOpacity(layout.top_opacity);
++        }
+         DrawTopScreen(layout, top_screen);
+     }
+ 
+-- 
+2.43.0
+

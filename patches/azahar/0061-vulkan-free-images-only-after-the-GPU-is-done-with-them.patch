@@ -1,0 +1,133 @@
+From cda5d05a56cfd5193e49f304c286294c2d263b8d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 09:34:35 -0400
+Subject: [PATCH] vulkan: free images only after the GPU is done with them
+ (placed memory reuse on Dozen)
+
+The background image deleter freed images at once. Commands already recorded could still draw to
+them, and Dozen hands the freed space to a new image: leftover pictures in new surfaces. Free after
+the GPU finished the current tick. Vertex arenas are held one submission longer too.
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         |  2 +-
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 43 +++++++++++++++----
+ 2 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index a5ac2ed..b4dd72a 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -587,7 +587,7 @@ void RasterizerVulkan::SetupVertexArray() {
+                     }
+                 }
+                 if (placed) {
+-                    vertex_cache->Touch(arena, scheduler.CurrentTick());
++                    vertex_cache->Touch(arena, scheduler.CurrentTick() + 1);
+                     pinned_arenas |= 1u << arena;
+                     loader_buffer = vertex_cache_arenas[arena]->Handle();
+                     loader_offset = cache_offset;
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index f09bbeb..9cf06f8 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -2,6 +2,8 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <vector>
++#include <chrono>
+ #include <condition_variable>
+ #include <deque>
+ #include <functional>
+@@ -321,8 +323,13 @@ namespace {
+ class ImageDeleter {
+ public:
+     using Job = std::function<void()>;
+-    void Start() {
++    struct Item {
++        u64 tick;
++        Job job;
++    };
++    void Start(MasterSemaphore* semaphore_) {
+         std::scoped_lock lock{mutex};
++        semaphore = semaphore_;
+         if (thread.joinable()) {
+             return;
+         }
+@@ -341,13 +348,17 @@ public:
+         cv.notify_all();
+         thread.join();
+     }
++    // The image may still be used by commands recorded so far (this submission and earlier ones),
++    // so it is only freed once the GPU has finished the current tick. Freeing at once let Dozen
++    // (D3D12 placed memory) hand the space to a new image while the old one was still being drawn
++    // to: leftover pictures in new surfaces (static in Smash, black models in Mario Kart 7).
+     bool Queue(Job job) {
+         {
+             std::scoped_lock lock{mutex};
+             if (!thread.joinable() || stop) {
+                 return false;
+             }
+-            jobs.push_back(std::move(job));
++            jobs.push_back({semaphore ? semaphore->CurrentTick() : 0, std::move(job)});
+         }
+         cv.notify_one();
+         return true;
+@@ -355,25 +366,41 @@ public:
+ 
+ private:
+     void Run() {
++        using namespace std::chrono_literals;
+         for (;;) {
+-            std::deque<Job> batch;
++            std::vector<Job> batch;
++            bool finishing = false;
+             {
+                 std::unique_lock lock{mutex};
+                 cv.wait(lock, [this] { return stop || !jobs.empty(); });
+-                batch.swap(jobs);
+-                if (batch.empty() && stop) {
+-                    return;
++                finishing = stop;
++                while (!jobs.empty() && (finishing || !semaphore ||
++                                         semaphore->IsFree(jobs.front().tick))) {
++                    batch.push_back(std::move(jobs.front().job));
++                    jobs.pop_front();
++                }
++                if (batch.empty() && !finishing) {
++                    // The GPU has not caught up yet; look again shortly.
++                    cv.wait_for(lock, 2ms, [this] { return stop; });
++                    continue;
+                 }
+             }
+             for (auto& job : batch) {
+                 job();
+             }
++            if (finishing) {
++                std::scoped_lock lock{mutex};
++                if (jobs.empty()) {
++                    return;
++                }
++            }
+         }
+     }
+     std::mutex mutex;
+     std::condition_variable cv;
+-    std::deque<Job> jobs;
++    std::deque<Item> jobs;
+     std::thread thread;
++    MasterSemaphore* semaphore = nullptr;
+     bool stop = false;
+ };
+ ImageDeleter g_image_deleter;
+@@ -433,7 +460,7 @@ TextureRuntime::TextureRuntime(const Instance& instance, Scheduler& scheduler,
+                           vk::BufferUsageFlagBits::eStorageBuffer,
+                       DOWNLOAD_BUFFER_SIZE, BufferType::Download},
+       num_swapchain_images{num_swapchain_images_} {
+-    g_image_deleter.Start();
++    g_image_deleter.Start(scheduler.GetMasterSemaphore());
+ }
+ 
+ TextureRuntime::~TextureRuntime() {
+-- 
+2.43.0
+
